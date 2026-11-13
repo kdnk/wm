@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 //! Utilities for interfacing with OS-specific APIs.
 
 use objc2_core_graphics::CGError;
@@ -6,6 +7,7 @@ pub mod accessibility;
 pub mod app;
 pub mod axuielement;
 pub mod carbon;
+pub mod close_window;
 #[cfg(feature = "custom-event-loop")]
 mod cocoa;
 

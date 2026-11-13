@@ -15,7 +15,7 @@ use std::mem::{MaybeUninit, size_of};
 use std::ptr::{addr_of_mut, copy_nonoverlapping};
 use std::sync::Mutex;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -53,7 +53,7 @@ const TASK_BOOTSTRAP_PORT: c_int = 4;
 pub enum ClientError {
     #[error("Wm's Mach service is not registered")]
     ServiceUnavailable,
-    #[error("Wm request timed out after 10 seconds")]
+    #[error("Wm request timed out")]
     RequestTimedOut,
     #[error("invalid Mach service name")]
     InvalidServiceName,
@@ -117,6 +117,18 @@ impl WmMachClient {
     ) -> Result<WmResponse<T>, ClientError> {
         let request_json = serde_json::to_vec(request).map_err(ClientError::Encode)?;
         let response = unsafe { send_request(&request_json, None)? };
+        parse_json_payload(&response, "response")
+    }
+
+    /// Sends a one-shot request with a shared send/reply deadline and no discovery retries.
+    pub fn send_typed_request_with_timeout<T: DeserializeOwned>(
+        &self,
+        request: &WmRequest,
+        timeout: Duration,
+    ) -> Result<WmResponse<T>, ClientError> {
+        let request_json = serde_json::to_vec(request).map_err(ClientError::Encode)?;
+        let deadline = Instant::now() + timeout.min(Duration::from_millis(u32::MAX.into()));
+        let response = unsafe { send_request_until(&request_json, None, Some(deadline))? }.1;
         parse_json_payload(&response, "response")
     }
 
@@ -594,16 +606,21 @@ unsafe fn lookup_service(name: &CStr) -> Result<MachPort, ClientError> {
     Ok(service_port)
 }
 
-unsafe fn find_service_with_retry() -> Result<ServicePort, ClientError> {
+unsafe fn find_service_once() -> Result<ServicePort, ClientError> {
     #[cfg(test)]
     if let port @ 1.. = tests::SERVICE.get() {
         unsafe { mach_port_mod_refs(mach_task_self(), port, tests::MACH_PORT_RIGHT_SEND, 1) };
         return Ok(ServicePort::new(port));
     }
-    let name = service_name()?;
+    unsafe { lookup_service(&service_name()?).map(ServicePort::new) }
+}
+
+unsafe fn find_service_with_retry() -> Result<ServicePort, ClientError> {
     for attempt in 0..5 {
-        if let Ok(port) = unsafe { lookup_service(&name) } {
-            return Ok(ServicePort::new(port));
+        match unsafe { find_service_once() } {
+            Ok(port) => return Ok(port),
+            Err(ClientError::InvalidServiceName) => return Err(ClientError::InvalidServiceName),
+            Err(_) => {}
         }
         thread::sleep(Duration::from_millis(50 * (1 << attempt)));
     }
@@ -623,11 +640,34 @@ unsafe fn send_request_with_id(
     payload: &[u8],
     persistent: Option<(MachPort, i32)>,
 ) -> Result<(i32, Vec<u8>), ClientError> {
+    unsafe { send_request_until(payload, persistent, None) }
+}
+
+fn request_timeout(deadline: Option<Instant>) -> Result<u32, ClientError> {
+    let Some(deadline) = deadline else {
+        return Ok(REQUEST_TIMEOUT_MS);
+    };
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(ClientError::RequestTimedOut);
+    }
+    Ok(remaining.as_millis().saturating_add(1).min(u32::MAX.into()) as u32)
+}
+
+unsafe fn send_request_until(
+    payload: &[u8],
+    persistent: Option<(MachPort, i32)>,
+    deadline: Option<Instant>,
+) -> Result<(i32, Vec<u8>), ClientError> {
     if payload.len() > MAX_MESSAGE_SIZE {
         return Err(ClientError::MessageTooLarge);
     }
 
-    let service_port = unsafe { find_service_with_retry()? };
+    let service_port = if deadline.is_some() {
+        unsafe { find_service_once()? }
+    } else {
+        unsafe { find_service_with_retry()? }
+    };
     let owned_reply_port;
     let (reply_port, id) = match persistent {
         Some(reply) => reply,
@@ -663,7 +703,7 @@ unsafe fn send_request_with_id(
             send_size,
             0,
             0,
-            REQUEST_TIMEOUT_MS,
+            request_timeout(deadline)?,
             0,
         )
     };
@@ -683,7 +723,7 @@ unsafe fn send_request_with_id(
         });
     }
 
-    unsafe { receive_message(reply_port, Some(REQUEST_TIMEOUT_MS)) }
+    unsafe { receive_message(reply_port, Some(request_timeout(deadline)?)) }
 }
 
 /// Returns the message id (echoed from the request by replies) and payload.
@@ -871,6 +911,39 @@ mod tests {
             ClientError::RequestTimedOut
         ));
         let _ = |window: WindowData| window.externally_managed;
+    }
+
+    #[test]
+    fn bounded_request_times_out_without_poisoning_the_next_reply() {
+        let mut first = true;
+        let (_service, server) = serve(2, move |id, reply, request| {
+            assert!(matches!(request, WmRequest::GetWorkspaces { space_id: None }));
+            if first {
+                first = false;
+            } else {
+                deliver(reply, id, b"{\"data\":true}\0");
+            }
+        });
+        let request = WmRequest::GetWorkspaces { space_id: None };
+        let timed_out: Result<WmResponse<bool>, _> =
+            WmMachClient.send_typed_request_with_timeout(&request, Duration::from_millis(5));
+        assert!(matches!(timed_out, Err(ClientError::RequestTimedOut)));
+        let result: WmResponse<bool> = WmMachClient
+            .send_typed_request_with_timeout(&request, Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(result.into_result(), Ok(true));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn exhausted_deadline_does_not_send_a_request() {
+        let (_service, server) = serve(1, |id, reply, _| deliver(reply, id, OK));
+        let request = WmRequest::GetWorkspaces { space_id: None };
+        let timed_out: Result<WmResponse, _> =
+            WmMachClient.send_typed_request_with_timeout(&request, Duration::ZERO);
+        assert!(matches!(timed_out, Err(ClientError::RequestTimedOut)));
+        WmMachClient.send_request(&request).unwrap();
+        server.join().unwrap();
     }
 
     #[test]

@@ -282,6 +282,30 @@ impl AXUIElement {
         Ok(AXUIElement::new(element))
     }
 
+    pub fn close_window(&self) -> Result<()> {
+        let value = self.copy_required_attribute("AXCloseButton")?;
+        let button = self.downcast::<RawAXUIElement>(value)?;
+        let status = unsafe { button.perform_action(&CFString::from_static_str("AXPress")) };
+        if status == AXError::Success {
+            Ok(())
+        } else {
+            Err(Error::Ax(status))
+        }
+    }
+
+    pub fn window_server_id(&self) -> Result<u32> {
+        let mut id = 0;
+        let status =
+            unsafe { super::skylight::_AXUIElementGetWindow(self.raw_ptr().as_ptr(), &mut id) };
+        if status != AXError::Success {
+            Err(Error::Ax(status))
+        } else if id == 0 {
+            Err(Error::NotFound)
+        } else {
+            Ok(id)
+        }
+    }
+
     /// Whether this element is the "main" window (AXMain).
     ///
     /// This is primarily used by developer tooling and may not be supported by all elements.
