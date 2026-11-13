@@ -86,6 +86,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Close the focused window, including all its tabs, using its native close button
+    CloseWindow,
     /// Manage the launchd service for wm
     Service {
         #[command(subcommand)]
@@ -112,6 +114,14 @@ fn spawn_supervised<F: Future<Output = ()> + 'static>(
 fn main() {
     let entry = wm::ui::settings::timing::start();
     let opt = Cli::parse();
+
+    if matches!(opt.command, Some(Commands::CloseWindow)) {
+        if let Err(error) = wm::sys::close_window::close_focused_window() {
+            eprintln!("wm close-window: {error:#}");
+            process::exit(1);
+        }
+        return;
+    }
 
     if let Some(pid) = opt.recover_windows {
         wm::sys::window_recovery::run(pid).expect("window recovery failed");
