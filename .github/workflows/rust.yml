@@ -2,13 +2,19 @@
 name: rust
 
 on:
+  workflow_call:
+    inputs:
+      source_sha:
+        required: false
+        type: string
+        default: ""
   push:
     branches: ["main"]
   pull_request:
     branches: ["main"]
 
 concurrency:
-  group: rust-ci-${{ github.workflow }}-${{ github.ref }}
+  group: rust-ci-${{ github.workflow }}-${{ inputs.source_sha || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -21,6 +27,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
@@ -31,6 +39,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
@@ -42,6 +52,8 @@ jobs:
           python3 tests/rift-multi-resize-verifier-test.py
       - name: Verify release signing setup
         run: python3 tests/release-signing-setup-test.py
+      - name: Verify release automation
+        run: python3 tests/release-workflow-test.py
       - name: Test exact capture
         run: cargo test --locked --manifest-path cgs/Cargo.toml --lib exact_capture -- --test-threads=1
       # settings_native drives real AppKit windows, which is flaky on headless CI runners.

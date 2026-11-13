@@ -2,32 +2,81 @@
 name: release
 
 on:
-  release:
-    types: [published]
+  push:
+    branches: [main]
+    paths: [Cargo.toml]
   workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing release tag to rebuild and publish (e.g. v0.7.2)
-        required: true
-        type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: wm-release-publish
+  group: wm-release-${{ github.sha }}
   cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
   DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
   ASSET_BASENAME: wm-universal-macos
-  RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
   RELEASE_REPOSITORY: ${{ github.repository }}
 
 jobs:
+  prepare:
+    name: Plan version release
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.plan.outputs.release }}
+      sha: ${{ steps.plan.outputs.sha }}
+      tag: ${{ steps.plan.outputs.tag }}
+      version: ${{ steps.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+      - name: Plan release from the root package version
+        id: plan
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_SHA: ${{ github.sha }}
+          BEFORE: ${{ github.event.before || '0000000000000000000000000000000000000000' }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          python3 scripts/release.py plan --repo "$RELEASE_REPOSITORY" \
+            --sha "$RELEASE_SHA" --before "$BEFORE" --event "$EVENT_NAME" \
+            --output "$GITHUB_OUTPUT"
+
+  verify:
+    needs: prepare
+    if: needs.prepare.outputs.release == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/rust.yml
+    with:
+      source_sha: ${{ needs.prepare.outputs.sha }}
+
+  tag:
+    name: Create immutable version tag
+    needs: [prepare, verify]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - name: Create or verify the version tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          python3 scripts/release.py tag --repo "$RELEASE_REPOSITORY" \
+            --sha "$RELEASE_SHA" --tag "$RELEASE_TAG"
+
   build:
     name: Build (${{ matrix.target }})
+    needs: [prepare, tag]
     runs-on: macos-26
     strategy:
       fail-fast: false
@@ -39,21 +88,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ env.RELEASE_TAG }}
-
-      - name: Verify release tag and package version
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" >/dev/null
-          version=$(awk '/^\[package\]/{package=1; next} /^\[/{package=0}
-            package && /^version[[:space:]]*=/{split($0, value, "\""); print value[2]; exit}' Cargo.toml)
-          test -n "$version"
-          if [[ "${RELEASE_TAG#v}" != "$version" ]]; then
-            echo "Release tag ${RELEASE_TAG} does not match Cargo.toml version ${version}" >&2
-            exit 1
-          fi
+          ref: ${{ needs.prepare.outputs.sha }}
 
       - name: Install Rust and target
         uses: dtolnay/rust-toolchain@stable
@@ -92,7 +127,12 @@ jobs:
 
   publish:
     name: Package and publish universal release
-    needs: build
+    needs: [prepare, build]
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
     runs-on: macos-26
 
     steps:
@@ -100,7 +140,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ env.RELEASE_TAG }}
+          ref: ${{ needs.prepare.outputs.sha }}
 
       - name: Download architecture binaries
         uses: actions/download-artifact@v4
@@ -217,10 +257,11 @@ jobs:
           test "$(dist/wm-cli --version)" = "wm-cli ${VERSION}"
           test -s dist/wm.default.toml
 
-      - name: Replace release asset
+      - name: Create or complete GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ASSET: ${{ steps.pkg.outputs.asset }}
         run: |
           set -euo pipefail
-          gh release upload "$RELEASE_TAG" "$ASSET" --clobber --repo "$RELEASE_REPOSITORY"
+          python3 scripts/release.py publish --repo "$RELEASE_REPOSITORY" \
+            --sha "$RELEASE_SHA" --tag "$RELEASE_TAG" --asset "$ASSET"
