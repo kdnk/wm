@@ -2682,7 +2682,6 @@ mod tests {
 
         use super::super::testing::*;
         use super::super::{Command, Event, ReactorCommand};
-        use crate::common::config::LayoutMode;
         use crate::layout_engine::LayoutCommand;
 
         let (mut apps, mut reactor) = test_context();
@@ -2690,9 +2689,6 @@ mod tests {
         let screens = [rect(0., 0., 1000., 800.), rect(0., -1000., 1000., 800.)];
         reactor.handle_event(space_state_event(screens.to_vec(), spaces.map(Some).to_vec()));
         apps.make_app_and_settle(&mut reactor, 1, make_windows(2));
-        for space in spaces {
-            reactor.space_state.command_space = Some(space);
-        }
         let wid = WindowId::new(1, 1);
         let (sender, mut receiver) = AnimationSender::channel();
         reactor.animation_tx = Some(sender);

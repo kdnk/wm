@@ -118,6 +118,12 @@ impl PersistedLayout {
         positions
             .validate_persisted(&persisted.workspaces)
             .map_err(|error| anyhow::anyhow!("invalid floating positions: {error}"))?;
+        if positions.positioned_windows().next().is_some()
+            || persisted.floating.last_focus().is_some()
+            || !persisted.floating.take_persisted_windows().is_empty()
+        {
+            anyhow::bail!("floating window snapshots are no longer supported");
+        }
         persisted.resolve_locations(positions);
         Ok(persisted)
     }

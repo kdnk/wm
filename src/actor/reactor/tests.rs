@@ -8428,7 +8428,6 @@ fn stack_tabs_follow_focus_without_arranging_windows() {
     }
 }
 
-/// Three offset windows in a stack, with tab and broadcast events captured from the start.
 
 #[test]
 fn topology_revocation_protects_windows_before_queued_invalidation_is_delivered() {

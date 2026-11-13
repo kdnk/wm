@@ -1887,8 +1887,6 @@ impl LayoutEngine {
                     app_rule_outcome,
                 );
 
-                // Workspace policy owns floating behavior without a global flag.
-                // Rule reapplication must not remove these windows from their groups.
 
                 let should_float = self.floating.is_floating(wid);
                 let mut membership_changed = false;

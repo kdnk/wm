@@ -1011,7 +1011,7 @@ pub struct ScrollingLayoutSettings {
     /// Sparse width overrides keyed by display UUID.
     #[serde(default)]
     pub per_display: HashMap<String, ScrollingWidthOverride>,
-    /// Alignment for the focused column (left, center, right).
+    /// Initial placement of a single column (left, center, right).
     #[serde(default)]
     pub alignment: ScrollingAlignment,
     /// Horizontal focus navigation behavior:

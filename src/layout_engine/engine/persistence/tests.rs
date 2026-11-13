@@ -267,14 +267,6 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
         &with_floating(good.clone(), &[], &[(id, w1, negative)]),
         "invalid floating frame",
     );
-    assert_rejected(
-        &LEGACY_V2.replacen("((901),", "((902),", 1),
-        "invalid workspace layouts",
-    );
-    assert_rejected(
-        &LEGACY_V2.replacen("(idx:3,version:1)", "(idx:999999,version:1)", 1),
-        "invalid workspace layouts",
-    );
     let layout = good.find("layout:Some((idx:").unwrap();
     let version = layout + good[layout..].find("version:1").unwrap();
     let mut dangling = good.clone();
@@ -314,11 +306,15 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
         ron::ser::to_string(&win(9, 10)).unwrap(),
         ron::ser::to_string(&evidence(win(9, 10))).unwrap(),
     );
-    let file = with_floating(engine.serialize_to_string(&store), &[w2, w3], &[
-        (first, w3, frame),
-        (second, w3, frame),
-        (first, other, frame),
-    ])
+    for (marked, positions) in [
+        (vec![w2], vec![]),
+        (vec![], vec![(first, w3, frame)]),
+        (vec![w3], vec![(first, w3, frame)]),
+    ] {
+        assert_rejected(&with_floating(engine.serialize_to_string(&store), &marked, &positions),
+            "floating window snapshots are no longer supported");
+    }
+    let file = engine.serialize_to_string(&store)
     .replacen(
         r#""persisted_windows":{"#,
         &format!(r#""persisted_windows":{{{orphan},"#),
@@ -332,11 +328,8 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
         saved[&w2].frame.is_none() && in_any_tree(&loaded, w2),
         "a marker needs a frame"
     );
-    assert_eq!((saved[&w3].frame, saved[&w3].workspace), (Some(frame), first));
-    assert!(
-        !in_any_tree(&loaded, w3),
-        "an agreed floating window holds no slot"
-    );
+    assert_eq!((saved[&w3].frame, saved[&w3].workspace), (None, first));
+    assert!(in_any_tree(&loaded, w3));
     assert!(
         saved[&other].frame.is_none() && in_any_tree(&loaded, other),
         "a frame needs a marker"
@@ -356,9 +349,7 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
     let minimized = win(7, 5);
     open(&mut engine, &mut store, shown, minimized);
     for (id, window) in [(shown, w2), (hidden, w3)] {
-        store.insert_window(window, live_state(window));
-        assert!(engine.workspaces.assign_window_to_workspace(&mut store, a, window, id));
-        engine.floating.add_floating(window);
+        open(&mut engine, &mut store, id, window);
     }
     engine.floating_positions.store(hidden, w3, frame);
     engine.floating_positions.store(shown, w1, frame);
@@ -377,8 +368,8 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
         saved[&w1].frame, None,
         "a tiled window's stale frame stays behind"
     );
-    assert_eq!(saved[&w2].frame, Some(store.window(w2).unwrap().frame_monotonic));
-    assert_eq!((saved[&w3].frame, saved[&w3].workspace), (Some(frame), hidden));
+    assert_eq!(saved[&w2].frame, None);
+    assert_eq!((saved[&w3].frame, saved[&w3].workspace), (None, hidden));
     assert!(
         saved.contains_key(&minimized),
         "a minimized live window retains its canonical saved slot"
