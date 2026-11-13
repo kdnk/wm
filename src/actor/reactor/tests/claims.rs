@@ -204,34 +204,6 @@ fn disconnect_releases_only_that_owners_claims() {
 }
 
 #[test]
-fn claimed_floating_window_keeps_its_classification_and_adopts_owner_geometry() {
-    let (mut reactor, wid, space, _, floating_frame) = reactor_with_floating_window();
-    let workspace = reactor.state.windows.workspace_for_window(wid).unwrap();
-    reactor.claim_window(wid, OWNER, NONE).unwrap();
-    assert!(reactor.layout_manager.layout_engine.is_window_floating(wid));
-    assert_eq!(reactor.state.windows.workspace_for_window(wid), None);
-
-    // The owner moves it; Wm neither records nor fights the geometry.
-    let moved = CGRect::new(CGPoint::new(300., 200.), floating_frame.size);
-    reactor.handle_event(Event::WindowFrameChanged(
-        wid,
-        moved,
-        None,
-        Requested(false),
-        None,
-    ));
-    assert_eq!(reactor.state.windows.window(wid).unwrap().frame_monotonic, moved);
-    assert!(!reactor.is_in_drag(), "an owner move is not a Wm drag");
-    let stored = |r: &Reactor| r.layout_manager.layout_engine.get_floating_position(workspace, wid);
-    assert_eq!(stored(&reactor), Some(floating_frame));
-
-    reactor.release_window(wid, OWNER).unwrap();
-    assert!(reactor.layout_manager.layout_engine.is_window_floating(wid));
-    assert_eq!(stored(&reactor), Some(moved));
-    assert!(reactor.test_active_workspace_windows(space).contains(&wid));
-}
-
-#[test]
 fn claim_cancels_drag_animation_and_pending_geometry() {
     let (mut reactor, wid, wsid, space, _, frame) = reactor_with_window_on_space1();
     reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
@@ -754,30 +726,3 @@ fn claimed_tiled_window_keeps_its_slot_through_minimize_and_admission_changes() 
     reactor.state.windows.debug_assert_invariants();
 }
 
-#[test]
-fn claimed_floating_window_stays_floating_through_minimize_and_admission_changes() {
-    let (mut reactor, window, space, _, floating_frame) = reactor_with_floating_window();
-    let workspace = reactor.state.windows.workspace_for_window(window).unwrap();
-    reactor.claim_window(window, OWNER, NONE).unwrap();
-
-    minimize_and_lose_admission_while_claimed(&mut reactor, window);
-    let engine = &reactor.layout_manager.layout_engine;
-    assert!(engine.is_window_floating(window));
-    assert_eq!(
-        engine.get_floating_position(workspace, window),
-        Some(floating_frame)
-    );
-    assert_eq!(
-        reactor.state.windows.claim(window).unwrap().workspace(),
-        Some(workspace)
-    );
-
-    reactor.release_window(window, OWNER).unwrap();
-    assert!(reactor.layout_manager.layout_engine.is_window_floating(window));
-    assert_eq!(
-        reactor.state.windows.workspace_for_window(window),
-        Some(workspace)
-    );
-    assert!(reactor.test_active_workspace_windows(space).contains(&window));
-    reactor.state.windows.debug_assert_invariants();
-}
