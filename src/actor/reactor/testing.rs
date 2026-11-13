@@ -142,6 +142,11 @@ impl Reactor {
         new: Vec<(WindowId, WindowInfo)>,
         known_visible: Vec<WindowId>,
     ) {
+        for (_, info) in &new {
+            if let Some(id) = info.sys_id {
+                crate::sys::window_server::register_synthetic_window(id);
+            }
+        }
         let token = if let Some(token) = self.window_inventory_manager.in_flight.get(&pid).copied()
         {
             token
@@ -244,6 +249,7 @@ impl Reactor {
                 is_standard: true,
                 is_root: true,
                 is_minimized: false,
+                is_modal: None,
                 is_resizable: true,
                 min_size: None,
                 max_size: None,
@@ -426,11 +432,15 @@ pub fn make_window_info(
     title: &str,
     bundle_id: Option<&str>,
 ) -> WindowInfo {
+    if let Some(id) = sys_id {
+        crate::sys::window_server::register_synthetic_window(id);
+    }
     WindowInfo {
         has_native_tabs: false,
         is_standard: true,
         is_root: true,
         is_minimized: false,
+        is_modal: None,
         is_resizable: true,
         min_size: None,
         max_size: None,
@@ -489,9 +499,10 @@ impl Apps {
             .map(|(idx, mut info)| {
                 // Keep synthetic window-server ids unique across apps so tests
                 // exercise the same invariants as production.
-                info.sys_id = Some(WindowServerId::new(
-                    (pid as u32).saturating_mul(10_000) + idx as u32 + 1,
-                ));
+                let sys_id =
+                    WindowServerId::new((pid as u32).saturating_mul(10_000) + idx as u32 + 1);
+                crate::sys::window_server::register_synthetic_window(sys_id);
+                info.sys_id = Some(sys_id);
                 info
             })
             .collect();
@@ -651,6 +662,21 @@ impl Apps {
                         }
                     });
                 }
+                Request::InspectResize(ticket, _) => {
+                    if ticket.is_current() {
+                        ticket.observed(self.windows.entry(ticket.plan().wid).or_default().frame);
+                        ticket.state().inspected = true;
+                    }
+                }
+                Request::CommitResize(ticket, _) => {
+                    if ticket.is_current() {
+                        let plan = ticket.plan();
+                        let window = self.windows.entry(plan.wid).or_default();
+                        window.last_seen_txid = plan.txid;
+                        window.frame = plan.to;
+                        ticket.accepted(window.frame);
+                    }
+                }
                 Request::BeginWindowAnimation(wid, _) => {
                     self.windows.entry(wid).or_default().animating = true;
                 }
@@ -678,6 +704,106 @@ impl Apps {
 }
 
 pub fn test_context() -> (Apps, Reactor) { (Apps::new(), test_reactor()) }
+
+#[test]
+fn synthetic_app_discovery_uses_frame_space_without_native_queries() {
+    use crate::sys::window_server::native_window_space_query_count;
+
+    let (mut apps, mut reactor) = test_context();
+    let spaces = [SpaceId::new(1), SpaceId::new(2)];
+    reactor.handle_event(space_state_event(
+        vec![
+            CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.)),
+            CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 800.)),
+        ],
+        spaces.map(Some).to_vec(),
+    ));
+    let before = native_window_space_query_count();
+    let window = make_window_info(
+        CGRect::new(CGPoint::new(1200., 100.), CGSize::new(300., 400.)),
+        None,
+        "Second display fixture",
+        None,
+    );
+    apps.make_app_and_settle(&mut reactor, 1, vec![window]);
+    assert_eq!(
+        native_window_space_query_count(),
+        before,
+        "synthetic discovery must not query real native window identities"
+    );
+    assert_eq!(
+        reactor.assigned_space_for_window_id(WindowId::new(1, 1)),
+        Some(spaces[1])
+    );
+}
+
+#[test]
+fn synthetic_app_discovery_preserves_explicit_native_space_evidence() {
+    use crate::sys::window_server::{
+        native_window_space_query_count, set_window_spaces_override, window_spaces,
+    };
+
+    let original = WindowServerId::new(1);
+    let id = WindowServerId::new(10_001);
+    set_window_spaces_override(original, Some(vec![3]));
+    set_window_spaces_override(id, Some(vec![2]));
+    let mut apps = Apps::new();
+    let _events = apps.make_app(1, make_windows(1));
+    let before = native_window_space_query_count();
+    assert_eq!(window_spaces(original), vec![SpaceId::new(3)]);
+    assert_eq!(window_spaces(id), vec![SpaceId::new(2)]);
+    set_window_spaces_override(original, None);
+    set_window_spaces_override(id, None);
+    assert!(window_spaces(original).is_empty());
+    assert!(window_spaces(id).is_empty());
+    assert_eq!(native_window_space_query_count(), before);
+}
+
+#[test]
+fn synthetic_window_created_uses_frame_space_without_native_queries() {
+    use crate::sys::window_server::{native_window_space_query_count, window_spaces};
+
+    let (mut apps, mut reactor) = test_context();
+    let spaces = [SpaceId::new(1), SpaceId::new(2)];
+    reactor.handle_event(space_state_event(
+        vec![
+            CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.)),
+            CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 800.)),
+        ],
+        spaces.map(Some).to_vec(),
+    ));
+    apps.make_app_and_settle(&mut reactor, 1, make_windows(1));
+    let before = native_window_space_query_count();
+    let window = make_window_info(
+        CGRect::new(CGPoint::new(1200., 100.), CGSize::new(300., 400.)),
+        Some(WindowServerId::new(77)),
+        "Created on second display",
+        None,
+    );
+    let id = WindowId::new(1, 2);
+    reactor.handle_event(Event::WindowCreated(id, window, None, None));
+    assert!(window_spaces(WindowServerId::new(77)).is_empty());
+    assert_eq!(native_window_space_query_count(), before);
+    assert_eq!(reactor.assigned_space_for_window_id(id), Some(spaces[1]));
+}
+
+#[test]
+fn synthetic_inventory_registers_replaced_window_server_ids() {
+    use crate::sys::window_server::{native_window_space_query_count, window_spaces};
+
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+    let space = SpaceId::new(1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+    let before = native_window_space_query_count();
+    let mut window = make_window(2);
+    let sys_id = WindowServerId::new(88);
+    window.sys_id = Some(sys_id);
+    let id = WindowId::new(1, 2);
+    reactor.discover_test_windows(1, vec![(id, window)], vec![WindowId::new(1, 1), id]);
+    assert!(window_spaces(sys_id).is_empty());
+    assert_eq!(native_window_space_query_count(), before);
+}
 
 pub fn test_context_with_workspace_count(count: usize) -> (Apps, Reactor) {
     let mut settings = crate::common::config::VirtualWorkspaceSettings::default();

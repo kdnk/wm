@@ -4,7 +4,7 @@ use std::ffi::{CStr, c_int};
 use std::num::NonZeroU32;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cgs::compositor::{G_CONNECTION, main_connection};
 use nix::libc::{RTLD_DEFAULT, dlsym};
@@ -16,7 +16,7 @@ use objc2_core_foundation::{
 };
 use objc2_core_graphics::{
     CGError, CGWindowID, CGWindowListCopyWindowInfo, CGWindowListOption, kCGNullWindowID,
-    kCGWindowLayer, kCGWindowName, kCGWindowOwnerName,
+    kCGWindowLayer, kCGWindowName, kCGWindowOwnerName, kCGWindowOwnerPID,
 };
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -28,7 +28,6 @@ use crate::common::collections::{HashMap, HashSet};
 use crate::sys::app::pid_t;
 use crate::sys::axuielement::{AXUIElement, Error as AxError};
 use crate::sys::cg_ok;
-#[cfg(not(test))]
 use crate::sys::geometry::CGRectExt;
 use crate::sys::mach::mach_get_window_sub_level;
 use crate::sys::process::ProcessSerialNumber;
@@ -42,9 +41,15 @@ thread_local! {
     static TEST_SPACE_WINDOW_LIST_OVERRIDE: RefCell<Option<Vec<u32>>> = const { RefCell::new(None) };
     static TEST_SPACE_WINDOW_LIST_BY_SPACE_OVERRIDE: RefCell<HashMap<u64, Vec<u32>>> = RefCell::new(HashMap::default());
     static TEST_WINDOW_SPACE_QUERY_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TEST_NATIVE_WINDOW_SPACE_QUERY_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static TEST_WINDOW_ORDER_QUERY_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static TEST_WINDOW_SPACES_OVERRIDE: RefCell<HashMap<u32, Vec<u64>>> = RefCell::new(HashMap::default());
+    static TEST_SYNTHETIC_WINDOW_IDS: RefCell<HashSet<u32>> = RefCell::new(HashSet::default());
+    static TEST_WINDOW_SUITABILITY_OVERRIDE: RefCell<HashMap<u32, bool>> = RefCell::new(HashMap::default());
     static TEST_WINDOW_ORDERED_IN_OVERRIDE: RefCell<HashMap<u32, bool>> = RefCell::new(HashMap::default());
+    static TEST_WINDOW_PARENT_OVERRIDE: RefCell<HashMap<u32, Option<WindowServerId>>> = RefCell::new(HashMap::default());
+    static TEST_WINDOW_UNDER_CURSOR_OVERRIDE: std::cell::Cell<Option<Option<WindowServerId>>> = const { std::cell::Cell::new(None) };
+    static TEST_WINDOW_AT_POINT_REGIONS: RefCell<Option<Vec<(CGRect, WindowServerId)>>> = const { RefCell::new(None) };
     static TEST_CURSOR_LOCATION_OVERRIDE: std::cell::Cell<Option<CGPoint>> = const { std::cell::Cell::new(None) };
 }
 
@@ -415,6 +420,12 @@ pub fn mission_control_dock_overlay_visible() -> bool {
 }
 
 pub fn window_parent(id: WindowServerId) -> Option<WindowServerId> {
+    #[cfg(test)]
+    if let Some(parent) =
+        TEST_WINDOW_PARENT_OVERRIDE.with(|values| values.borrow().get(&id.0).copied())
+    {
+        return parent;
+    }
     let query = WindowIterator::new(&[id])?;
     if query.count() == 1 {
         let p = query.advance()?.parent_id();
@@ -422,6 +433,17 @@ pub fn window_parent(id: WindowServerId) -> Option<WindowServerId> {
     } else {
         None
     }
+}
+
+#[cfg(test)]
+pub fn set_window_parent_override(id: WindowServerId, parent: Option<Option<WindowServerId>>) {
+    TEST_WINDOW_PARENT_OVERRIDE.with(|values| {
+        if let Some(parent) = parent {
+            values.borrow_mut().insert(id.0, parent);
+        } else {
+            values.borrow_mut().remove(&id.0);
+        }
+    });
 }
 
 pub fn window_is_sticky(id: WindowServerId) -> bool {
@@ -444,6 +466,13 @@ pub fn window_spaces(id: WindowServerId) -> Vec<crate::sys::screen::SpaceId> {
         return override_spaces.into_iter().map(crate::sys::screen::SpaceId::new).collect();
     }
 
+    #[cfg(test)]
+    if TEST_SYNTHETIC_WINDOW_IDS.with(|ids| ids.borrow().contains(&id.as_u32())) {
+        return Vec::new();
+    }
+
+    #[cfg(test)]
+    TEST_NATIVE_WINDOW_SPACE_QUERY_COUNT.with(|count| count.set(count.get() + 1));
     let cf_windows = cf_array_from_ids(&[id]);
     let space_list_ref = unsafe {
         SLSCopySpacesForWindows(*G_CONNECTION, 0x7, CFRetained::as_ptr(&cf_windows).as_ptr())
@@ -562,6 +591,26 @@ pub fn get_windows(ids: &[WindowServerId]) -> Vec<WindowServerInfo> {
 
 pub fn get_window(id: WindowServerId) -> Option<WindowServerInfo> {
     get_window_with_transient(id).map(|(info, _)| info)
+}
+
+pub(crate) fn window_ids_above(source: WindowServerId) -> Option<Vec<WindowServerId>> {
+    let list = CGWindowListCopyWindowInfo(
+        CGWindowListOption::OptionOnScreenAboveWindow
+            | CGWindowListOption::OptionIncludingWindow
+            | CGWindowListOption::ExcludeDesktopElements,
+        source.as_u32(),
+    )?;
+    let list: CFRetained<CFArray<CFDictionary<CFString, CFType>>> =
+        unsafe { CFRetained::cast_unchecked(list) };
+    let mut ids: Vec<_> = list
+        .iter()
+        .filter_map(|entry| get_num(&entry, unsafe { objc2_core_graphics::kCGWindowNumber }))
+        .filter_map(|id| u32::try_from(id).ok())
+        .map(WindowServerId::new)
+        .collect();
+    let source_index = ids.iter().position(|id| *id == source)?;
+    ids.truncate(source_index);
+    Some(ids)
 }
 
 fn get_num(dict: &CFDictionary<CFString, CFType>, key: &'static CFString) -> Option<i64> {
@@ -709,6 +758,17 @@ fn is_ignored_own_window(wid: u32, cid: i32) -> bool {
 }
 
 pub fn get_window_at_point(mut point: CGPoint) -> Option<WindowServerId> {
+    #[cfg(test)]
+    if let Some(window) = TEST_WINDOW_AT_POINT_REGIONS.with(|regions| {
+        regions.borrow().as_ref().map(|regions| {
+            regions
+                .iter()
+                .find(|(frame, _)| frame.contains(point))
+                .map(|(_, window)| *window)
+        })
+    }) {
+        return window;
+    }
     let (mut wid, mut cid) = find_window_at_point(&mut point, None)?;
     while is_ignored_own_window(wid, cid) {
         (wid, cid) = find_window_at_point(&mut point, Some(wid))?;
@@ -750,6 +810,10 @@ pub fn current_cursor_location() -> Result<CGPoint, CGError> {
 }
 
 pub fn window_under_cursor() -> Option<WindowServerId> {
+    #[cfg(test)]
+    if let Some(window) = TEST_WINDOW_UNDER_CURSOR_OVERRIDE.with(std::cell::Cell::get) {
+        return window;
+    }
     let point = current_cursor_location().ok()?;
     get_window_at_point(point)
 }
@@ -913,7 +977,7 @@ pub fn key_focused_window(space: SpaceId) -> Option<WindowId> {
             .bits(),
     };
     let query = window_query_run(&filter)?;
-    let id = key_window_in_z_order(std::iter::from_fn(|| {
+    let candidate = key_window_in_z_order(std::iter::from_fn(|| {
         let window = query.advance()?;
         Some((
             window.window_id(),
@@ -923,10 +987,37 @@ pub fn key_focused_window(space: SpaceId) -> Option<WindowId> {
         ))
     }))?;
 
-    Some(WindowId {
-        pid: query.pid(),
-        idx: NonZeroU32::new(id)?,
-    })
+    let pid = query.pid();
+    let id = match candidate {
+        (id, Some(parent)) => attachment_focus_target(id, parent, attached_focused_window(pid)),
+        (id, None) => id,
+    };
+    Some(WindowId { pid, idx: NonZeroU32::new(id)? })
+}
+
+fn attachment_focus_target(child: u32, parent: u32, focused: Option<u32>) -> u32 {
+    focused
+        .filter(|&focused| focused == child || focused == parent)
+        .unwrap_or(parent)
+}
+
+fn attached_focused_window(pid: pid_t) -> Option<u32> {
+    let deadline = Instant::now() + Duration::from_millis(25);
+    let app = AXUIElement::application(pid);
+    if unsafe { app.retained().set_messaging_timeout(0.025) } != AXError::Success {
+        return None;
+    }
+    let window = app.focused_window().ok()?;
+    let remaining = deadline.checked_duration_since(Instant::now())?;
+    if remaining.is_zero()
+        || unsafe { window.retained().set_messaging_timeout(remaining.as_secs_f32()) }
+            != AXError::Success
+        || window.process_id().ok()? != pid
+    {
+        return None;
+    }
+    let focused = WindowServerId::try_from(&window).ok()?.as_u32();
+    (Instant::now() < deadline).then_some(focused)
 }
 
 /// AppKit orders the key window, or the sheet/popover attached to it, in front of
@@ -934,13 +1025,15 @@ pub fn key_focused_window(space: SpaceId) -> Option<WindowId> {
 /// Elevated panels, menus and tooltips float regardless of focus.
 fn key_window_in_z_order(
     windows: impl IntoIterator<Item = (u32, u32, SLSWindowTags, i32)>,
-) -> Option<u32> {
+) -> Option<(u32, Option<u32>)> {
     let (id, parent, tags, _) = windows.into_iter().find(|&(_, parent, tags, level)| {
         parent != 0 || level == 0 || tags.contains(SLSWindowTags::DOCUMENT)
     })?;
-    (parent != 0)
-        .then_some(parent)
-        .or_else(|| tags.contains(SLSWindowTags::DOCUMENT).then_some(id))
+    if parent != 0 {
+        Some((id, Some(parent)))
+    } else {
+        tags.contains(SLSWindowTags::DOCUMENT).then_some((id, None))
+    }
 }
 
 /// The space on the display currently holding WindowServer focus.
@@ -964,8 +1057,30 @@ pub fn set_space_window_list_for_space_override(space: u64, ids: Option<Vec<u32>
 }
 
 #[cfg(test)]
+pub fn set_window_under_cursor_override(window: Option<Option<WindowServerId>>) {
+    TEST_WINDOW_UNDER_CURSOR_OVERRIDE.with(|value| value.set(window));
+}
+
+#[cfg(test)]
 pub fn set_cursor_location_override(point: Option<CGPoint>) {
     TEST_CURSOR_LOCATION_OVERRIDE.with(|location| location.set(point));
+}
+
+#[cfg(test)]
+pub fn set_window_at_point_regions(regions: Option<Vec<(CGRect, WindowServerId)>>) {
+    TEST_WINDOW_AT_POINT_REGIONS.with(|value| *value.borrow_mut() = regions);
+}
+
+#[cfg(test)]
+pub fn native_window_space_query_count() -> usize {
+    TEST_NATIVE_WINDOW_SPACE_QUERY_COUNT.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub fn register_synthetic_window(id: WindowServerId) {
+    TEST_SYNTHETIC_WINDOW_IDS.with(|ids| {
+        ids.borrow_mut().insert(id.as_u32());
+    });
 }
 
 #[cfg(test)]
@@ -992,7 +1107,26 @@ pub fn set_window_ordered_in_override(id: WindowServerId, ordered: Option<bool>)
     });
 }
 
+#[cfg(test)]
+pub fn set_window_suitability_override(id: WindowServerId, suitable: Option<bool>) {
+    TEST_WINDOW_SUITABILITY_OVERRIDE.with(|values| {
+        let mut values = values.borrow_mut();
+        if let Some(suitable) = suitable {
+            values.insert(id.as_u32(), suitable);
+        } else {
+            values.remove(&id.as_u32());
+        }
+    });
+}
+
 pub fn app_window_suitability(id: WindowServerId) -> Option<bool> {
+    #[cfg(test)]
+    if let Some(suitable) =
+        TEST_WINDOW_SUITABILITY_OVERRIDE.with(|values| values.borrow().get(&id.as_u32()).copied())
+    {
+        return Some(suitable);
+    }
+
     let query = WindowIterator::new(&[id])?;
 
     if query.count() > 0 && query.advance().is_some() {
@@ -1011,27 +1145,88 @@ pub fn space_is_fullscreen(sid: u64) -> bool { unsafe { SLSSpaceGetType(*G_CONNE
 
 // credit: https://github.com/Hammerspoon/hammerspoon/issues/370#issuecomment-545545468
 pub fn make_key_window(pid: pid_t, wsid: WindowServerId) -> Result<(), CGError> {
-    #[allow(non_upper_case_globals)]
-    const kCPSUserGenerated: u32 = 0x200;
-
-    let mut event1 = [0u8; 0x100];
-    event1[0x04] = 0xf8;
-    event1[0x08] = 0x01;
-    event1[0x3a] = 0x10;
-    event1[0x3c..0x40].copy_from_slice(&wsid.0.to_le_bytes());
-    event1[0x20..0x30].fill(0xff);
-
-    let mut event2 = event1;
-    event2[0x08] = 0x02;
-
     let psn = ProcessSerialNumber::for_pid(pid)?;
+    let preserves_attached_child = has_ordered_attached_child(pid, wsid);
+    tracing::debug!(
+        pid,
+        target = wsid.as_u32(),
+        skip_focus_events = preserves_attached_child,
+        "Selected make-key activation path"
+    );
+    dispatch_key_window_activation(
+        wsid,
+        preserves_attached_child,
+        || cg_ok(unsafe { _SLPSSetFrontProcessWithOptions(&psn, wsid.0, 0x200) }),
+        |event| cg_ok(unsafe { SLPSPostEventRecordTo(&psn, event.as_ptr()) }),
+    )
+}
 
-    unsafe {
-        cg_ok(_SLPSSetFrontProcessWithOptions(&psn, wsid.0, kCPSUserGenerated))?;
-        cg_ok(SLPSPostEventRecordTo(&psn, event1.as_ptr()))?;
-        cg_ok(SLPSPostEventRecordTo(&psn, event2.as_ptr()))?;
+fn has_ordered_attached_child(pid: pid_t, target: WindowServerId) -> bool {
+    let ids: Vec<_> = get_windows_raw::<CFDictionary<CFString, CFType>>(
+        CGWindowListOption::OptionAll,
+        kCGNullWindowID,
+    )
+    .iter()
+    .filter(|entry| get_num(entry, unsafe { kCGWindowOwnerPID }) == Some(i64::from(pid)))
+    .filter_map(|entry| get_num(&entry, unsafe { objc2_core_graphics::kCGWindowNumber }))
+    .filter_map(|id| u32::try_from(id).ok())
+    .map(WindowServerId::new)
+    .collect();
+    let Some(query) = WindowIterator::new(&ids) else {
+        return false;
+    };
+    is_parent_of_ordered_attachment(
+        target,
+        std::iter::from_fn(|| {
+            while query.advance().is_some() {
+                if query.pid() != pid {
+                    continue;
+                }
+                let id = WindowServerId::new(query.window_id());
+                let parent = query.parent_id();
+                return Some((
+                    parent,
+                    SLSWindowTags::from_bits_retain(query.tags()),
+                    parent != 0 && window_is_ordered_in(id),
+                ));
+            }
+            None
+        }),
+    )
+}
+
+fn is_parent_of_ordered_attachment(
+    target: WindowServerId,
+    windows: impl IntoIterator<Item = (u32, SLSWindowTags, bool)>,
+) -> bool {
+    windows.into_iter().any(|(parent, tags, ordered)| {
+        parent != 0
+            && parent == target.as_u32()
+            && tags.contains(SLSWindowTags::ATTACHED)
+            && ordered
+    })
+}
+
+fn dispatch_key_window_activation(
+    target: WindowServerId,
+    preserves_attached_child: bool,
+    activate: impl FnOnce() -> Result<(), CGError>,
+    mut post: impl FnMut(&[u8; 0x100]) -> Result<(), CGError>,
+) -> Result<(), CGError> {
+    activate()?;
+    if preserves_attached_child {
+        // Focus records sent to a parent dismiss its attached popovers.
+        return Ok(());
     }
-    Ok(())
+    let mut event = [0u8; 0x100];
+    event[0x04] = 0xf8;
+    event[0x08] = 0x01;
+    event[0x3a] = 0x10;
+    event[0x3c..0x40].copy_from_slice(&target.0.to_le_bytes());
+    event[0x20..0x30].fill(0xff);
+    post(&event)?;
+    event[0x08] = 0x02;
+    post(&event)
 }
 
 pub fn allow_hide_mouse() -> Result<(), CGError> {
@@ -1087,14 +1282,65 @@ mod tests {
     }
 
     #[test]
+    fn managed_attached_window_focus_keeps_actual_child_or_parent() {
+        for (focused, expected) in [(Some(3), 3), (Some(1), 1), (Some(2), 1), (None, 1)] {
+            assert_eq!(super::attachment_focus_target(3, 1, focused), expected);
+        }
+    }
+
+    #[test]
+    fn managed_attached_window_activation_omits_dismissive_focus_events() {
+        let child = WindowServerId::new(3);
+        let parent = WindowServerId::new(1);
+        let unrelated = WindowServerId::new(2);
+        let tags = SLSWindowTags::ATTACHED;
+        for (target, windows, expected_events) in [
+            (child, vec![(1, tags, true)], 2),
+            (parent, vec![(1, tags, true)], 0),
+            (unrelated, vec![(1, tags, true)], 2),
+            (parent, vec![(1, tags, false)], 2),
+            (parent, vec![], 2),
+            (parent, vec![(1, SLSWindowTags::empty(), true)], 2),
+        ] {
+            let calls = std::cell::RefCell::new(Vec::new());
+            super::dispatch_key_window_activation(
+                target,
+                super::is_parent_of_ordered_attachment(target, windows),
+                || {
+                    calls.borrow_mut().push(("activate", 0));
+                    Ok(())
+                },
+                |event| {
+                    assert_eq!(
+                        u32::from_le_bytes(event[0x3c..0x40].try_into().unwrap()),
+                        target.0
+                    );
+                    calls.borrow_mut().push(("post", event[0x08]));
+                    Ok(())
+                },
+            )
+            .unwrap();
+            let calls = calls.into_inner();
+            assert_eq!(calls[0], ("activate", 0));
+            assert_eq!(calls.len(), 1 + expected_events);
+            if expected_events == 2 {
+                assert_eq!(&calls[1..], &[("post", 1), ("post", 2)]);
+            }
+        }
+    }
+
+    #[test]
     fn key_window_resolves_front_window_without_substituting_a_sibling() {
         let (doc, none) = (SLSWindowTags::DOCUMENT, SLSWindowTags::empty());
         let popup = SLSWindowTags::FLOATING | SLSWindowTags::ATTACHED;
         let cases: [(&[_], _); 5] = [
-            (&[(2, 0, doc, 0), (1, 0, doc, 0)], Some(2)),
+            (&[(2, 0, doc, 0), (1, 0, doc, 0)], Some((2, None))),
             // Brave permission bubble attached to 1 while sibling 2 is above 1.
-            (&[(3, 1, popup, 0), (2, 0, doc, 0), (1, 0, doc, 0)], Some(1)),
-            (&[(3, 0, none, 3), (1, 0, doc, 0)], Some(1)),
+            (
+                &[(3, 1, popup, 0), (2, 0, doc, 0), (1, 0, doc, 0)],
+                Some((3, Some(1))),
+            ),
+            (&[(3, 0, none, 3), (1, 0, doc, 0)], Some((1, None))),
             (&[(3, 0, popup, 0), (2, 0, doc, 0)], None),
             (&[(3, 0, none, 101)], None),
         ];

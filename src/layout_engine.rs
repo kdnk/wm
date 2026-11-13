@@ -13,6 +13,27 @@ pub use engine::{
 pub(crate) use floating::FloatingManager;
 pub use graph::{Direction, LayoutKind, Orientation, ResizeOrientation};
 
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+pub struct ColumnId(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnPlacement {
+    Before,
+    After,
+}
+
+#[derive(Debug, Clone)]
+pub struct ColumnReorderRequest {
+    pub space: crate::sys::screen::SpaceId,
+    pub workspace: VirtualWorkspaceId,
+    pub source: ColumnId,
+    pub target: ColumnId,
+    pub placement: ColumnPlacement,
+    pub source_members: Vec<crate::actor::app::WindowId>,
+    pub target_members: Vec<crate::actor::app::WindowId>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowDropAction {
     Swap,

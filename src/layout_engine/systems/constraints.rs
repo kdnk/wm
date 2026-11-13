@@ -171,34 +171,43 @@ pub(crate) fn solve_axis_lengths(items: &[AxisConstraints], usable: f64) -> Vec<
             total_weight
         };
 
-        let mut clamped = Vec::new();
+        let mut projected = Vec::with_capacity(growable.len());
+        let mut lower_bounds = Vec::new();
+        let mut upper_bounds = Vec::new();
         for &idx in &growable {
             let weight = if use_equal_weights { 1.0 } else { weights[idx] };
             let proposed = remaining * weight / divisor;
             let max = maxs[idx].map(|value| value.max(mins[idx]));
-            if proposed + f64::EPSILON < mins[idx] {
-                lengths[idx] = mins[idx].min(remaining);
-                clamped.push(idx);
-            } else if let Some(max) = max
-                && proposed > max + f64::EPSILON
-            {
-                lengths[idx] = max.min(remaining);
-                clamped.push(idx);
+            let bounded = proposed.max(mins[idx]);
+            projected.push((idx, max.map_or(bounded, |max| bounded.min(max))));
+            if proposed < mins[idx] {
+                lower_bounds.push((idx, mins[idx]));
+            } else if let Some(max) = max.filter(|&max| proposed > max) {
+                upper_bounds.push((idx, max));
             }
         }
 
-        if clamped.is_empty() {
-            for &idx in &growable {
-                let weight = if use_equal_weights { 1.0 } else { weights[idx] };
-                lengths[idx] = remaining * weight / divisor;
+        let projected_sum: f64 = projected.iter().map(|&(_, length)| length).sum();
+        if (lower_bounds.is_empty() && upper_bounds.is_empty()) || projected_sum == remaining {
+            for (idx, length) in projected {
+                lengths[idx] = length;
             }
             remaining = 0.0;
             break;
         }
 
-        let clamped_sum: f64 = clamped.iter().map(|&idx| lengths[idx]).sum();
+        let clamped =
+            if upper_bounds.is_empty() || (!lower_bounds.is_empty() && projected_sum > remaining) {
+                lower_bounds
+            } else {
+                upper_bounds
+            };
+        let clamped_sum: f64 = clamped.iter().map(|&(_, length)| length).sum();
+        for &(idx, length) in &clamped {
+            lengths[idx] = length;
+        }
         remaining = (remaining - clamped_sum).max(0.0);
-        growable.retain(|idx| !clamped.contains(idx));
+        growable.retain(|idx| !clamped.iter().any(|&(bound_idx, _)| bound_idx == *idx));
     }
 
     if remaining <= f64::EPSILON {
@@ -217,6 +226,98 @@ pub(crate) fn solve_axis_lengths(items: &[AxisConstraints], usable: f64) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::{AxisConstraints, solve_axis_lengths};
+
+    #[test]
+    fn axis_constraints_mixed_bounds_redistribute_without_gaps_or_overflow() {
+        for (mins, maxs, weights, usable, expected) in [
+            (
+                [80.0, 0.0, 0.0],
+                [None, Some(10.0), None],
+                [1.0, 9.0, 0.0],
+                100.0,
+                [90.0, 10.0, 0.0],
+            ),
+            (
+                [600.0, 0.0, 200.0],
+                [None, Some(600.0), None],
+                [1.0, 9.0, 1.0],
+                1000.0,
+                [600.0, 200.0, 200.0],
+            ),
+            (
+                [40.0, 0.0, 0.0],
+                [None, Some(10.0), None],
+                [1.0, 9.0, 1.0],
+                100.0,
+                [45.0, 10.0, 45.0],
+            ),
+            (
+                [0.0, 20.0, 0.0],
+                [Some(10.0), None, None],
+                [9.0, 0.0, 0.0],
+                100.0,
+                [10.0, 45.0, 45.0],
+            ),
+        ] {
+            let items: Vec<_> = (0..3)
+                .map(|idx| AxisConstraints {
+                    min: mins[idx],
+                    max: maxs[idx],
+                    weight: weights[idx],
+                    can_grow: true,
+                    ..Default::default()
+                })
+                .collect();
+            let solved = solve_axis_lengths(&items, usable);
+            for (actual, expected) in solved.iter().zip(expected) {
+                assert!((actual - expected).abs() < 0.001, "{items:?}: {solved:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn axis_constraints_feasible_bounds_preserve_space_for_all_rows() {
+        let options: Vec<_> = [0.0, 20.0, 60.0]
+            .into_iter()
+            .flat_map(|min| {
+                [None, Some(30.0), Some(80.0)]
+                    .into_iter()
+                    .filter(move |max| max.is_none_or(|max| max >= min))
+                    .flat_map(move |max| {
+                        [0.0, 1.0, 9.0].into_iter().map(move |weight| AxisConstraints {
+                            min,
+                            max,
+                            weight,
+                            can_grow: true,
+                            ..Default::default()
+                        })
+                    })
+            })
+            .collect();
+        for &a in &options {
+            for &b in &options {
+                for &c in &options {
+                    let items = [a, b, c];
+                    if items.iter().map(|item| item.min).sum::<f64>() > 100.0 {
+                        continue;
+                    }
+                    let solved = solve_axis_lengths(&items, 100.0);
+                    let capacity = items.iter().map(|item| item.max.unwrap_or(100.0)).sum::<f64>();
+                    assert!(
+                        (solved.iter().sum::<f64>() - capacity.min(100.0)).abs() < 0.001,
+                        "{items:?}: {solved:?}"
+                    );
+                    for (item, length) in items.iter().zip(solved) {
+                        assert!(length + 0.001 >= item.min, "{items:?}: {length}");
+                        assert!(
+                            length <= item.max.unwrap_or(100.0) + 0.001,
+                            "{items:?}: {length}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn scales_non_fixed_minima_after_reserving_fixed_segments() {

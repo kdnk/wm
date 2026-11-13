@@ -11,10 +11,11 @@ use crate::actor::app::{AppThreadHandle, FrameMode, FrameSource, Request, Window
 use crate::actor::gesture::{Context, Control};
 use crate::actor::reactor::Reactor;
 use crate::common::collections::{HashMap, HashSet};
-use crate::layout_engine::systems::scrolling::{
-    CameraSpring, PresentedViewport, ViewportPresentation,
-};
+use crate::layout_engine::systems::scrolling::{PresentedViewport, ViewportPresentation};
 use crate::layout_engine::{LayoutId, LayoutSystem, LayoutSystemKind, VirtualWorkspaceId};
+use crate::model::live_resize::{
+    Client as ResizeClient, Phase as ResizePhase, Plan as ResizePlan, Ticket as ResizeTicket,
+};
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::display_link::DisplayLink;
 use crate::sys::geometry::{Round, SameAs};
@@ -40,6 +41,10 @@ impl AnimationSender {
         )
     }
 
+    pub(crate) fn set_resize_client(&self, resize: Option<ResizeClient>) {
+        self.control.lock().resize = resize;
+    }
+
     pub fn send(&self, message: Message) -> Result<(), crossbeam_channel::SendError<Message>> {
         self.tx.send(message)
     }
@@ -51,7 +56,9 @@ impl AnimationSender {
             .filter_map(|wid| {
                 let (handle, frame) = control.frames.remove(wid)?;
                 handle.cancel_window_animation(*wid);
-                Some((*wid, frame))
+                let native =
+                    control.resize.as_ref().and_then(|resize| resize.cancel(*wid)).unwrap_or(frame);
+                Some((*wid, native))
             })
             .collect();
         control.cancelled.extend(windows.iter().copied());
@@ -64,10 +71,14 @@ impl AnimationSender {
 struct PresenterControl {
     frames: HashMap<WindowId, (AppThreadHandle, CGRect)>,
     cancelled: HashSet<WindowId>,
+    resize: Option<ResizeClient>,
 }
 impl PresenterControl {
     fn frame(&self, wid: WindowId, fallback: CGRect) -> CGRect {
-        self.frames.get(&wid).map_or(fallback, |(_, frame)| *frame)
+        self.resize
+            .as_ref()
+            .and_then(|resize| resize.visual(wid))
+            .unwrap_or_else(|| self.frames.get(&wid).map_or(fallback, |(_, frame)| *frame))
     }
 }
 
@@ -90,6 +101,7 @@ pub enum Message {
 pub struct AnimationManager {
     motions: Vec<Motion>,
     frames: FrameBatch,
+    resize: Option<ResizeClient>,
 }
 
 /// Display scheduling, cancellation and retirement are shared by both motion
@@ -187,8 +199,9 @@ pub(super) struct PresentedCamera {
 pub struct CameraAnimation {
     pub(super) presentation: ViewportPresentation,
     windows: Vec<PresentedWindow>,
-    // The scale converts normalized spring tolerance to the largest pixel offset.
-    movement: Option<(CameraSpring, f64)>,
+    geometry_started: Instant,
+    geometry_progress: f64,
+    duration: Duration,
     pub(super) gesture: Option<(Context, Control, f64, Duration)>,
     pub(super) active: bool,
     identity: CameraIdentity,
@@ -212,53 +225,60 @@ struct PresentedWindow {
     from: CGRect,
     to: CGRect,
     frame: CGRect,
-    move_from: CGPoint,
+    motion: Option<FrameSpring>,
+    velocity: FrameVelocity,
     txid: TransactionId,
     fixed: bool,
     leased: bool,
     announced: bool,
+    proxy: Option<ProxyPresentation>,
+}
+
+#[derive(Clone, Debug)]
+struct ProxyPresentation {
+    ticket: ResizeTicket,
+    spring: FrameSpring,
 }
 
 #[derive(Clone, Copy)]
 enum Sample<'a> {
     Transition {
         progress: f64,
-        eased: f64,
-        set_size: bool,
+        duration: Duration,
     },
     Viewport {
         presentation: &'a ViewportPresentation,
         offset: f64,
         scale: f64,
         bound: Option<super::managers::ScrollingDisplayBounds>,
-        movement: f64,
+        progress: f64,
+        duration: Duration,
+        camera_velocity: f64,
     },
 }
 
 impl PresentedWindow {
     fn begin(&mut self) {
-        // Reconcile size at the semantic boundary. Subsequent scrolling samples
-        // move the accepted AX size without reading or resizing on display ticks.
-        if self.handle.constrains_scrolling() && !self.from.size.same_as(self.to.size) {
-            let _ = self.handle.send(Request::set_window_frame(
-                self.wid,
-                CGRect::new(self.from.origin, self.to.size),
-                self.txid,
-                true,
-            ));
-        }
         if !std::mem::replace(&mut self.leased, true) {
             let _ = self.handle.send(Request::BeginWindowAnimation(self.wid, Default::default()));
         }
     }
 
     fn end(&mut self) {
+        if let Some(proxy) = &self.proxy {
+            proxy.ticket.retire();
+        }
         if std::mem::replace(&mut self.leased, false) {
             let _ = self.handle.send(Request::EndWindowAnimation(self.wid, Default::default()));
         }
     }
 
     fn cancel(&mut self, store: Option<&WindowTxStore>) {
+        if let Some(proxy) = self.proxy.take() {
+            proxy.ticket.revoke();
+            proxy.ticket.wake();
+            proxy.ticket.retire();
+        }
         self.leased = false;
         self.handle.cancel_window_animation(self.wid);
         if let Some(store) = store
@@ -268,42 +288,142 @@ impl PresentedWindow {
         }
     }
 
-    fn sample(&mut self, sample: Sample<'_>) -> Option<Frame> {
-        let (frame, set_size, source, force) = match sample {
-            Sample::Transition { progress, eased, set_size } => {
-                let mut frame = interpolate_frame(self.from, self.to, eased);
-                frame.size = if progress >= 0.5 {
-                    self.to.size
+    fn proxy_pending(&self) -> bool {
+        self.proxy.as_ref().is_some_and(|proxy| {
+            !matches!(
+                proxy.ticket.state().phase,
+                ResizePhase::Retired | ResizePhase::Fallback
+            )
+        })
+    }
+
+    fn sample_proxy(&mut self, now: Instant, phase: Option<ResizePhase>) -> bool {
+        let Some(proxy) = &mut self.proxy else { return false };
+        let phase = phase.unwrap_or_else(|| proxy.ticket.phase_at(proxy.ticket.started()));
+        match phase {
+            ResizePhase::Preparing | ResizePhase::AwaitingNative | ResizePhase::AwaitingTarget => {}
+            ResizePhase::Presenting(started) => {
+                let duration = proxy.ticket.plan().duration;
+                let progress = if duration.is_zero() {
+                    1.
                 } else {
-                    self.from.size
+                    (now.saturating_duration_since(started).as_secs_f64() / duration.as_secs_f64())
+                        .clamp(0., 1.)
                 };
-                let frame = contain_transition_frame(self.from, self.to, frame);
-                (frame, set_size, FrameSource::Ordinary, set_size)
+                let accepted = proxy.ticket.state().accepted.unwrap_or(proxy.ticket.plan().to);
+                proxy.spring.to = accepted;
+                let (frame, mut velocity) = proxy.spring.sample(progress, duration);
+                self.frame = positive_size(frame, &mut velocity);
+                self.velocity = velocity;
+                let mut state = proxy.ticket.state();
+                state.visual = self.frame;
+                if progress == 1. {
+                    state.phase = ResizePhase::Finishing;
+                    self.motion = None;
+                }
+                drop(state);
+            }
+            ResizePhase::Finishing => {}
+            ResizePhase::Retired => {
+                if proxy.ticket.state().accepted.is_some() {
+                    self.frame = proxy.ticket.native();
+                }
+                self.motion = None;
+                self.velocity = FrameVelocity::default();
+            }
+            ResizePhase::Fallback => {
+                if proxy.ticket.state().accepted.is_some() {
+                    self.frame = proxy.ticket.native();
+                    self.motion = None;
+                    self.velocity = FrameVelocity::default();
+                } else if {
+                    let state = proxy.ticket.state();
+                    state.continued || state.attempted
+                } {
+                    self.handle.send_interactive_frame(
+                        self.wid,
+                        proxy.ticket.plan().to,
+                        true,
+                        self.txid,
+                        FrameSource::Ordinary,
+                    );
+                    self.frame = proxy.ticket.plan().to;
+                    self.motion = None;
+                    self.velocity = FrameVelocity::default();
+                    proxy.ticket.state().phase = ResizePhase::Retired;
+                } else {
+                    proxy.ticket.retire();
+                    self.proxy = None;
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn sample(
+        &mut self,
+        sample: Sample<'_>,
+        now: Instant,
+        phase: Option<ResizePhase>,
+    ) -> Option<Frame> {
+        if self.sample_proxy(now, phase) {
+            return None;
+        }
+        let (frame, set_size, source, force) = match sample {
+            Sample::Transition { progress, duration } => {
+                let spring = self.motion.unwrap_or_else(|| {
+                    FrameSpring::new(self.from, self.to, FrameVelocity::default())
+                });
+                let (frame, mut velocity) = spring.sample(progress, duration);
+                let frame = positive_size(frame, &mut velocity);
+                self.velocity = velocity;
+                let set_size = frame.size != self.frame.size || progress == 1.0;
+                (frame, set_size, FrameSource::Ordinary, progress == 1.0)
             }
             Sample::Viewport {
                 presentation,
                 offset,
                 scale,
                 bound,
-                movement,
+                progress,
+                duration,
+                camera_velocity,
             } => {
-                if self.fixed && self.announced {
+                if self.fixed && self.announced && self.motion.is_none() {
                     return None;
                 }
-                let frame = presentation.frame_at_offset(self.to, self.fixed, scale, offset);
-                let mut frame = bound.map_or(frame, |bounds| bounds.apply(frame));
-                frame.origin.x += self.move_from.x * movement;
-                frame.origin.y += self.move_from.y * movement;
+                let mut frame = presentation.frame_at_offset(self.to, self.fixed, scale, offset);
+                let mut velocity = FrameVelocity::default();
+                if !self.fixed {
+                    velocity.origin.x = -camera_velocity;
+                }
+                let had_motion = self.motion.is_some();
+                if let Some(spring) = self.motion {
+                    let (residual, residual_velocity) = spring.sample(progress, duration);
+                    frame = add_frame(frame, residual);
+                    velocity = velocity.add(residual_velocity);
+                    if progress == 1.0 {
+                        self.motion = None;
+                    }
+                }
+                let frame = positive_size(frame, &mut velocity);
+                let constrained = bound.map_or(frame, |bounds| bounds.apply(frame));
+                if constrained.origin.x != frame.origin.x {
+                    velocity.origin.x = 0.0;
+                }
+                if constrained.origin.y != frame.origin.y {
+                    velocity.origin.y = 0.0;
+                }
+                self.velocity = velocity;
                 (
-                    frame,
-                    !frame.size.same_as(self.frame.size),
+                    constrained,
+                    constrained.size != self.frame.size,
                     FrameSource::Viewport,
-                    !self.announced,
+                    !self.announced || progress == 1.0 && had_motion,
                 )
             }
         };
-        // Ordinary frames preserve subpixel easing; camera frames are already
-        // aligned to the cached display scale.
         let changed = frame != self.frame || force;
         self.frame = frame;
         self.announced = true;
@@ -312,6 +432,13 @@ impl PresentedWindow {
 }
 
 fn stage_windows(windows: &mut [PresentedWindow], sample: Sample<'_>, frames: &mut FrameBatch) {
+    let now = Instant::now();
+    let mut clocks = HashMap::default();
+    for window in &*windows {
+        if let Some(proxy) = &window.proxy {
+            clocks.entry(proxy.ticket.scene_id()).or_insert_with(|| proxy.ticket.started());
+        }
+    }
     for group in windows.chunk_by_mut(|a, b| {
         a.wid.pid == b.wid.pid && a.handle.constrains_scrolling() == b.handle.constrains_scrolling()
     }) {
@@ -319,7 +446,11 @@ fn stage_windows(windows: &mut [PresentedWindow], sample: Sample<'_>, frames: &m
         frames.extend(
             &handle,
             group[0].wid.pid,
-            group.iter_mut().filter_map(|window| window.sample(sample)),
+            group.iter_mut().filter_map(|window| {
+                let phase =
+                    window.proxy.as_ref().map(|p| p.ticket.phase_at(clocks[&p.ticket.scene_id()]));
+                window.sample(sample, now, phase)
+            }),
         );
     }
 }
@@ -356,16 +487,16 @@ impl CameraAnimation {
             }
         }
         let ongoing = self.presentation.sample(now, scale);
-        let movement = self.movement.as_mut().map_or(0.0, |(spring, distance)| {
-            if spring.sample(now, scale * *distance) {
-                0.0
-            } else {
-                spring.current()
-            }
-        });
-        if movement == 0.0 {
-            self.movement = None;
-        }
+        let progress = if self.duration.is_zero() {
+            1.0
+        } else {
+            (now.saturating_duration_since(self.geometry_started).as_secs_f64()
+                / self.duration.as_secs_f64())
+            .clamp(0.0, 1.0)
+        };
+        let progress = progress.max(self.geometry_progress);
+        self.geometry_progress = progress;
+        let camera_velocity = self.presentation.position_velocity(now).1;
         stage_windows(
             &mut self.windows,
             Sample::Viewport {
@@ -373,11 +504,17 @@ impl CameraAnimation {
                 offset: self.presentation.offset(),
                 scale,
                 bound: self.bound,
-                movement,
+                progress,
+                duration: self.duration,
+                camera_velocity,
             },
             frames,
         );
-        self.active = ongoing || self.movement.is_some();
+        self.active = ongoing
+            || self
+                .windows
+                .iter()
+                .any(|window| window.motion.is_some() || window.proxy_pending());
         self.publish_state(now);
     }
 
@@ -416,33 +553,34 @@ impl CameraAnimation {
             for window in &mut self.windows {
                 if let Some(old) = old.windows.iter().find(|old| old.wid == window.wid) {
                     window.frame = old.frame;
+                    window.velocity = old.velocity;
                     window.leased = old.leased;
+                    window.proxy = old.proxy.clone();
                 }
             }
             old.windows.retain(|old| !self.windows.iter().any(|new| new.wid == old.wid));
             old.stop();
         }
-        // Retired cameras start from the retained presenter publication.
+        self.geometry_started = now;
+        self.geometry_progress = 0.0;
+        let camera_velocity = self.presentation.position_velocity(now).1;
         for window in &mut self.windows {
+            window.motion = None;
             if self.animate && !window.fixed {
-                let frame = self.presentation.frame_at_offset(
+                let base = self.presentation.frame_at_offset(
                     window.to,
                     window.fixed,
                     self.scale,
                     self.presentation.offset(),
                 );
-                let frame = self.bound.map_or(frame, |bounds| bounds.apply(frame));
-                window.move_from = CGPoint::new(
-                    window.frame.origin.x - frame.origin.x,
-                    window.frame.origin.y - frame.origin.y,
-                );
+                let mut velocity = window.velocity;
+                velocity.origin.x += camera_velocity;
+                let residual = subtract_frame(window.frame, base);
+                if !residual.same_as(CGRect::ZERO) || !velocity.is_zero() {
+                    window.motion = Some(FrameSpring::new(residual, CGRect::ZERO, velocity));
+                }
             }
         }
-        let distance = self.windows.iter().fold(0.0_f64, |distance, window| {
-            distance.max(window.move_from.x.abs()).max(window.move_from.y.abs())
-        });
-        self.movement = (distance > 0.25 / self.scale)
-            .then(|| (CameraSpring::new(1.0, 0.0, 0.0, now), distance));
     }
 
     fn begin(&mut self) {
@@ -450,10 +588,31 @@ impl CameraAnimation {
         for window in &mut self.windows {
             window.announced = false;
             window.txid = window.wsid.map_or_else(TransactionId::default, |wsid| {
+                let frame = self.presentation.target_frame(window.to, window.fixed, self.scale);
+                let frame = self.bound.map_or(frame, |bounds| bounds.apply(frame));
+                if self.animate
+                    && self.gesture.is_none()
+                    && !self.presentation.gesturing()
+                    && let Some(proxy) = &window.proxy
+                    && proxy.ticket.is_current()
+                    && !matches!(
+                        proxy.ticket.state().phase,
+                        ResizePhase::Retired | ResizePhase::Fallback
+                    )
+                {
+                    let plan = proxy.ticket.plan();
+                    if plan.wid == window.wid
+                        && plan.window_id == wsid.as_u32()
+                        && plan.display == self.display
+                        && plan.handle.same_actor(&window.handle)
+                        && plan.to.same_as(frame)
+                        && self.store.last_txid(&wsid) == plan.txid
+                    {
+                        return plan.txid;
+                    }
+                }
                 let txid = self.store.next_txid(wsid);
                 if self.gesture.is_none() && !self.presentation.gesturing() {
-                    let frame = self.presentation.target_frame(window.to, window.fixed, self.scale);
-                    let frame = self.bound.map_or(frame, |bounds| bounds.apply(frame));
                     self.store.insert(wsid, txid, frame);
                 }
                 txid
@@ -547,6 +706,16 @@ impl Reactor {
                 system.commit_presented_viewport(identity.layout, &state.viewport);
             }
             for &wid in &camera.windows {
+                // Proxy frames never reached AX. Native feedback must retain
+                // the last native rectangle while the proxy owns presentation.
+                if control
+                    .as_ref()
+                    .and_then(|control| control.resize.as_ref())
+                    .and_then(|resize| resize.visual(wid))
+                    .is_some()
+                {
+                    continue;
+                }
                 let frame = if let Some(control) = &control {
                     control.frames.get(&wid).map(|(_, frame)| *frame)
                 } else {
@@ -683,9 +852,11 @@ impl Reactor {
                     to: base_frame,
                     fixed,
                     announced: false,
+                    proxy: None,
                     leased: false,
                     frame,
-                    move_from: CGPoint::ZERO,
+                    motion: None,
+                    velocity: FrameVelocity::default(),
                     txid: TransactionId::default(),
                 })
             })
@@ -703,7 +874,9 @@ impl Reactor {
         }));
         let mut next = CameraAnimation {
             presentation,
-            movement: None,
+            geometry_started: Instant::now(),
+            geometry_progress: 0.0,
+            duration: Duration::from_secs_f64(self.config.settings.animation_duration),
             windows,
             gesture,
             active: true,
@@ -807,7 +980,7 @@ impl AnimationManager {
                                 Message::Stop(..) | Message::StopCamera(..) | Message::Displays(..) => unreachable!(),
                             };
                             let entry = displays.entry(display).or_insert_with(|| DisplayPresenter {
-                                manager: Self::new(), link: DisplayLink::for_display(display, wake.clone()),
+                                manager: Self { resize: control.lock().resize.clone(), ..Self::new() }, link: DisplayLink::for_display(display, wake.clone()),
                                 fallback_deadline: Instant::now(),
                             });
                             let mut shared = control.lock();
@@ -898,6 +1071,7 @@ impl AnimationManager {
             if motion.has_work() {
                 return true;
             }
+            motion.finish_frame();
             motion.complete();
             false
         });
@@ -984,6 +1158,93 @@ impl AnimationManager {
             }
             _ => unreachable!("runner handles display control"),
         }
+        self.prepare_proxies();
+    }
+
+    fn prepare_proxies(&mut self) {
+        let Some(client) = &self.resize else { return };
+        for motion in &mut self.motions {
+            let unsupported = matches!(&*motion,Motion::Viewport(camera) if !camera.animate || camera.gesture.is_some() || camera.presentation.gesturing());
+            if unsupported {
+                for window in motion.windows_mut() {
+                    if let Some(proxy) = window.proxy.take() {
+                        proxy.ticket.revoke();
+                        proxy.ticket.wake();
+                        proxy.ticket.retire();
+                        window.frame = proxy.ticket.native();
+                        window.from = window.frame;
+                        window.motion = None;
+                        window.velocity = FrameVelocity::default();
+                        window.announced = false;
+                    }
+                }
+                continue;
+            }
+            let (display, duration, targets) = match &*motion {
+                Motion::Transition(active) => (
+                    active.animation.display,
+                    active.animation.duration,
+                    active.animation.windows.iter().map(|w| w.to).collect::<Vec<_>>(),
+                ),
+                Motion::Viewport(camera) => {
+                    let targets = camera
+                        .windows
+                        .iter()
+                        .map(|w| {
+                            let frame =
+                                camera.presentation.target_frame(w.to, w.fixed, camera.scale);
+                            camera.bound.map_or(frame, |bound| bound.apply(frame))
+                        })
+                        .collect();
+                    (camera.display, camera.duration, targets)
+                }
+            };
+            let mut plans = Vec::new();
+            for (window, target) in motion.windows_mut().iter_mut().zip(targets) {
+                if window
+                    .proxy
+                    .as_ref()
+                    .is_some_and(|p| matches!(p.ticket.state().phase, ResizePhase::Retired))
+                {
+                    window.proxy = None;
+                }
+                let Some(wsid) = window.wsid else { continue };
+                if !crate::model::live_resize::eligible(window.frame, target)
+                    && window.proxy.is_none()
+                {
+                    continue;
+                }
+                plans.push(ResizePlan {
+                    wid: window.wid,
+                    window_id: wsid.as_u32(),
+                    display,
+                    handle: window.handle.clone(),
+                    txid: window.txid,
+                    from: window.frame,
+                    to: target,
+                    duration,
+                });
+            }
+            if plans.is_empty() {
+                continue;
+            }
+            let scene = client.prepare_scene(plans);
+            for ticket in scene.members {
+                let window =
+                    motion.windows_mut().iter_mut().find(|w| w.wid == ticket.plan().wid).unwrap();
+                if window
+                    .proxy
+                    .as_ref()
+                    .is_some_and(|proxy| proxy.ticket.generation() == ticket.generation())
+                {
+                    continue;
+                }
+                window.proxy = Some(ProxyPresentation {
+                    spring: FrameSpring::new(window.frame, ticket.plan().to, window.velocity),
+                    ticket,
+                });
+            }
+        }
     }
 
     pub fn tick_at(&mut self, now: Instant) -> Option<Duration> {
@@ -992,6 +1253,13 @@ impl AnimationManager {
             .iter_mut()
             .filter_map(|motion| motion.sample(now, &mut self.frames))
             .min();
+        if let Some(client) = &self.resize {
+            client.publish_visuals(self.motions.iter().flat_map(|motion| {
+                motion.windows().iter().filter_map(|window| {
+                    window.proxy.as_ref().map(|proxy| (proxy.ticket.clone(), window.frame))
+                })
+            }));
+        }
         self.frames.flush();
         for motion in &mut self.motions {
             motion.finish_frame();
@@ -1061,7 +1329,10 @@ impl AnimationManager {
             let Some(window) = reactor.state.windows.window(wid) else {
                 continue;
             };
-            let current_frame = window.frame_monotonic;
+            let current_frame =
+                reactor.animation_tx.as_ref().map_or(window.frame_monotonic, |tx| {
+                    tx.control.lock().frame(wid, window.frame_monotonic)
+                });
             let window_server_id = window.info.sys_id;
             let pending = window_server_id
                 .and_then(|wsid| reactor.transaction_manager.get_target_frame(wsid));
@@ -1093,6 +1364,7 @@ impl AnimationManager {
                         .filter(|_| !reactor.layout_manager.layout_engine.is_window_floating(wid)),
                 );
                 anim.add_window(&handle, wid, current_frame, target_frame, txid);
+                anim.windows.last_mut().unwrap().wsid = window_server_id;
             } else {
                 anim.mark_handled(wid);
                 trace!(
@@ -1402,6 +1674,9 @@ impl ActiveAnimation {
             return None;
         }
         animation.windows.sort_unstable_by_key(|w| w.wid.pid);
+        for window in &mut animation.windows {
+            window.motion = Some(FrameSpring::new(window.from, window.to, window.velocity));
+        }
         animation.begin();
         let started = Instant::now();
         let next_sample = started + animation.interval;
@@ -1419,7 +1694,9 @@ impl ActiveAnimation {
             if let Some(old) = self.animation.windows.iter().find(|old| old.wid == window.wid) {
                 window.from = old.frame;
                 window.frame = old.frame;
+                window.velocity = old.velocity;
                 window.leased = old.leased;
+                window.proxy = old.proxy.clone();
             } else {
                 window.begin();
             }
@@ -1431,6 +1708,9 @@ impl ActiveAnimation {
             } else if !next.windows.iter().any(|w| w.wid == old.wid) {
                 old.cancel(None);
             }
+        }
+        for window in &mut next.windows {
+            window.motion = Some(FrameSpring::new(window.from, window.to, window.velocity));
         }
         next.windows.sort_unstable_by_key(|w| w.wid.pid);
         let started = Instant::now();
@@ -1453,11 +1733,13 @@ impl ActiveAnimation {
             .clamp(0.0, 1.0)
         };
         let t = t.max(self.progress);
-        self.animation.stage_frame(t, self.progress, frames);
+        self.animation.stage_frame(t, frames);
         self.progress = t;
     }
 
-    fn is_complete(&self) -> bool { self.progress >= 1.0 }
+    fn is_complete(&self) -> bool {
+        self.progress >= 1.0 && !self.animation.windows.iter().any(PresentedWindow::proxy_pending)
+    }
 }
 
 impl Animation {
@@ -1488,8 +1770,10 @@ impl Animation {
             to: finish,
             fixed: false,
             announced: false,
+            proxy: None,
             frame: start,
-            move_from: CGPoint::ZERO,
+            motion: None,
+            velocity: FrameVelocity::default(),
             txid,
             leased: false,
         });
@@ -1522,19 +1806,25 @@ impl Animation {
     }
 
     fn finish_all(&mut self) {
+        for window in &mut self.windows {
+            if let Some(proxy) = window.proxy.take() {
+                proxy.ticket.revoke();
+                proxy.ticket.wake();
+                proxy.ticket.retire();
+            }
+        }
         let mut frames = FrameBatch::default();
-        self.stage_frame(1.0, 0.0, &mut frames);
+        self.stage_frame(1.0, &mut frames);
         frames.flush();
         self.end();
     }
 
-    fn stage_frame(&mut self, t: f64, previous: f64, frames: &mut FrameBatch) {
+    fn stage_frame(&mut self, t: f64, frames: &mut FrameBatch) {
         stage_windows(
             &mut self.windows,
             Sample::Transition {
                 progress: t,
-                eased: ease(t),
-                set_size: (previous < 0.5 && t >= 0.5) || t == 1.0,
+                duration: self.duration,
             },
             frames,
         );
@@ -1547,60 +1837,100 @@ impl Animation {
     }
 }
 
-#[cfg(test)]
-fn get_frame(a: CGRect, b: CGRect, t: f64) -> CGRect { interpolate_frame(a, b, ease(t)) }
+#[derive(Clone, Copy, Debug, Default)]
+struct FrameVelocity {
+    origin: CGPoint,
+    size: CGSize,
+}
 
-fn interpolate_frame(a: CGRect, b: CGRect, s: f64) -> CGRect {
-    CGRect {
-        origin: CGPoint {
-            x: blend(a.origin.x, b.origin.x, s),
-            y: blend(a.origin.y, b.origin.y, s),
-        },
-        size: CGSize {
-            width: blend(a.size.width, b.size.width, s),
-            height: blend(a.size.height, b.size.height, s),
-        },
+impl FrameVelocity {
+    fn add(self, other: Self) -> Self {
+        Self {
+            origin: CGPoint::new(self.origin.x + other.origin.x, self.origin.y + other.origin.y),
+            size: CGSize::new(
+                self.size.width + other.size.width,
+                self.size.height + other.size.height,
+            ),
+        }
+    }
+
+    fn is_zero(self) -> bool { self.origin == CGPoint::ZERO && self.size == CGSize::ZERO }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FrameSpring {
+    from: CGRect,
+    to: CGRect,
+    velocity: FrameVelocity,
+}
+
+impl FrameSpring {
+    fn new(from: CGRect, to: CGRect, velocity: FrameVelocity) -> Self {
+        Self { from, to, velocity }
+    }
+
+    fn sample(self, progress: f64, duration: Duration) -> (CGRect, FrameVelocity) {
+        if progress >= 1.0 || duration.is_zero() {
+            return (self.to, FrameVelocity::default());
+        }
+        let omega = 12.0 / duration.as_secs_f64();
+        let time = progress.max(0.0) * duration.as_secs_f64();
+        let envelope = (-omega * time).exp();
+        let component = |from: f64, to: f64, velocity: f64| {
+            let displacement = from - to;
+            let b = velocity + omega * displacement;
+            (
+                to + (displacement + b * time) * envelope,
+                (velocity - omega * b * time) * envelope,
+            )
+        };
+        let (x, vx) = component(self.from.origin.x, self.to.origin.x, self.velocity.origin.x);
+        let (y, vy) = component(self.from.origin.y, self.to.origin.y, self.velocity.origin.y);
+        let (width, vw) = component(
+            self.from.size.width,
+            self.to.size.width,
+            self.velocity.size.width,
+        );
+        let (height, vh) = component(
+            self.from.size.height,
+            self.to.size.height,
+            self.velocity.size.height,
+        );
+        (
+            CGRect::new(CGPoint::new(x, y), CGSize::new(width, height)),
+            FrameVelocity {
+                origin: CGPoint::new(vx, vy),
+                size: CGSize::new(vw, vh),
+            },
+        )
     }
 }
 
-/// Size switches in one step while the origin eases, so a window growing
-/// toward a far edge (or shrinking away from one) can momentarily extend past
-/// both endpoints and off the screen. AX clamps that write and the following
-/// position-only frames jump back. Keeping each frame inside the union of the
-/// endpoints keeps it on screen whenever both endpoints are.
-fn contain_transition_frame(from: CGRect, to: CGRect, mut frame: CGRect) -> CGRect {
-    let contain = |origin: f64, len: f64, a: f64, a_len: f64, b: f64, b_len: f64| {
-        let max = (a + a_len).max(b + b_len) - len;
-        origin.min(max).max(a.min(b))
-    };
-    frame.origin.x = contain(
-        frame.origin.x,
-        frame.size.width,
-        from.origin.x,
-        from.size.width,
-        to.origin.x,
-        to.size.width,
-    );
-    frame.origin.y = contain(
-        frame.origin.y,
-        frame.size.height,
-        from.origin.y,
-        from.size.height,
-        to.origin.y,
-        to.size.height,
-    );
+fn add_frame(a: CGRect, b: CGRect) -> CGRect {
+    CGRect::new(
+        CGPoint::new(a.origin.x + b.origin.x, a.origin.y + b.origin.y),
+        CGSize::new(a.size.width + b.size.width, a.size.height + b.size.height),
+    )
+}
+
+fn subtract_frame(a: CGRect, b: CGRect) -> CGRect {
+    CGRect::new(
+        CGPoint::new(a.origin.x - b.origin.x, a.origin.y - b.origin.y),
+        CGSize::new(a.size.width - b.size.width, a.size.height - b.size.height),
+    )
+}
+
+fn positive_size(mut frame: CGRect, velocity: &mut FrameVelocity) -> CGRect {
+    if frame.size.width < 1.0 {
+        frame.size.width = 1.0;
+        velocity.size.width = 0.0;
+    }
+    if frame.size.height < 1.0 {
+        frame.size.height = 1.0;
+        velocity.size.height = 0.0;
+    }
     frame
 }
-
-fn ease(t: f64) -> f64 {
-    if t < 0.5 {
-        (1.0 - f64::sqrt(1.0 - f64::powi(2.0 * t, 2))) / 2.0
-    } else {
-        (f64::sqrt(1.0 - f64::powi(-2.0 * t + 2.0, 2)) + 1.0) / 2.0
-    }
-}
-
-fn blend(a: f64, b: f64, s: f64) -> f64 { (1.0 - s) * a + s * b }
 
 #[cfg(test)]
 mod tests {
@@ -1640,6 +1970,285 @@ mod tests {
             Motion::Viewport(c) => Some(c),
             _ => None,
         })
+    }
+
+    #[test]
+    fn macos_motion_resizes_throughout_the_transition_and_finishes_exactly() {
+        let (handle, mut rx) = AppThreadHandle::channel();
+        let wid = WindowId::new(1, 1);
+        let from = rect(0., 0., 400., 800.);
+        let to = rect(200., 100., 800., 400.);
+        let mut manager = AnimationManager::new();
+        manager.handle_message(Message::Replace(animation(&handle, wid, from, to)));
+        let start = transition_state(&manager).unwrap().started;
+        collect_requests(&mut rx);
+        let mut previous = from;
+        for ms in [15, 30, 75, 150, 240] {
+            manager.tick_at(start + Duration::from_millis(ms));
+            let requests = collect_requests(&mut rx);
+            let Observed::Frame { frame, set_size, .. } = requests[0] else {
+                panic!("frame");
+            };
+            assert!(set_size);
+            assert!(frame.size.width > previous.size.width && frame.size.width < to.size.width);
+            assert!(frame.size.height < previous.size.height && frame.size.height > to.size.height);
+            assert!(frame.origin.x > previous.origin.x && frame.origin.x < to.origin.x);
+            previous = frame;
+        }
+        manager.tick_at(start + Duration::from_millis(300));
+        assert_animation_frame(&collect_requests(&mut rx)[0], wid, to);
+        assert!(!manager.has_work());
+        let mut immediate = animation(&handle, wid, from, to);
+        immediate.duration = Duration::ZERO;
+        manager.handle_message(Message::Replace(immediate));
+        manager.tick_at(Instant::now());
+        let requests = collect_requests(&mut rx);
+        assert!(requests.iter().any(|request| matches!(request,
+            Observed::Frame { frame, .. } if *frame == to)));
+        assert!(!manager.has_work());
+    }
+
+    #[test]
+    fn macos_motion_retarget_preserves_perpendicular_and_resize_velocity() {
+        let (handle, mut rx) = AppThreadHandle::channel();
+        let wid = WindowId::new(1, 1);
+        let from = rect(0., 0., 400., 400.);
+        let mut manager = AnimationManager::new();
+        manager.handle_message(Message::Replace(animation(
+            &handle,
+            wid,
+            from,
+            rect(500., 0., 800., 600.),
+        )));
+        let start = transition_state(&manager).unwrap().started;
+        manager.tick_at(start + Duration::from_millis(50));
+        collect_requests(&mut rx);
+        let old = &transition_state(&manager).unwrap().animation.windows[0];
+        let published = old.frame;
+        let velocity = old.velocity;
+        assert!(velocity.origin.x > 0. && velocity.size.width > 0.);
+        manager.handle_message(Message::Replace(animation(
+            &handle,
+            wid,
+            from,
+            rect(published.origin.x, 500., 200., 700.),
+        )));
+        let mut frames = FrameBatch::default();
+        active_mut(&mut manager).unwrap().animation.stage_frame(0., &mut frames);
+        frames.flush();
+        collect_requests(&mut rx);
+        let next = &transition_state(&manager).unwrap().animation.windows[0];
+        assert_eq!(next.frame, published);
+        let epsilon = 0.0000001;
+        let mut frames = FrameBatch::default();
+        active_mut(&mut manager)
+            .unwrap()
+            .animation
+            .stage_frame(epsilon / 0.3, &mut frames);
+        frames.flush();
+        let requests = collect_requests(&mut rx);
+        let Observed::Frame { frame, .. } = requests[0] else {
+            panic!("frame");
+        };
+        assert!(
+            ((frame.origin.x - published.origin.x) / epsilon - velocity.origin.x).abs() < 0.2,
+            "frame={frame:?} published={published:?} velocity={velocity:?}"
+        );
+        assert!(
+            ((frame.size.width - published.size.width) / epsilon - velocity.size.width).abs() < 0.5
+        );
+        assert!(
+            frame.origin.x > published.origin.x,
+            "perpendicular momentum must survive"
+        );
+        assert!(
+            frame.size.width > published.size.width,
+            "width reversal must decelerate first"
+        );
+        let target = rect(-200., -100., 20., 50.);
+        manager.handle_message(Message::Replace(animation(&handle, wid, from, target)));
+        let start = transition_state(&manager).unwrap().started;
+        for ms in [10, 50, 150, 300] {
+            manager.tick_at(start + Duration::from_millis(ms));
+            for request in collect_requests(&mut rx) {
+                if let Observed::Frame { frame, .. } = request {
+                    assert!(frame.size.width >= 1. && frame.size.height >= 1.);
+                }
+            }
+        }
+        assert!(!manager.has_work());
+        let completed = &manager.motions[0];
+        assert_eq!(completed.windows()[0].frame, target);
+    }
+
+    pub(super) fn motion_camera(
+        handle: &AppThreadHandle,
+        from: CGRect,
+        to: CGRect,
+    ) -> CameraAnimation {
+        use crate::layout_engine::systems::ScrollingLayoutSystem;
+        let wid = WindowId::new(1, 1);
+        let mut system =
+            ScrollingLayoutSystem::new(&crate::common::config::ScrollingLayoutSettings {
+                alignment: crate::common::config::ScrollingAlignment::Left,
+                column_width_ratio: 1.0,
+                max_column_width_ratio: 1.0,
+                ..Default::default()
+            });
+        let layout = system.create_layout();
+        system.add_window_after_selection(layout, wid);
+        system.prepare_layout(
+            layout,
+            rect(0., 0., 1000., 800.),
+            &Default::default(),
+            &Default::default(),
+        );
+        let presentation = system.presentation(layout).unwrap().0;
+        let now = Instant::now();
+        let state = Arc::new(Mutex::new(PresentedCamera {
+            viewport: presentation.snapshot(now),
+            gesture: None,
+            active: true,
+            stopped: false,
+        }));
+        CameraAnimation {
+            presentation,
+            windows: vec![PresentedWindow {
+                handle: handle.clone(),
+                wid,
+                wsid: None,
+                from,
+                to,
+                frame: from,
+                motion: None,
+                velocity: FrameVelocity::default(),
+                txid: TransactionId::default(),
+                fixed: false,
+                leased: false,
+                announced: false,
+                proxy: None,
+            }],
+            geometry_started: now,
+            geometry_progress: 0.,
+            duration: Duration::from_millis(300),
+            gesture: None,
+            active: true,
+            identity: CameraIdentity {
+                space: SpaceId::new(1),
+                workspace: VirtualWorkspaceId::default(),
+                layout,
+            },
+            events: None,
+            state,
+            display: 1,
+            animate: true,
+            scale: 1.,
+            store: WindowTxStore::new(),
+            interval: Duration::from_secs_f64(1. / 120.),
+            bound: None,
+        }
+    }
+
+    #[test]
+    fn macos_motion_viewport_resize_has_no_eager_jump_or_stale_rewind() {
+        let (handle, mut rx) = AppThreadHandle::channel();
+        let from = rect(0., 0., 400., 400.);
+        let to = rect(0., 0., 800., 600.);
+        let mut camera = motion_camera(&handle, from, to);
+        camera.replace(None);
+        let start = camera.geometry_started;
+        camera.begin();
+        assert!(collect_requests(&mut rx).iter().all(|request| matches!(
+            request,
+            Observed::Request(Request::BeginWindowAnimation(..))
+        )));
+        camera.sample(start);
+        assert_eq!(camera.windows[0].frame, from);
+        collect_requests(&mut rx);
+        camera.sample(start + Duration::from_millis(30));
+        let first = camera.windows[0].frame;
+        assert!(first.size.width > from.size.width && first.size.width < to.size.width);
+        assert!(camera.active, "stationary camera must keep a resize alive");
+        camera.sample(start + Duration::from_millis(15));
+        assert_eq!(
+            camera.windows[0].frame, first,
+            "old ticks cannot rewind a resize"
+        );
+        camera.sample(start + Duration::from_millis(150));
+        assert!(camera.windows[0].frame.size.width > first.size.width);
+        camera.sample(start + Duration::from_millis(300));
+        assert_eq!(camera.windows[0].frame, to);
+        assert!(!camera.active);
+        camera.duration = Duration::ZERO;
+        camera.active = true;
+        camera.windows[0].to = from;
+        camera.replace(None);
+        camera.sample(camera.geometry_started);
+        assert_eq!(camera.windows[0].frame, from);
+        assert!(!camera.active);
+    }
+
+    #[test]
+    fn macos_motion_viewport_retarget_preserves_resize_velocity() {
+        let (handle, mut rx) = AppThreadHandle::channel();
+        let from = rect(0., 0., 400., 400.);
+        let mut old = motion_camera(&handle, from, rect(100., 0., 800., 600.));
+        old.replace(None);
+        old.begin();
+        old.sample(old.geometry_started + Duration::from_millis(50));
+        collect_requests(&mut rx);
+        let published = old.windows[0].frame;
+        let velocity = old.windows[0].velocity;
+        let mut next = motion_camera(&handle, from, rect(0., 100., 200., 700.));
+        next.replace(Some(old));
+        next.begin();
+        let start = next.geometry_started;
+        next.sample(start);
+        assert_eq!(next.windows[0].frame, published);
+        next.sample(start + Duration::from_nanos(100));
+        let frame = next.windows[0].frame;
+        assert!(((frame.origin.x - published.origin.x) * 1e7 - velocity.origin.x).abs() < 0.2);
+        assert!(
+            ((frame.size.width - published.size.width) * 1e7 - velocity.size.width).abs() < 0.5,
+            "frame={frame:?} published={published:?} velocity={velocity:?}"
+        );
+        next.sample(start + Duration::from_secs(1));
+        assert_eq!(next.windows[0].frame, rect(0., 100., 200., 700.));
+        assert!(!next.active);
+    }
+
+    #[test]
+    fn macos_motion_resizing_during_camera_motion_preserves_screen_velocity() {
+        let (handle, mut rx) = AppThreadHandle::channel();
+        let mut old = motion_camera(&handle, rect(0., 0., 400., 400.), rect(0., 0., 800., 600.));
+        let now = Instant::now();
+        old.presentation.retarget(-500., 1200., now);
+        old.replace(None);
+        old.begin();
+        old.sample(old.geometry_started + Duration::from_millis(50));
+        collect_requests(&mut rx);
+        let published = old.windows[0].frame;
+        let velocity = old.windows[0].velocity;
+        assert_ne!(old.presentation.position_velocity(now).1, 0.);
+        let mut next = motion_camera(&handle, published, rect(0., 0., 1000., 700.));
+        next.replace(Some(old));
+        next.begin();
+        let start = next.geometry_started;
+        next.sample(start);
+        assert_eq!(next.windows[0].frame, published);
+        assert!((next.windows[0].velocity.origin.x - velocity.origin.x).abs() < 1e-6);
+        next.sample(start + Duration::from_millis(1));
+        let frame = next.windows[0].frame;
+        assert!(((frame.origin.x - published.origin.x) - velocity.origin.x * 0.001).abs() < 2.);
+        assert!(
+            ((frame.size.width - published.size.width) - velocity.size.width * 0.001).abs() < 2.
+        );
+        next.sample(start + Duration::from_secs(2));
+        assert_eq!(
+            next.windows[0].frame,
+            next.presentation.target_frame(next.windows[0].to, false, next.scale)
+        );
+        assert!(!next.active);
     }
 
     #[test]
@@ -1778,7 +2387,10 @@ mod tests {
                 assert!(collect_requests(&mut rx).is_empty());
             }
             assert_eq!(frames.len(), 3);
-            assert_eq!(frames[1].origin, CGPoint::new(50.0, 25.0));
+            assert!(frames[1].origin.x > 50.0 && frames[1].origin.x < 100.0);
+            assert_eq!(frames[1].origin.y, frames[1].origin.x / 2.0);
+            assert!(frames[0].size.width > 10.0 && frames[0].size.width < frames[1].size.width);
+            assert!(frames[1].size.width < 20.0);
             assert_eq!(frames[2], rect(100.0, 50.0, 20.0, 30.0));
             assert!(transition_state(&manager).is_none());
             results.push(frames);
@@ -1894,7 +2506,9 @@ mod tests {
             }));
             CameraAnimation {
                 presentation,
-                movement: None,
+                geometry_started: Instant::now(),
+                geometry_progress: 0.0,
+                duration: Duration::from_secs_f64(0.3),
                 windows: frames
                     .into_iter()
                     .map(|(wid, world, fixed)| {
@@ -1908,9 +2522,11 @@ mod tests {
                             to: world,
                             fixed,
                             announced: false,
+                            proxy: None,
                             leased: false,
                             frame,
-                            move_from: CGPoint::ZERO,
+                            motion: None,
+                            velocity: FrameVelocity::default(),
                             txid: TransactionId::default(),
                         }
                     })
@@ -2123,7 +2739,9 @@ mod tests {
         let wsid = WindowServerId::new(1);
         let camera = CameraAnimation {
             presentation: system.presentation(layout).unwrap().0,
-            movement: None,
+            geometry_started: Instant::now(),
+            geometry_progress: 0.0,
+            duration: Duration::from_secs_f64(0.3),
             windows: vec![PresentedWindow {
                 handle: handle.clone(),
                 wid,
@@ -2132,9 +2750,11 @@ mod tests {
                 to: system.presentation(layout).unwrap().1[0].1,
                 fixed: false,
                 announced: false,
+                proxy: None,
                 leased: false,
                 frame: rect(0.0, 0.0, 10.0, 10.0),
-                move_from: CGPoint::ZERO,
+                motion: None,
+                velocity: FrameVelocity::default(),
                 txid: TransactionId::default(),
             }],
             gesture: None,
@@ -2241,9 +2861,11 @@ mod tests {
                 to: base_frame,
                 fixed: false,
                 announced: false,
+                proxy: None,
                 leased: false,
                 frame: dragged,
-                move_from: CGPoint::ZERO,
+                motion: None,
+                velocity: FrameVelocity::default(),
                 txid: TransactionId::default(),
             });
             c.active = true;
@@ -2459,7 +3081,7 @@ mod tests {
     }
 
     #[test]
-    fn restated_space_snapshot_preserves_animation_but_new_revision_cancels_it() {
+    fn restated_space_snapshot_preserves_animation_but_topology_change_cancels_it() {
         use super::super::testing::*;
         use crate::actor::reactor::Event;
 
@@ -2482,7 +3104,11 @@ mod tests {
             .insert(wid, (reactor.app_manager.apps[&1].handle.clone(), frame));
         let control = Arc::clone(&sender.control);
         reactor.animation_tx = Some(sender);
-        for revision in [snapshot.revision, snapshot.revision.saturating_sub(1)] {
+        for revision in [
+            snapshot.revision,
+            snapshot.revision.saturating_sub(1),
+            snapshot.revision + 1,
+        ] {
             let mut restated = snapshot.clone();
             restated.revision = revision;
             reactor.handle_event(Event::SpaceStateChanged(restated));
@@ -2491,7 +3117,8 @@ mod tests {
                 receiver.commands.try_iter().all(|message| !matches!(message, Message::Stop(_)))
             );
         }
-        snapshot.revision += 1;
+        snapshot.revision += 2;
+        snapshot.screens[0].frame.size.width += 100.;
         reactor.handle_event(Event::SpaceStateChanged(snapshot));
         assert!(!control.lock().frames.contains_key(&wid));
         assert!(receiver.commands.try_iter().any(|message| matches!(message, Message::Stop(_))));
@@ -2588,8 +3215,12 @@ mod tests {
         assert_eq!(control.frame(wid, CGRect::ZERO), continuing_frame);
 
         manager.tick_at(transition_state(&manager).unwrap().started + Duration::from_millis(10));
-        let expected_next = get_frame(resumed_start, rect(80.0, 90.0, 10.0, 10.0), 1.0 / 30.0);
-        assert_animation_pos(&collect_requests(&mut rx)[0], wid, expected_next.origin);
+        let next = collect_requests(&mut rx);
+        let Observed::Frame { frame, .. } = next[0] else {
+            panic!("frame");
+        };
+        assert!(frame.origin.x > resumed_start.origin.x);
+        assert!(frame.origin.y > resumed_start.origin.y);
     }
 
     fn animation_contains(manager: &AnimationManager, wid: WindowId) -> bool {
@@ -2727,5 +3358,697 @@ mod tests {
             matches!(requests[2], Observed::Request(Request::EndWindowAnimation(req_wid, _)) if req_wid == wid)
         );
         assert_set_window_frame(&requests[3], wid, rect(80.0, 90.0, 10.0, 10.0));
+    }
+}
+
+#[cfg(test)]
+mod live_resize_tests {
+    use super::*;
+    use crate::model::live_resize::{Client, Event};
+
+    fn rect(width: f64) -> CGRect { CGRect::new(CGPoint::new(10., 40.), CGSize::new(width, 600.)) }
+    fn animation(handle: &AppThreadHandle, from: f64, to: f64) -> Animation {
+        let mut a = Animation::new(120., 0.3);
+        a.add_window(
+            handle,
+            WindowId::new(1, 1),
+            rect(from),
+            rect(to),
+            TransactionId::default(),
+        );
+        a.windows[0].wsid = Some(WindowServerId::new(42));
+        a
+    }
+    #[test]
+    fn live_resize_two_app_rows_share_the_same_presented_boundary() {
+        let (sender, mut events) = crate::actor::channel();
+        let client = Client::new(sender);
+        let (first, mut first_requests) = AppThreadHandle::channel();
+        let (second, mut second_requests) = AppThreadHandle::channel();
+        let row = |y, height| CGRect::new(CGPoint::new(0., y), CGSize::new(1000., height));
+        let mut animation = Animation::new(120., 0.3);
+        animation.add_window(
+            &first,
+            WindowId::new(1, 1),
+            row(0., 400.),
+            row(0., 500.),
+            TransactionId::default(),
+        );
+        animation.add_window(
+            &second,
+            WindowId::new(2, 2),
+            row(400., 400.),
+            row(500., 300.),
+            TransactionId::default(),
+        );
+        animation.windows[0].wsid = Some(WindowServerId::new(42));
+        animation.windows[1].wsid = Some(WindowServerId::new(43));
+        let mut manager = AnimationManager {
+            resize: Some(client),
+            ..AnimationManager::new()
+        };
+        manager.handle_message(Message::Replace(animation));
+        let Event::Prepare(scene) = events.try_recv().unwrap().1 else {
+            panic!("complete scene")
+        };
+        assert_eq!(scene.members.len(), 2);
+        for ticket in &scene.members {
+            ticket.accepted(ticket.plan().to);
+        }
+        scene.start(Instant::now() - Duration::from_millis(100));
+        while first_requests.try_recv().is_ok() {}
+        while second_requests.try_recv().is_ok() {}
+        manager.tick_at(Instant::now() + Duration::from_secs(1));
+        let windows = manager.motions[0].windows();
+        let top = windows.iter().find(|w| w.wid.pid == 1).unwrap().frame;
+        let bottom = windows.iter().find(|w| w.wid.pid == 2).unwrap().frame;
+        assert!((top.origin.y + top.size.height - bottom.origin.y).abs() < 0.000_001);
+        let snapshot = scene.visuals();
+        assert_eq!(snapshot.frames[&WindowId::new(1, 1)].1, top);
+        assert_eq!(snapshot.frames[&WindowId::new(2, 2)].1, bottom);
+        assert!(first_requests.try_recv().is_err());
+        assert!(second_requests.try_recv().is_err());
+    }
+
+    #[test]
+    fn live_resize_noop_commit_end_ack_clears_the_new_transaction_before_external_resize() {
+        use super::super::testing::*;
+        use crate::actor::reactor::{Event as ReactorEvent, Requested};
+        use crate::sys::event::MouseState;
+        let (mut apps, mut reactor) = test_context();
+        let space = SpaceId::new(1);
+        reactor.handle_event(space_state_event(
+            vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.))],
+            vec![Some(space)],
+        ));
+        apps.make_app_and_settle(&mut reactor, 1, make_windows(1));
+        let wid = WindowId::new(1, 1);
+        let wsid = reactor.test_window_server_id(wid);
+        let native = reactor.state.windows.window(wid).unwrap().frame_monotonic;
+        let prior = reactor.transaction_manager.generate_next_txid(wsid);
+        reactor.transaction_manager.generate_next_txid(wsid);
+        let reversal = reactor.transaction_manager.generate_next_txid(wsid);
+        assert_ne!(prior, TransactionId::default());
+        reactor.transaction_manager.store_txid(wsid, reversal, native);
+        let (sender, _events) = crate::actor::channel();
+        let client = Client::new(sender);
+        let (handle, mut requests) = AppThreadHandle::channel();
+        let scene = client.prepare_scene(vec![ResizePlan {
+            wid,
+            window_id: wsid.as_u32(),
+            display: 1,
+            handle,
+            txid: reversal,
+            from: native,
+            to: native,
+            duration: Duration::from_millis(300),
+        }]);
+        requests.try_recv().unwrap();
+        assert!(scene.commit_native());
+        let Request::CommitResize(committed, _) =
+            requests.try_recv().expect("even a no-op commit must reach the app actor").1
+        else {
+            panic!("actor-owned acknowledgement")
+        };
+        reactor
+            .dispatch_workflow(ReactorEvent::WindowFrameChanged(
+                wid,
+                native,
+                Some(prior),
+                Requested(true),
+                Some(MouseState::Up),
+            ))
+            .unwrap();
+        assert_eq!(reactor.transaction_manager.get_target_frame(wsid), Some(native));
+        reactor
+            .dispatch_workflow(ReactorEvent::WindowFrameChanged(
+                wid,
+                native,
+                Some(committed.plan().txid),
+                Requested(true),
+                Some(MouseState::Up),
+            ))
+            .unwrap();
+        assert_eq!(reactor.transaction_manager.get_target_frame(wsid), None);
+        let mut resized = native;
+        resized.size.width -= 40.;
+        let outcome = reactor
+            .dispatch_workflow(ReactorEvent::WindowFrameChanged(
+                wid,
+                resized,
+                Some(reversal),
+                Requested(false),
+                Some(MouseState::Up),
+            ))
+            .unwrap();
+        assert_eq!(
+            outcome.arrange.passes, 1,
+            "a stale target cannot absorb native geometry"
+        );
+        assert!(!outcome.arrange.is_resize);
+        assert!(
+            outcome.layout_events.is_empty(),
+            "mouse-up geometry cannot persist layout widths"
+        );
+        assert_eq!(
+            reactor.state.windows.window(wid).unwrap().frame_monotonic,
+            resized
+        );
+    }
+
+    #[test]
+    fn live_resize_duplicate_native_completion_does_not_resize_the_layout() {
+        use super::super::testing::*;
+        use crate::actor::reactor::{Event as ReactorEvent, Requested};
+        use crate::sys::event::MouseState;
+
+        let (mut apps, mut reactor) = test_context();
+        let space = SpaceId::new(1);
+        reactor.handle_event(space_state_event(
+            vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.))],
+            vec![Some(space)],
+        ));
+        apps.make_app_and_settle(&mut reactor, 1, make_windows(1));
+        let wid = WindowId::new(1, 1);
+        let wsid = reactor.test_window_server_id(wid);
+        let handle = reactor.app_manager.apps[&1].handle.clone();
+        let (tx, _events) = crate::actor::channel();
+        let client = Client::new(tx);
+        let txid = reactor.transaction_manager.generate_next_txid(wsid);
+        reactor.transaction_manager.store_txid(wsid, txid, rect(900.));
+        let ticket = client.prepare(ResizePlan {
+            wid,
+            window_id: wsid.as_u32(),
+            display: 1,
+            handle: handle.clone(),
+            txid,
+            from: rect(500.),
+            to: rect(900.),
+            duration: Duration::from_millis(300),
+        });
+        ticket.accepted(rect(900.));
+        ticket.state().visual = rect(750.);
+        ticket.state().phase = ResizePhase::Presenting(Instant::now());
+        let (sender, _receiver) = AnimationSender::channel();
+        sender.set_resize_client(Some(client));
+        sender.control.lock().frames.insert(wid, (handle.clone(), rect(750.)));
+        reactor.animation_tx = Some(sender);
+        let camera = super::tests::motion_camera(&handle, rect(500.), rect(900.));
+        reactor.presentations.insert(space, ViewportHandle {
+            identity: camera.identity,
+            state: camera.state,
+            windows: vec![wid],
+            headless: None,
+        });
+
+        for _ in 0..2 {
+            let outcome = reactor
+                .dispatch_workflow(ReactorEvent::WindowFrameChanged(
+                    wid,
+                    rect(900.),
+                    Some(txid),
+                    Requested(false),
+                    Some(MouseState::Up),
+                ))
+                .unwrap();
+            assert_eq!(
+                outcome.arrange.passes, 0,
+                "native completion is not an external resize"
+            );
+            assert!(outcome.layout_events.is_empty());
+            assert_eq!(
+                reactor.state.windows.window(wid).unwrap().frame_monotonic,
+                rect(900.)
+            );
+            assert_eq!(reactor.transaction_manager.get_target_frame(wsid), None);
+            assert_eq!(reactor.transaction_manager.get_last_sent_txid(wsid), txid);
+            assert!(ticket.is_current());
+        }
+        let outcome = reactor
+            .dispatch_workflow(ReactorEvent::WindowFrameChanged(
+                wid,
+                rect(950.),
+                Some(txid),
+                Requested(false),
+                Some(MouseState::Up),
+            ))
+            .unwrap();
+        assert_eq!(
+            outcome.arrange.passes, 1,
+            "a different native size remains observable"
+        );
+        assert!(!outcome.arrange.is_resize);
+        assert!(
+            outcome.layout_events.is_empty(),
+            "mouse-up geometry cannot persist layout widths"
+        );
+        assert_eq!(
+            reactor.state.windows.window(wid).unwrap().frame_monotonic,
+            rect(950.)
+        );
+        let outcome = reactor
+            .dispatch_workflow(ReactorEvent::WindowFrameChanged(
+                wid,
+                rect(940.),
+                Some(txid),
+                Requested(false),
+                Some(MouseState::Down),
+            ))
+            .unwrap();
+        assert!(
+            outcome.layout_events.iter().any(|event| matches!(
+                event,
+                crate::layout_engine::LayoutEvent::WindowResized { wid: resized, new_frame, .. }
+                    if *resized == wid && *new_frame == rect(940.)
+            )),
+            "a real resize gesture updates layout widths"
+        );
+        assert!(
+            !ticket.is_current(),
+            "a real resize gesture owns native geometry"
+        );
+    }
+
+    #[test]
+    fn live_resize_unadmitted_native_geometry_cannot_arrange_another_window() {
+        use super::super::testing::*;
+        use crate::actor::reactor::{Event as ReactorEvent, Requested};
+        use crate::model::window_store::ClaimOwner;
+        use crate::sys::event::MouseState;
+
+        for admission in [
+            "transient",
+            "excluded",
+            "pending",
+            "minimized",
+            "invalidated",
+            "claimed",
+        ] {
+            let (mut apps, mut reactor) = test_context();
+            let space = SpaceId::new(1);
+            reactor.handle_event(space_state_event(
+                vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.))],
+                vec![Some(space)],
+            ));
+            let mut windows = make_windows(2);
+            if admission == "transient" {
+                windows[1].ax_role = Some("AXWindow".into());
+                windows[1].ax_subrole = Some("AXDialog".into());
+                windows[1].is_resizable = false;
+            }
+            apps.make_app_and_settle(&mut reactor, 1, windows);
+            let wid = WindowId::new(1, 1);
+            let panel = WindowId::new(1, 2);
+            match admission {
+                "excluded" => {
+                    reactor.state.windows.window_mut(panel).unwrap().manage_override = Some(false)
+                }
+                "pending" => {
+                    reactor.state.windows.window_mut(panel).unwrap().is_manageable = false;
+                    reactor.state.windows.remove_window_assignment(panel);
+                }
+                "minimized" => {
+                    reactor.state.windows.observe_minimized(panel);
+                }
+                "invalidated" => reactor.state.windows.invalidate_ax_identity(panel),
+                "claimed" => reactor.state.windows.insert_claim(
+                    panel,
+                    ClaimOwner(10),
+                    rift_protocol::WindowClaimFlags::empty(),
+                ),
+                _ => {}
+            }
+            assert!(!reactor.state.windows.is_admitted(panel), "{admission}");
+            let assignment = reactor.state.windows.workspace_for_window(panel);
+            let claimed_assignment =
+                reactor.state.windows.claim(panel).map(|claim| claim.workspace());
+            let wsid = reactor.test_window_server_id(wid);
+            let handle = reactor.app_manager.apps[&1].handle.clone();
+            let (tx, _events) = crate::actor::channel();
+            let client = Client::new(tx);
+            let ticket = client.prepare(ResizePlan {
+                wid,
+                window_id: wsid.as_u32(),
+                display: 1,
+                handle: handle.clone(),
+                txid: reactor.transaction_manager.get_last_sent_txid(wsid),
+                from: rect(500.),
+                to: rect(900.),
+                duration: Duration::from_millis(300),
+            });
+            ticket.accepted(rect(900.));
+            ticket.state().visual = rect(750.);
+            ticket.state().phase = ResizePhase::Presenting(Instant::now());
+            let (sender, receiver) = AnimationSender::channel();
+            sender.set_resize_client(Some(client));
+            sender.control.lock().frames.insert(wid, (handle.clone(), rect(750.)));
+            reactor.animation_tx = Some(sender);
+            let camera = super::tests::motion_camera(&handle, rect(500.), rect(900.));
+            reactor.presentations.insert(space, ViewportHandle {
+                identity: camera.identity,
+                state: camera.state,
+                windows: vec![wid],
+                headless: None,
+            });
+            let mut changed = reactor.state.windows.window(panel).unwrap().frame_monotonic;
+            changed.size.width += 1.;
+            for frame in [
+                changed,
+                CGRect::new(CGPoint::new(2000., 100.), changed.size),
+            ] {
+                let outcome = reactor
+                    .dispatch_workflow(ReactorEvent::WindowFrameChanged(
+                        panel,
+                        frame,
+                        None,
+                        Requested(false),
+                        Some(MouseState::Up),
+                    ))
+                    .unwrap();
+                assert_eq!(
+                    outcome.arrange.passes, 0,
+                    "{admission} cannot arrange a managed window"
+                );
+                assert!(!outcome.arrange.is_resize);
+                assert!(outcome.layout_events.is_empty());
+                reactor.apply_event_outcome(outcome);
+                assert_eq!(
+                    reactor.state.windows.window(panel).unwrap().frame_monotonic,
+                    frame
+                );
+                assert_eq!(reactor.state.windows.workspace_for_window(panel), assignment);
+                assert_eq!(
+                    reactor.state.windows.claim(panel).map(|claim| claim.workspace()),
+                    claimed_assignment
+                );
+                assert!(!reactor.state.windows.is_admitted(panel));
+                assert!(ticket.is_current());
+                assert!(
+                    receiver.commands.try_iter().next().is_none(),
+                    "unrelated proxy cannot be replaced or stopped"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn live_resize_same_target_camera_echo_preserves_transaction_and_visual_clock() {
+        for presenting in [false, true] {
+            let (tx, mut events) = crate::actor::channel();
+            let client = Client::new(tx);
+            let (handle, mut requests) = AppThreadHandle::channel();
+            let mut manager = AnimationManager {
+                resize: Some(client),
+                ..AnimationManager::new()
+            };
+            let wsid = WindowServerId::new(42);
+            let store = WindowTxStore::new();
+            let mut camera = super::tests::motion_camera(&handle, rect(500.), rect(900.));
+            camera.windows[0].wsid = Some(wsid);
+            camera.store = store.clone();
+            manager.handle_message(Message::Camera(Box::new(camera)));
+            let Event::Prepare(prepared_scene) = events.try_recv().unwrap().1 else {
+                panic!("prepare")
+            };
+            let ticket = prepared_scene.members[0].clone();
+            let txid = ticket.plan().txid;
+            if presenting {
+                ticket.accepted(rect(900.));
+                ticket.state().phase = ResizePhase::Presenting(Instant::now());
+                store.clear_target(&wsid);
+            }
+            let phase = ticket.state().phase;
+            let pending_target = store.get(&wsid).unwrap().target;
+            while requests.try_recv().is_ok() {}
+            while events.try_recv().is_ok() {}
+            for _ in 0..3 {
+                let mut next = super::tests::motion_camera(&handle, rect(500.), rect(900.));
+                next.windows[0].wsid = Some(wsid);
+                next.store = store.clone();
+                manager.handle_message(Message::Camera(Box::new(next)));
+                let proxy = manager.motions[0].windows()[0].proxy.as_ref().unwrap();
+                assert_eq!(proxy.ticket.generation(), ticket.generation());
+                assert_eq!(manager.motions[0].windows()[0].txid, txid);
+                assert_eq!(store.last_txid(&wsid), txid);
+                assert_eq!(store.get(&wsid).unwrap().target, pending_target);
+                assert_eq!(ticket.state().phase, phase);
+                assert!(ticket.is_current());
+                assert!(
+                    requests.try_recv().is_err(),
+                    "an echo cannot inspect or commit native geometry again"
+                );
+                assert!(
+                    events.try_recv().is_err(),
+                    "an echo cannot prepare another capture"
+                );
+            }
+            let mut changed = super::tests::motion_camera(&handle, rect(500.), rect(800.));
+            changed.windows[0].wsid = Some(wsid);
+            changed.store = store.clone();
+            manager.handle_message(Message::Camera(Box::new(changed)));
+            assert!(
+                !ticket.is_current(),
+                "a changed semantic target starts a new transaction"
+            );
+            assert_ne!(store.last_txid(&wsid), txid);
+            assert!(matches!(events.try_recv().unwrap().1, Event::Prepare(_)));
+            assert!(matches!(
+                requests.try_recv().unwrap().1,
+                Request::InspectResize(..)
+            ));
+        }
+    }
+
+    #[test]
+    fn live_resize_camera_echo_cannot_inherit_another_native_owner() {
+        for changed in ["actor", "source", "display", "writer"] {
+            let (tx, mut events) = crate::actor::channel();
+            let (handle, mut requests) = AppThreadHandle::channel();
+            let mut manager = AnimationManager {
+                resize: Some(Client::new(tx)),
+                ..AnimationManager::new()
+            };
+            let wsid = WindowServerId::new(42);
+            let store = WindowTxStore::new();
+            let mut camera = super::tests::motion_camera(&handle, rect(500.), rect(900.));
+            camera.windows[0].wsid = Some(wsid);
+            camera.store = store.clone();
+            manager.handle_message(Message::Camera(Box::new(camera)));
+            let Event::Prepare(prepared_scene) = events.try_recv().unwrap().1 else {
+                panic!("prepare")
+            };
+            let ticket = prepared_scene.members[0].clone();
+            while requests.try_recv().is_ok() {}
+            let mut next = super::tests::motion_camera(&handle, rect(500.), rect(900.));
+            next.windows[0].wsid = Some(wsid);
+            next.store = store.clone();
+            let (other_handle, _other_requests) = AppThreadHandle::channel();
+            match changed {
+                "actor" => next.windows[0].handle = other_handle,
+                "source" => next.windows[0].wsid = Some(WindowServerId::new(43)),
+                "display" => next.display = 2,
+                "writer" => {
+                    store.next_txid(wsid);
+                }
+                _ => unreachable!(),
+            }
+            manager.handle_message(Message::Camera(Box::new(next)));
+            assert!(!ticket.is_current(), "{changed} must replace the native owner");
+            let Event::Prepare(prepared_scene) = events.try_recv().unwrap().1 else {
+                panic!("replacement")
+            };
+            let replacement = prepared_scene.members[0].clone();
+            assert_ne!(replacement.generation(), ticket.generation());
+            assert!(replacement.is_current());
+        }
+    }
+    #[test]
+    fn live_resize_holds_ax_samples_until_ui_retirement_and_keeps_visual_clock() {
+        let (tx, mut events) = crate::actor::channel();
+        let client = Client::new(tx);
+        let (handle, mut requests) = AppThreadHandle::channel();
+        let mut manager = AnimationManager {
+            resize: Some(client),
+            ..AnimationManager::new()
+        };
+        manager.handle_message(Message::Replace(animation(&handle, 500., 900.)));
+        let Event::Prepare(prepared_scene) = events.try_recv().unwrap().1 else {
+            panic!("prepare")
+        };
+        let ticket = prepared_scene.members[0].clone();
+        assert!(matches!(
+            requests.try_recv().unwrap().1,
+            Request::BeginWindowAnimation(..)
+        ));
+        assert!(matches!(
+            requests.try_recv().unwrap().1,
+            Request::InspectResize(..)
+        ));
+        manager.tick_at(Instant::now() + Duration::from_secs(2));
+        assert!(
+            requests.try_recv().is_err(),
+            "no intermediate native geometry during capture wait"
+        );
+        assert!(
+            manager.has_work(),
+            "global animation deadline cannot retire a preparing proxy"
+        );
+        ticket.accepted(rect(900.));
+        ticket.state().phase = ResizePhase::Presenting(Instant::now() - Duration::from_millis(60));
+        manager.tick_at(Instant::now() + Duration::from_secs(2));
+        let frame = manager.motions[0].windows()[0].frame;
+        assert!(frame.size.width > 500. && frame.size.width < 900.);
+        assert!(
+            requests.try_recv().is_err(),
+            "visual spring never enters the native AX queue"
+        );
+        ticket.state().phase = ResizePhase::Presenting(Instant::now() - Duration::from_secs(1));
+        manager.tick_at(Instant::now() + Duration::from_secs(2));
+        assert_eq!(ticket.state().phase, ResizePhase::Finishing);
+        assert!(manager.has_work(), "UI teardown must precede lease release");
+        ticket.state().phase = ResizePhase::Retired;
+        manager.tick_at(Instant::now() + Duration::from_secs(2));
+        assert!(matches!(
+            requests.try_recv().unwrap().1,
+            Request::EndWindowAnimation(..)
+        ));
+        assert!(requests.try_recv().is_err());
+    }
+    #[test]
+    fn live_resize_reversal_before_capture_replaces_the_pending_native_target() {
+        let (tx, mut events) = crate::actor::channel();
+        let client = Client::new(tx);
+        let (handle, mut requests) = AppThreadHandle::channel();
+        let mut manager = AnimationManager {
+            resize: Some(client),
+            ..AnimationManager::new()
+        };
+        manager.handle_message(Message::Replace(animation(&handle, 500., 900.)));
+        let Event::Prepare(prepared_scene) = events.try_recv().unwrap().1 else {
+            panic!("prepare")
+        };
+        let old = prepared_scene.members[0].clone();
+        let mut next = animation(&handle, 500., 500.);
+        next.windows[0].txid = TransactionId::default().next();
+        manager.handle_message(Message::Replace(next));
+        let Event::Prepare(prepared_scene) = events.try_recv().unwrap().1 else {
+            panic!("replacement")
+        };
+        let next = prepared_scene.members[0].clone();
+        assert!(!old.is_current());
+        assert!(next.is_current());
+        assert_eq!(next.plan().to, rect(500.));
+        assert_ne!(next.generation(), old.generation());
+        assert!(matches!(
+            requests.try_recv().unwrap().1,
+            Request::BeginWindowAnimation(..)
+        ));
+        assert!(matches!(
+            requests.try_recv().unwrap().1,
+            Request::InspectResize(..)
+        ));
+        assert!(matches!(
+            requests.try_recv().unwrap().1,
+            Request::InspectResize(..)
+        ));
+        assert!(
+            requests.try_recv().is_err(),
+            "retarget transfers the existing lease"
+        );
+        manager.tick_at(Instant::now() + Duration::from_secs(1));
+        assert!(requests.try_recv().is_err());
+    }
+    #[test]
+    fn live_resize_async_retirement_releases_lease_before_a_new_message() {
+        let (tx, mut events) = crate::actor::channel();
+        let client = Client::new(tx);
+        let (handle, mut requests) = AppThreadHandle::channel();
+        let mut manager = AnimationManager {
+            resize: Some(client),
+            ..AnimationManager::new()
+        };
+        manager.handle_message(Message::Replace(animation(&handle, 500., 900.)));
+        let Event::Prepare(prepared_scene) = events.try_recv().unwrap().1 else {
+            panic!("prepare")
+        };
+        let ticket = prepared_scene.members[0].clone();
+        while requests.try_recv().is_ok() {}
+        ticket.accepted(rect(900.));
+        ticket.state().phase = ResizePhase::Presenting(Instant::now() - Duration::from_secs(1));
+        manager.tick_at(Instant::now() + Duration::from_secs(2));
+        assert_eq!(ticket.state().phase, ResizePhase::Finishing);
+        ticket.state().phase = ResizePhase::Retired;
+        manager.handle_message(Message::Stop(vec![]));
+        assert!(matches!(
+            requests.try_recv().unwrap().1,
+            Request::EndWindowAnimation(..)
+        ));
+        assert!(requests.try_recv().is_err());
+        assert!(!manager.has_work());
+    }
+    #[test]
+    fn live_resize_in_doubt_commit_timeout_never_resumes_intermediate_native_sizes() {
+        let (tx, mut events) = crate::actor::channel();
+        let client = Client::new(tx);
+        let (handle, mut requests) = AppThreadHandle::channel();
+        let mut manager = AnimationManager {
+            resize: Some(client),
+            ..AnimationManager::new()
+        };
+        manager.handle_message(Message::Replace(animation(&handle, 500., 900.)));
+        let Event::Prepare(prepared_scene) = events.try_recv().unwrap().1 else {
+            panic!("prepare")
+        };
+        let ticket = prepared_scene.members[0].clone();
+        while requests.try_recv().is_ok() {}
+        ticket.state().attempted = true;
+        ticket.fallback();
+        manager.tick_at(Instant::now() + Duration::from_millis(100));
+        let Request::InteractiveFramesPending(frames) = requests.try_recv().unwrap().1 else {
+            panic!("final reconciliation")
+        };
+        let mut observed = vec![];
+        frames.drain_with(|_, frame, _, _, _, _, _| observed.push(frame));
+        assert_eq!(observed, vec![rect(900.)]);
+        manager.tick_at(Instant::now() + Duration::from_millis(160));
+        assert!(
+            requests.try_recv().is_err(),
+            "an uncertain commit converges once, without an AX size spring"
+        );
+    }
+    #[test]
+    fn live_resize_nonanimated_camera_detaches_inherited_proxy_before_native_positioning() {
+        let (tx, mut events) = crate::actor::channel();
+        let client = Client::new(tx);
+        let (handle, mut requests) = AppThreadHandle::channel();
+        let mut manager = AnimationManager {
+            resize: Some(client),
+            ..AnimationManager::new()
+        };
+        let from = CGRect::new(CGPoint::ZERO, CGSize::new(500., 600.));
+        let to = CGRect::new(CGPoint::ZERO, CGSize::new(900., 600.));
+        let mut camera = super::tests::motion_camera(&handle, from, to);
+        camera.windows[0].wsid = Some(WindowServerId::new(42));
+        manager.handle_message(Message::Camera(Box::new(camera)));
+        let Event::Prepare(prepared_scene) = events.try_recv().unwrap().1 else {
+            panic!("prepare")
+        };
+        let ticket = prepared_scene.members[0].clone();
+        ticket.accepted(to);
+        while requests.try_recv().is_ok() {}
+        let target = CGRect::new(CGPoint::new(30., 0.), to.size);
+        let mut next = super::tests::motion_camera(&handle, to, target);
+        next.windows[0].wsid = Some(WindowServerId::new(42));
+        next.animate = false;
+        manager.handle_message(Message::Camera(Box::new(next)));
+        assert!(!ticket.is_current());
+        assert!(manager.motions[0].windows()[0].proxy.is_none());
+        manager.tick_at(Instant::now() + Duration::from_millis(10));
+        let Request::InteractiveFramesPending(frames) = requests.try_recv().unwrap().1 else {
+            panic!("camera native frame")
+        };
+        let mut observed = vec![];
+        frames.drain_with(|_, frame, _, _, _, _, _| observed.push(frame));
+        assert_eq!(observed, vec![target]);
     }
 }

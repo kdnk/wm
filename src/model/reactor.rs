@@ -121,9 +121,18 @@ impl WindowState {
     }
 
     pub(crate) fn is_admitted_with_override(&self, manage_override: Option<bool>) -> bool {
-        !self.native_transient
+        let explicitly_managed_dialog = manage_override == Some(true)
+            && self.info.ax_role.as_deref() == Some("AXWindow")
+            && self.info.ax_subrole.as_deref() == Some("AXDialog")
+            && self.info.is_root
+            && self.info.is_resizable
+            && self.info.is_modal == Some(false);
+        (!self.native_transient
+            || (manage_override == Some(true)
+                && self.info.ax_role.as_deref() == Some("AXWindow")
+                && self.info.ax_subrole.as_deref() == Some("AXStandardWindow")))
             && !self.info.is_minimized
-            && !crate::sys::app::is_ax_transient(&self.info)
+            && (!crate::sys::app::is_ax_transient(&self.info) || explicitly_managed_dialog)
             && manage_override.unwrap_or(self.is_manageable)
     }
 

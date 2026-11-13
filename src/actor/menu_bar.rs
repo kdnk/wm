@@ -6,6 +6,7 @@ use objc2_app_kit::{NSApplication, NSApplicationActivationOptions, NSMenu, NSRun
 use objc2_core_foundation::CGRect;
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::actor::app::WindowId;
 use crate::actor::{config, reactor};
 use crate::common::config::{Config, ConfigCommand};
 use crate::layout_engine::LayoutCommand;
@@ -14,10 +15,33 @@ use crate::sys::timer::Timer;
 use crate::ui::menu_bar::{MenuAction, MenuIcon};
 use crate::{actor, common};
 
-/// Data consumed by the workspace menu and miniature layout indicator.
-/// Window titles, application metadata, and logical layout snapshots stay in IPC queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MenuLayoutPosition {
+    pub column_id: crate::layout_engine::ColumnId,
+    pub column: usize,
+    pub row: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MenuWindow {
+    pub id: WindowId,
+    pub app_name: String,
+    pub bundle_id: Option<String>,
+    pub title: String,
+    pub focused: bool,
+    pub layout_position: Option<MenuLayoutPosition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MenuColumn {
+    pub id: crate::layout_engine::ColumnId,
+    pub members: Vec<WindowId>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Workspace {
+    pub columns: Vec<MenuColumn>,
+    pub key: crate::layout_engine::VirtualWorkspaceId,
     pub id: String,
     pub index: usize,
     pub name: String,
@@ -25,15 +49,19 @@ pub struct Workspace {
     pub is_active: bool,
     pub window_count: usize,
     pub windows: Vec<CGRect>,
+    pub window_list: Vec<MenuWindow>,
     pub has_fullscreen: bool,
 }
 
 /// Menu-bar-only projection; workspace indices remain local to each space.
 #[derive(Debug, Clone)]
 pub struct DisplayWorkspaces {
+    pub screen_id: crate::sys::screen::ScreenId,
+    pub is_builtin: bool,
     pub display_uuid: String,
     pub space: SpaceId,
     pub is_active_context: bool,
+    pub space_is_activated: bool,
     pub workspaces: Vec<Workspace>,
 }
 
@@ -61,6 +89,35 @@ pub enum Event {
 }
 
 const LAYOUT_REFRESH_DELAY: Duration = Duration::from_millis(150);
+const MENU_UPDATE_DELAY: Duration = Duration::from_millis(150);
+
+fn focused_window(update: &Update) -> Option<WindowId> {
+    update
+        .displays
+        .iter()
+        .flat_map(|display| &display.workspaces)
+        .flat_map(|workspace| &workspace.window_list)
+        .find(|window| window.focused)
+        .map(|window| window.id)
+}
+
+fn queue_update(
+    last: Option<&Update>,
+    pending: &mut Option<Update>,
+    timer: &Timer,
+    update: Update,
+) -> Option<Update> {
+    if last.is_none_or(|last| focused_window(last) != focused_window(&update)) {
+        *pending = None;
+        timer.set_next_fire(Duration::MAX);
+        return Some(update);
+    }
+    if pending.is_none() {
+        timer.set_next_fire(MENU_UPDATE_DELAY);
+    }
+    *pending = Some(update);
+    None
+}
 
 pub struct Menu {
     config: Config,
@@ -126,17 +183,21 @@ impl Menu {
     }
 
     pub async fn run(mut self) {
-        // Updates are latest-wins: only the newest one is applied once updates go quiet.
-        const DEBOUNCE: Duration = Duration::from_millis(150);
-
         let mut pending: Option<Update> = None;
         // Reusable main-run-loop timers; idle while disarmed, so they cost no thread or wakeup.
-        // The debounce stays exact: it already delays the visible workspace indicator.
         let mut debounce = Timer::manual();
         // Nothing waits on a layout-folder rescan, so it may coalesce with other wakeups.
         let mut refresh_layouts = Timer::manual().with_tolerance(Duration::from_millis(50));
 
+        let mut presentation = Timer::manual();
+        let mut presentation_armed = false;
         loop {
+            if !presentation_armed
+                && self.icon.as_ref().is_some_and(|icon| icon.needs_presentation_refresh())
+            {
+                presentation.set_next_fire(Duration::from_millis(250));
+                presentation_armed = true;
+            }
             tokio::select! {
                 maybe_action = self.action_rx.recv() => {
                     if let Some(action) = maybe_action {
@@ -152,6 +213,12 @@ impl Menu {
                         self.handle_update(update);
                     }
                 }
+                Some(()) = presentation.next(), if presentation_armed => {
+                    presentation_armed = false;
+                    if let (Some(icon), Some(update)) = (&mut self.icon, &self.last_update) {
+                        icon.update_status_icon(&update.displays, &self.config.settings.ui.menu_bar, &self.binding_mode);
+                    }
+                }
                 Some(()) = refresh_layouts.next() => {
                     self.handle_action(MenuAction::RefreshLayoutFiles);
                 }
@@ -162,8 +229,9 @@ impl Menu {
                             let _enter = span.enter();
                             match event {
                                 Event::Update(update) => {
-                                    pending = Some(update);
-                                    debounce.set_next_fire(DEBOUNCE);
+                                    if let Some(update) = queue_update(self.last_update.as_ref(), &mut pending, &debounce, update) {
+                                        self.handle_update(update);
+                                    }
                                 }
                                 Event::BindingModeChanged(mode) => {
                                     self.binding_mode = mode;
@@ -279,6 +347,18 @@ impl Menu {
 
     fn handle_action(&mut self, action: MenuAction) {
         match action {
+            MenuAction::ScopedLayout { space, command } => {
+                self.reactor_tx.send(reactor::Event::MenuBarLayoutCommand { space, command })
+            }
+            MenuAction::ScopedToggle(space) => {
+                self.reactor_tx.send(reactor::Event::MenuBarToggleSpace { space })
+            }
+            MenuAction::ScopedRestore { space, path, scope, source } => self
+                .reactor_tx
+                .send(reactor::Event::MenuBarRestoreLayout { space, path, scope, source }),
+            MenuAction::FocusWindow(window) => {
+                self.reactor_tx.send(reactor::Event::MenuBarFocusWindow(window));
+            }
             MenuAction::SetLayout(mode) => self
                 .send_layout_command(LayoutCommand::SetWorkspaceLayout { workspace: None, mode }),
             MenuAction::NextWorkspace => {
@@ -377,7 +457,10 @@ pub(crate) fn sig(update: &Update) -> u64 {
     for display in &update.displays {
         display.display_uuid.hash(&mut hash);
         display.space.hash(&mut hash);
+        display.screen_id.hash(&mut hash);
+        display.is_builtin.hash(&mut hash);
         display.is_active_context.hash(&mut hash);
+        display.space_is_activated.hash(&mut hash);
         display.workspaces.len().hash(&mut hash);
         for workspace in &display.workspaces {
             workspace.id.hash(&mut hash);
@@ -386,6 +469,9 @@ pub(crate) fn sig(update: &Update) -> u64 {
             workspace.layout_mode.hash(&mut hash);
             workspace.is_active.hash(&mut hash);
             workspace.window_count.hash(&mut hash);
+            workspace.window_list.hash(&mut hash);
+            workspace.columns.hash(&mut hash);
+            workspace.key.hash(&mut hash);
             workspace.has_fullscreen.hash(&mut hash);
             workspace.windows.len().hash(&mut hash);
             for window in &workspace.windows {
@@ -409,6 +495,8 @@ mod tests {
 
     fn workspace(layout_mode: &str) -> Workspace {
         Workspace {
+            key: Default::default(),
+            columns: Vec::new(),
             id: "VirtualWorkspaceId(1v1)".to_string(),
             index: 0,
             name: "main".to_string(),
@@ -416,6 +504,7 @@ mod tests {
             is_active: true,
             window_count: 1,
             windows: Vec::new(),
+            window_list: Vec::new(),
             has_fullscreen: false,
         }
     }
@@ -424,9 +513,12 @@ mod tests {
         Update {
             active_space_is_activated: true,
             displays: vec![DisplayWorkspaces {
+                screen_id: crate::sys::screen::ScreenId::new(0),
+                is_builtin: false,
                 display_uuid: "a".into(),
                 space: SpaceId::new(1),
                 is_active_context: true,
+                space_is_activated: true,
                 workspaces,
             }],
         }
@@ -436,9 +528,12 @@ mod tests {
     fn grouped_signature_and_command_context() {
         let mut base = update(vec![workspace("bsp")]);
         base.displays.push(DisplayWorkspaces {
+            screen_id: crate::sys::screen::ScreenId::new(0),
+            is_builtin: false,
             display_uuid: "b".into(),
             space: SpaceId::new(2),
             is_active_context: false,
+            space_is_activated: true,
             workspaces: vec![workspace("stack"), workspace("floating")],
         });
         let before = sig(&base);
@@ -477,5 +572,121 @@ mod tests {
         changed[0].has_fullscreen = true;
 
         assert_ne!(sig(&update(base)), sig(&update(changed)));
+    }
+    #[test]
+    fn menu_bar_window_signature_tracks_metadata_identity_focus_and_order() {
+        let mut base = update(vec![workspace("scrolling")]);
+        base.displays[0].workspaces[0].window_list = vec![
+            MenuWindow {
+                id: WindowId::new(1, 1),
+                app_name: "Editor".into(),
+                bundle_id: Some("app.editor".into()),
+                title: "first".into(),
+                focused: true,
+                layout_position: None,
+            },
+            MenuWindow {
+                id: WindowId::new(1, 2),
+                app_name: "Editor".into(),
+                bundle_id: Some("app.editor".into()),
+                title: "second".into(),
+                focused: false,
+                layout_position: None,
+            },
+        ];
+        let before = sig(&base);
+        for field in 0..7 {
+            let mut changed = base.clone();
+            let windows = &mut changed.displays[0].workspaces[0].window_list;
+            match field {
+                0 => windows[0].title.push_str(" changed"),
+                1 => windows[0].focused = false,
+                2 => windows[0].id = WindowId::new(2, 1),
+                3 => windows[0].app_name.push_str(" changed"),
+                4 => windows[0].bundle_id = None,
+                5 => {
+                    windows[0].layout_position = Some(MenuLayoutPosition {
+                        column_id: crate::layout_engine::ColumnId(1),
+                        column: 1,
+                        row: 0,
+                    })
+                }
+                _ => windows.reverse(),
+            }
+            assert_ne!(before, sig(&changed), "field {field}");
+        }
+    }
+
+    #[test]
+    fn menu_bar_focus_updates_bypass_metadata_delay_and_discard_stale_pending() {
+        use crate::sys::executor::Executor;
+        Executor::run(async {
+            let mut pending = None;
+            let timer = Timer::manual();
+            let mut last = update(vec![workspace("scrolling")]);
+            last.displays[0].workspaces[0].window_list = (1..=2)
+                .map(|idx| MenuWindow {
+                    id: WindowId::new(1, idx),
+                    app_name: "Editor".into(),
+                    bundle_id: None,
+                    title: format!("window {idx}"),
+                    focused: idx == 1,
+                    layout_position: None,
+                })
+                .collect();
+            let initial = queue_update(None, &mut pending, &timer, last.clone()).unwrap();
+            assert_eq!(focused_window(&initial), Some(WindowId::new(1, 1)));
+            for target in [Some(2), Some(1), None, Some(2)] {
+                let mut metadata = last.clone();
+                metadata.displays[0].workspaces[0].window_list[0].title.push_str(" updated");
+                assert!(
+                    queue_update(Some(&last), &mut pending, &timer, metadata.clone()).is_none()
+                );
+                assert!(pending.is_some());
+                for window in &mut metadata.displays[0].workspaces[0].window_list {
+                    window.focused = Some(window.id.idx.get()) == target;
+                }
+                let shown = queue_update(Some(&last), &mut pending, &timer, metadata)
+                    .expect("focus must publish without waiting for the metadata timer");
+                assert_eq!(focused_window(&shown), target.map(|idx| WindowId::new(1, idx)));
+                assert!(
+                    pending.is_none(),
+                    "an older metadata update must never restore the previous focus"
+                );
+                last = shown;
+            }
+        });
+    }
+
+    #[test]
+    fn menu_bar_publishes_latest_update_during_continuous_title_changes() {
+        use crate::sys::executor::Executor;
+        Executor::run(async {
+            let mut pending = None;
+            let mut timer = Timer::manual();
+            let mut changes =
+                Timer::repeating(Duration::from_millis(100), Duration::from_millis(100));
+            let mut timeout = Timer::sleep(Duration::from_millis(450));
+            let mut generation = 0;
+            let last = update(vec![workspace("initial")]);
+            assert!(queue_update(Some(&last), &mut pending, &timer, last.clone()).is_none());
+            loop {
+                tokio::select! {
+                    _ = timer.next() => {
+                        assert!(generation >= 1);
+                        let shown = pending.take().unwrap();
+                        assert_eq!(shown.context_workspaces()[0].name, generation.to_string());
+                        break;
+                    }
+                    _ = changes.next() => {
+                        generation += 1;
+                        let mut changed = workspace("scrolling");
+                        changed.name = generation.to_string();
+                        assert!(queue_update(Some(&last), &mut pending, &timer, update(vec![changed])).is_none());
+                    }
+                    _ = &mut timeout => panic!("continuous updates starved menu publication"),
+                }
+            }
+        });
     }
 }

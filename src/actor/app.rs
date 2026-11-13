@@ -506,6 +506,8 @@ impl AppThreadHandle {
         let mut req = req;
         match &mut req {
             Request::SetWindowFrames(_, _, _, _, authority)
+            | Request::CommitResize(_, authority)
+            | Request::InspectResize(_, authority)
             | Request::BeginWindowAnimation(_, authority)
             | Request::EndWindowAnimation(_, authority) => {
                 *authority = self.frame_authority.clone()
@@ -624,6 +626,10 @@ pub enum Request {
     #[doc(hidden)]
     InteractiveFramesPending(InteractiveFrameQueue),
 
+    #[doc(hidden)]
+    CommitResize(crate::model::live_resize::Ticket, FrameAuthority),
+    #[doc(hidden)]
+    InspectResize(crate::model::live_resize::Ticket, FrameAuthority),
     BeginWindowAnimation(WindowId, FrameAuthority),
     EndWindowAnimation(WindowId, FrameAuthority),
     CancelWindowAnimation(WindowId, u64, FrameAuthority),
@@ -647,6 +653,8 @@ impl Request {
     pub(crate) fn authorized(self) -> Option<(Self, FrameAuthority)> {
         let authority = match &self {
             Self::SetWindowFrames(_, _, _, _, authority)
+            | Self::CommitResize(_, authority)
+            | Self::InspectResize(_, authority)
             | Self::BeginWindowAnimation(_, authority)
             | Self::EndWindowAnimation(_, authority)
             | Self::CancelWindowAnimation(_, _, authority) => authority.clone(),
@@ -825,6 +833,7 @@ impl FrameTarget for AXUIElement {
 struct AuthorizedFrameTarget<'a, T> {
     target: &'a T,
     authority: &'a FrameAuthority,
+    resize: Option<&'a crate::model::live_resize::Ticket>,
 }
 
 impl<T: FrameTarget> FrameTarget for AuthorizedFrameTarget<'_, T> {
@@ -833,7 +842,7 @@ impl<T: FrameTarget> FrameTarget for AuthorizedFrameTarget<'_, T> {
     fn frame(&self) -> Result<CGRect, AxError> { self.target.frame() }
 
     fn set_position(&self, origin: CGPoint) -> Result<(), AxError> {
-        if self.authority.is_current() {
+        if self.authority.is_current() && self.resize.is_none_or(|ticket| ticket.is_current()) {
             self.target.set_position(origin)
         } else {
             Ok(())
@@ -841,7 +850,7 @@ impl<T: FrameTarget> FrameTarget for AuthorizedFrameTarget<'_, T> {
     }
 
     fn set_size(&self, size: CGSize) -> Result<(), AxError> {
-        if self.authority.is_current() {
+        if self.authority.is_current() && self.resize.is_none_or(|ticket| ticket.is_current()) {
             self.target.set_size(size)
         } else {
             Ok(())
@@ -884,14 +893,19 @@ fn write_frame(
     mut target: CGRect,
     mut writes: FrameWrites,
 ) -> Result<FrameWrites, AxError> {
-    // Moving before growing avoids clamping at a screen edge; shrinking first
-    // avoids it in the opposite direction. A frame that grows on one axis and
-    // shrinks on the other needs both: still oversized on arrival, the window
-    // is clamped against the destination's edge and keeps that origin (#598).
+    // macOS can clamp a growing window before it reaches its destination.
+    // Mixed resizes need the shrink-first fallback only when the target size
+    // cannot stay at the current origin without being clamped (#598).
     let grows = target.size.width > current.size.width + 0.5
         || target.size.height > current.size.height + 0.5;
     let shrinks = target.size.width < current.size.width - 0.5
         || target.size.height < current.size.height - 0.5;
+    let move_first = grows
+        && !(shrinks
+            && elem.scrolling_bounds().is_some_and(|bounds| {
+                let resized = CGRect::new(current.origin, target.size);
+                bounds.apply(resized).origin.same_as(resized.origin)
+            }));
     let mut unresponsive = false;
     let mut failed_with = |result: Result<(), AxError>| {
         unresponsive |= matches!(result, Err(AxError::Ax(AXError::CannotComplete)));
@@ -908,20 +922,20 @@ fn write_frame(
         target.origin = origin;
         writes.position = false;
     }
-    if writes.position && writes.size && grows && shrinks {
+    if writes.position && writes.size && move_first && shrinks {
         let shrunk = CGSize::new(
             target.size.width.min(current.size.width),
             target.size.height.min(current.size.height),
         );
         failed.size = failed_with(elem.set_size(shrunk));
     }
-    if writes.position && grows {
+    if writes.position && move_first {
         failed.position = failed_with(elem.set_position(target.origin));
     }
     if writes.size {
         failed.size |= failed_with(elem.set_size(target.size));
     }
-    if writes.position && !grows {
+    if writes.position && !move_first {
         failed.position = failed_with(elem.set_position(target.origin));
     }
     if unresponsive {
@@ -996,18 +1010,23 @@ fn reconcile_frame(
     Ok(frame)
 }
 
-/// Writes a high-frequency frame, which is never read back. Every frame is
-/// written because `hint` may hold intended rather than observed geometry.
+/// Position-only frames avoid AX readback. Bounded resizes read the accepted
+/// size because apps can quantize it and otherwise lose their display intersection.
 fn write_interactive_frame(
     elem: &impl FrameTarget,
     hint: &mut CGRect,
     mut frame: CGRect,
-    mut set_size: bool,
+    set_size: bool,
     source: FrameSource,
 ) {
     if let Some(bounds) = elem.scrolling_bounds() {
+        if set_size {
+            if let Ok(accepted) = reconcile_frame(elem, *hint, frame, FrameMode::Full, || {}) {
+                *hint = accepted;
+            }
+            return;
+        }
         frame = bounds.apply(CGRect::new(frame.origin, hint.size));
-        set_size = false;
     }
     if set_size || (source != FrameSource::Drag && !hint.size.same_as(frame.size)) {
         let both = FrameWrites { position: true, size: true };
@@ -1318,6 +1337,7 @@ impl State {
             &AuthorizedFrameTarget {
                 target: &window.elem,
                 authority: &authority,
+                resize: None,
             },
             &mut window.last_known_frame,
             frame,
@@ -1539,6 +1559,7 @@ impl State {
                             &AuthorizedFrameTarget {
                                 target: &elem,
                                 authority: &authority,
+                                resize: None,
                             },
                             hint,
                             desired,
@@ -1561,6 +1582,65 @@ impl State {
                         Requested(true),
                         None,
                     ));
+                }
+            }
+            Request::InspectResize(ticket, _) => {
+                if !ticket.is_current() {
+                    return Ok(false);
+                }
+                pending_frames.remove(&ticket.plan().wid);
+                match self.window_mut(ticket.plan().wid).and_then(|window| window.elem.frame()) {
+                    Ok(frame) => {
+                        ticket.observed(frame);
+                        ticket.state().inspected = true;
+                        ticket.wake();
+                    }
+                    Err(_) => ticket.fallback(),
+                }
+            }
+            Request::CommitResize(ticket, _) => {
+                let plan = ticket.plan();
+                let wid = plan.wid;
+                if !ticket.is_current() {
+                    return Ok(false);
+                }
+                pending_frames.remove(&wid);
+                let (elem, hint) = match self.window_mut(wid) {
+                    Ok(window) => {
+                        window.last_seen_txid = plan.txid;
+                        (window.elem.clone(), window.last_known_frame)
+                    }
+                    Err(_) => {
+                        ticket.fallback();
+                        return Ok(false);
+                    }
+                };
+                let result = reconcile_frame(
+                    &AuthorizedFrameTarget {
+                        target: &elem,
+                        authority: &authority,
+                        resize: Some(&ticket),
+                    },
+                    hint,
+                    plan.to,
+                    FrameMode::Full,
+                    || {},
+                );
+                // AX can mutate geometry even when a setter reports failure.
+                let observed = elem.frame().ok().or_else(|| result.ok());
+                if let Some(frame) = observed {
+                    ticket.observed(frame);
+                    if let Ok(window) = self.window_mut(wid) {
+                        window.last_known_frame = frame;
+                        if ticket.is_current() {
+                            window.last_animation_frame = Some((frame, authority.clone()));
+                        }
+                    }
+                    if ticket.is_current() {
+                        ticket.accepted(frame);
+                    }
+                } else {
+                    ticket.fallback();
                 }
             }
             Request::BeginWindowAnimation(wid, _) => {
@@ -1673,6 +1753,7 @@ impl State {
                             &AuthorizedFrameTarget {
                                 target: &elem,
                                 authority: &authority,
+                                resize: None,
                             },
                             frame,
                             target,
@@ -1956,7 +2037,9 @@ impl State {
         //
         // Only elide a single-window request. Multi-window batches still need
         // their raises to establish the requested stacking order.
-        if is_frontmost && this.main_window == Some(first) && wids.len() == 1 {
+        if raise_is_already_focused(is_frontmost, wids, || {
+            this.app.focused_window().ok().and_then(|focused| this.id(&focused).ok())
+        }) {
             trace!(?first, "Skipping raise for already focused window");
             this.send_event(Event::RaiseCompleted { window_id: first, sequence_id });
             return Ok(());
@@ -2826,6 +2909,14 @@ pub(crate) async fn run_app(
     state.run(info, handle, requests_rx, notifications_rx, raises_rx).await;
 }
 
+fn raise_is_already_focused(
+    is_frontmost: bool,
+    targets: &[WindowId],
+    focused_window: impl FnOnce() -> Option<WindowId>,
+) -> bool {
+    is_frontmost && targets.len() == 1 && focused_window() == targets.first().copied()
+}
+
 fn trace<T>(
     desc: &str,
     elem: &AXUIElement,
@@ -2981,6 +3072,73 @@ mod frame_tests {
     }
 
     #[test]
+    fn live_resize_equal_frame_commit_acknowledges_without_geometry_setters() {
+        let target = rect(10., 20., 1024., 800.);
+        let window = FakeWindow {
+            frame: Cell::new(target),
+            ..Default::default()
+        };
+        let accepted = reconcile_frame(&window, target, target, FrameMode::Full, || {
+            panic!("equal geometry needs no setter")
+        })
+        .unwrap();
+        assert_eq!(accepted, target);
+        assert_eq!(*window.calls.borrow(), vec!["frame"]);
+        assert!(window.placements.borrow().is_empty());
+    }
+
+    #[test]
+    fn live_resize_permit_fences_actual_frame_setters_after_retarget() {
+        use crate::model::live_resize::{Client, Plan};
+        let (tx, _rx) = actor::channel();
+        let client = Client::new(tx);
+        let (handle, _requests) = AppThreadHandle::channel();
+        let wid = WindowId::new(1, 1);
+        let from = rect(10., 20., 500., 600.);
+        let to = rect(10., 20., 900., 600.);
+        let plan = Plan {
+            wid,
+            window_id: 42,
+            display: 1,
+            handle,
+            txid: Default::default(),
+            from,
+            to,
+            duration: Duration::from_millis(300),
+        };
+        let old = client.prepare(plan.clone());
+        let next = client.prepare(Plan { to: from, ..plan });
+        let window = FakeWindow {
+            frame: Cell::new(from),
+            ..Default::default()
+        };
+        let authority = FrameAuthority::default();
+        let target = AuthorizedFrameTarget {
+            target: &window,
+            authority: &authority,
+            resize: Some(&old),
+        };
+        reconcile_frame(&target, from, to, FrameMode::Full, || {}).unwrap();
+        assert_eq!(window.frame.get(), from);
+        assert!(window.calls.borrow().iter().all(|call| *call == "frame"));
+        let target = AuthorizedFrameTarget {
+            target: &window,
+            authority: &authority,
+            resize: Some(&next),
+        };
+        target.set_size(to.size).unwrap();
+        assert_eq!(window.frame.get().size, to.size);
+        next.revoke();
+        target.set_position(CGPoint::new(700., 20.)).unwrap();
+        target.set_size(from.size).unwrap();
+        assert_eq!(
+            window.frame.get(),
+            to,
+            "revoked generation cannot make a subsequent AX write"
+        );
+    }
+
+    #[test]
     fn stepped_sizes_keep_display_intersection_without_animation_reads() {
         let screen = rect(623., 1726., 1728., 1000.);
         for x in [screen.origin.x - 996., screen.max().x - 1.] {
@@ -2993,6 +3151,7 @@ mod frame_tests {
             let target = AuthorizedFrameTarget {
                 target: &window,
                 authority: &authority,
+                resize: None,
             };
             let requested = rect(x, 1726., 997., 800.);
             let mut accepted =
@@ -3006,7 +3165,7 @@ mod frame_tests {
                     &target,
                     &mut accepted,
                     rect(x, 1726., 1103., 800.),
-                    true,
+                    false,
                     FrameSource::Viewport,
                 );
             }
@@ -3018,6 +3177,141 @@ mod frame_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn macos_motion_bounded_resizes_reconcile_accepted_sizes_without_losing_display() {
+        let screen = rect(623., 1726., 1728., 1000.);
+        for x in [-10000., 700., 10000.] {
+            let window = FakeWindow {
+                frame: Cell::new(rect(700., 1726., 1000., 800.)),
+                size_step: 10.,
+                min_size: CGSize::new(500., 200.),
+                ..Default::default()
+            };
+            let authority = FrameAuthority(None, ScrollingDisplayBounds::for_screen(screen, &[]));
+            let target = AuthorizedFrameTarget {
+                target: &window,
+                authority: &authority,
+                resize: None,
+            };
+            let mut accepted = window.frame.get();
+            for width in [997., 1103., 733., 499., 900.] {
+                window.calls.borrow_mut().clear();
+                write_interactive_frame(
+                    &target,
+                    &mut accepted,
+                    rect(x, 1726., width, 800.),
+                    true,
+                    FrameSource::Viewport,
+                );
+                assert_eq!(accepted, window.frame.get());
+                assert!(window.calls.borrow().contains(&"size"));
+                assert!(window.calls.borrow().contains(&"frame"));
+                assert!(accepted.max().x > screen.origin.x && accepted.origin.x < screen.max().x);
+            }
+            window.calls.borrow_mut().clear();
+            write_interactive_frame(
+                &target,
+                &mut accepted,
+                rect(x, 1726., 1500., 800.),
+                false,
+                FrameSource::Viewport,
+            );
+            assert!(window.calls.borrow().iter().all(|call| *call == "position"));
+            assert_eq!(accepted.size, window.frame.get().size);
+            assert!(accepted.max().x > screen.origin.x && accepted.origin.x < screen.max().x);
+        }
+    }
+
+    #[test]
+    fn macos_motion_right_edge_resize_has_no_temporary_parking_excursion() {
+        let screen = rect(0., 0., 1000., 800.);
+        let from = rect(700., 0., 400., 600.);
+        let to = rect(690., 0., 420., 600.);
+        let window = FakeWindow {
+            frame: Cell::new(from),
+            ..Default::default()
+        };
+        let authority = FrameAuthority(None, ScrollingDisplayBounds::for_screen(screen, &[]));
+        let target = AuthorizedFrameTarget {
+            target: &window,
+            authority: &authority,
+            resize: None,
+        };
+        let mut accepted = from;
+        write_interactive_frame(&target, &mut accepted, to, true, FrameSource::Viewport);
+        assert_eq!(accepted, to);
+        let placements = window.placements.borrow();
+        assert!(
+            placements.iter().all(|frame| (690. ..=700.).contains(&frame.origin.x)),
+            "resize left its presentation interval: {placements:?}"
+        );
+    }
+
+    #[test]
+    fn macos_motion_contained_mixed_resize_has_one_content_layout() {
+        let screen = rect(0., 0., 1000., 800.);
+        let from = rect(100., 0., 400., 600.);
+        let to = rect(200., 100., 500., 500.);
+        let window = FakeWindow {
+            frame: Cell::new(from),
+            display: Some(screen),
+            ..Default::default()
+        };
+        let authority = FrameAuthority(None, ScrollingDisplayBounds::for_screen(screen, &[]));
+        let target = AuthorizedFrameTarget {
+            target: &window,
+            authority: &authority,
+            resize: None,
+        };
+        let mut accepted = from;
+        write_interactive_frame(&target, &mut accepted, to, true, FrameSource::Viewport);
+        assert_eq!(accepted, to);
+        let placements = window.placements.borrow();
+        assert!(
+            placements.iter().all(|frame| frame.size == from.size || frame.size == to.size),
+            "resize applied an intermediate content size: {placements:?}"
+        );
+        assert_eq!(
+            window.calls.borrow().iter().filter(|call| **call == "size").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn macos_motion_resizes_stay_off_the_neighbor_display() {
+        let screen = rect(0., 0., 1000., 800.);
+        let neighbor = rect(1000., 0., 1000., 800.);
+        let from = rect(700., 0., 400., 600.);
+        let window = FakeWindow {
+            frame: Cell::new(from),
+            min_size: CGSize::new(600., 200.),
+            ..Default::default()
+        };
+        let authority = FrameAuthority(
+            None,
+            ScrollingDisplayBounds::for_screen(screen, &[screen, neighbor]),
+        );
+        let target = AuthorizedFrameTarget {
+            target: &window,
+            authority: &authority,
+            resize: None,
+        };
+        let mut accepted = from;
+        write_interactive_frame(
+            &target,
+            &mut accepted,
+            rect(690., 0., 420., 600.),
+            true,
+            FrameSource::Viewport,
+        );
+        assert_eq!(accepted, rect(400., 0., 600., 600.));
+        let placements = window.placements.borrow();
+        assert!(
+            placements.iter().all(|frame| frame.origin.x >= 0. && frame.max().x <= 1000.),
+            "resize crossed into the neighboring display: {placements:?}"
+        );
     }
 
     #[test]
@@ -3054,6 +3348,7 @@ mod frame_tests {
         let fenced = AuthorizedFrameTarget {
             target: &window,
             authority: &authority,
+            resize: None,
         };
         write_interactive_frame(
             &fenced,
@@ -3165,6 +3460,25 @@ mod frame_tests {
 #[cfg(test)]
 mod tests {
     use super::is_transient_menu_role;
+
+    #[test]
+    fn managed_attached_window_raise_requires_actual_focused_identity() {
+        let parent = super::WindowId::new(1, 1);
+        let child = super::WindowId::new(1, 2);
+        assert!(!super::raise_is_already_focused(true, &[parent], || Some(child)));
+        assert!(super::raise_is_already_focused(true, &[parent], || Some(parent)));
+        assert!(!super::raise_is_already_focused(true, &[parent], || None));
+        assert!(super::raise_is_already_focused(true, &[child], || Some(child)));
+        for (frontmost, targets) in [
+            (false, vec![parent]),
+            (true, vec![parent, child]),
+            (true, vec![]),
+        ] {
+            assert!(!super::raise_is_already_focused(frontmost, &targets, || {
+                panic!("non-candidate raises must not read AX focus")
+            }));
+        }
+    }
 
     #[test]
     fn transient_menu_roles_are_not_window_candidates() {

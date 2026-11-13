@@ -1,8 +1,17 @@
+#[path = "menu_bar/drag.rs"]
+mod drag;
+#[path = "menu_bar/notch.rs"]
+mod notch;
+#[path = "menu_bar/panels.rs"]
+mod panels;
+#[path = "menu_bar/window_list.rs"]
+mod window_list;
+
 // many ideas for how this works were taken from https://github.com/xiamaz/YabaiIndicator
 use std::borrow::Cow;
 #[cfg(test)]
 use std::cell::Cell;
-use std::cell::RefCell;
+use std::cell::{Cell as StateCell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -31,6 +40,7 @@ use objc2_foundation::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::actor::app::WindowId;
 use crate::actor::menu_bar::{DisplayWorkspaces, Workspace};
 use crate::actor::reactor::{
     Command as ReactorTopCommand, Event as ReactorEvent, ReactorCommand, Sender as ReactorSender,
@@ -68,6 +78,18 @@ thread_local! {
 
 #[derive(Debug, Clone)]
 pub enum MenuAction {
+    ScopedLayout {
+        space: SpaceId,
+        command: LayoutCommand,
+    },
+    ScopedToggle(SpaceId),
+    ScopedRestore {
+        space: SpaceId,
+        path: PathBuf,
+        scope: RestoreScope,
+        source: RestoreSource,
+    },
+    FocusWindow(WindowId),
     SetLayout(LayoutMode),
     ToggleSpaceActivated,
     NextWorkspace,
@@ -95,6 +117,8 @@ pub enum MenuAction {
 pub struct MenuIcon {
     status_item: StatusItem,
     view: MenuIconView,
+    panels: panels::DisplayPanels,
+    hotkeys: Vec<(Hotkey, WmCommand)>,
     _menu: Rc<Menu>,
     menu_handler: Rc<MenuActionHandler>,
     layout_items: Vec<(LayoutMode, Retained<NSMenuItem>)>,
@@ -110,7 +134,6 @@ pub struct MenuIcon {
     restore_space_menu: Rc<Menu>,
     layout_folder: PathBuf,
     mtm: MainThreadMarker,
-    prev_width: f64,
     render_key: Option<MenuIconRenderKey>,
     rendered_binding_mode: String,
 }
@@ -163,6 +186,8 @@ impl MenuIcon {
         let mut this = Self {
             status_item,
             view,
+            panels: panels::DisplayPanels::default(),
+            hotkeys: Vec::new(),
             _menu: built.menu,
             menu_handler,
             layout_items: built.layout_items,
@@ -178,7 +203,6 @@ impl MenuIcon {
             restore_space_menu: built.restore_space_menu,
             layout_folder: layout_folder.to_path_buf(),
             mtm,
-            prev_width: 0.0,
             render_key: None,
             rendered_binding_mode: String::new(),
         };
@@ -188,6 +212,8 @@ impl MenuIcon {
     }
 
     pub fn update_config(&mut self, settings: &MenuBarSettings, hotkeys: &[(Hotkey, WmCommand)]) {
+        self.panels.invalidate_controls();
+        self.hotkeys = hotkeys.to_vec();
         let shortcuts = MenuShortcuts::from_hotkeys(hotkeys);
         set_menu_item_hotkey(&self.next_workspace_item, shortcuts.next_workspace.as_ref());
         set_menu_item_hotkey(&self.prev_workspace_item, shortcuts.prev_workspace.as_ref());
@@ -274,6 +300,7 @@ impl MenuIcon {
     }
 
     pub fn refresh_layout_library(&mut self) {
+        self.panels.invalidate_controls();
         let files = layout_library_files_in(&self.layout_folder);
         self.menu_handler
             .set_layout_files(files.iter().map(|(_, path)| path.clone()).collect());
@@ -298,31 +325,40 @@ impl MenuIcon {
         );
     }
 
+    pub fn needs_presentation_refresh(&self) -> bool { !self.panels.is_empty() }
+
     pub fn update_status_icon(
         &mut self,
         displays: &[DisplayWorkspaces],
         settings: &MenuBarSettings,
         binding_mode: &str,
     ) {
+        let mode_active = !binding_mode.is_empty() && binding_mode != "default";
         let binding_mode = if settings.show_binding_mode && binding_mode != "default" {
             binding_mode
         } else {
             ""
         };
+        if settings.show_window_list {
+            self.view.setFrameSize(NSSize::ZERO);
+            self.status_item.ns_status_item().setMenu(None);
+            self.panels.update(
+                displays,
+                settings,
+                mode_active,
+                &self.menu_handler,
+                &self.hotkeys,
+                &self.layout_folder,
+                &self.status_item,
+                self.mtm,
+            );
+            return;
+        }
+        self.panels.clear();
+        self.status_item.ns_status_item().setMenu(Some(self._menu.ns_menu()));
         let render_inputs = render_inputs(displays, settings);
         let render_changed =
             self.render_key.as_ref().is_none_or(|key| !key.matches_inputs(&render_inputs));
-
-        if render_inputs.is_empty() {
-            if self.status_item.ns_status_item().isVisible() {
-                self.status_item.ns_status_item().setVisible(false);
-            }
-            self.prev_width = 0.0;
-            if render_changed {
-                self.render_key = Some(MenuIconRenderKey::from_inputs(&render_inputs));
-            }
-            return;
-        }
 
         if render_changed || self.rendered_binding_mode != binding_mode {
             let mut layout = build_layout(&render_inputs, self.view.text_attrs.as_ref());
@@ -337,15 +373,12 @@ impl MenuIcon {
             self.view.set_layout(layout);
             self.render_key = Some(MenuIconRenderKey::from_inputs(&render_inputs));
         }
-        if !self.status_item.ns_status_item().isVisible() {
-            self.status_item.ns_status_item().setVisible(true);
-        }
-
         let size = self.view.layout.borrow().size;
-        let width_changed = self.prev_width != size.width;
+        let width = size.width;
+        self.status_item.ns_status_item().setVisible(width > 0.0);
+        let width_changed = self.status_item.ns_status_item().length() != width;
         if width_changed {
-            self.prev_width = size.width;
-            self.status_item.ns_status_item().setLength(size.width);
+            self.status_item.ns_status_item().setLength(width);
         }
 
         if let Some(button) = self.status_item.ns_status_item().button(self.mtm) {
@@ -358,7 +391,7 @@ impl MenuIcon {
             }
             let bounds = button.bounds();
             let origin = CGPoint::new(
-                centered_origin(bounds.origin.x, bounds.size.width, size.width),
+                centered_origin(bounds.origin.x, bounds.size.width, width),
                 centered_origin(bounds.origin.y, bounds.size.height, size.height),
             );
             if frame.origin != origin {
@@ -398,6 +431,9 @@ fn render_inputs<'a>(
     displays: &'a [DisplayWorkspaces],
     settings: &MenuBarSettings,
 ) -> Vec<WorkspaceRenderInput<'a>> {
+    if settings.display_style == WorkspaceDisplayStyle::None {
+        return Vec::new();
+    }
     let show_windows = settings.display_style == WorkspaceDisplayStyle::Layout;
     displays
         .iter()
@@ -738,7 +774,9 @@ fn build_static_menu(mtm: MainThreadMarker, handler: &Rc<MenuActionHandler>) -> 
     // Focus-follows-mouse must stand down while this menu tracks, or the
     // pointer raises whatever window sits underneath and dismisses it.
     let reactor = handler.reactor_tx.clone();
+    let tracking_handler = handler.clone();
     let menu = Rc::new(Menu::new(&Ui::new(mtm)).on_tracking(move |open| {
+        tracking_handler.tracking.set(open);
         reactor.send(if open {
             ReactorEvent::MenuOpened(own_pid())
         } else {
@@ -1031,6 +1069,8 @@ struct MenuActionHandler {
     reactor_tx: ReactorSender,
     layout_files: RefCell<Vec<PathBuf>>,
     layout_folder: RefCell<PathBuf>,
+    space: Option<SpaceId>,
+    tracking: StateCell<bool>,
 }
 
 impl MenuActionHandler {
@@ -1040,10 +1080,58 @@ impl MenuActionHandler {
             reactor_tx,
             layout_files: RefCell::new(Vec::new()),
             layout_folder: RefCell::new(PathBuf::new()),
+            space: None,
+            tracking: StateCell::new(false),
         })
     }
 
-    fn emit(&self, action: MenuAction) { let _ = self.action_tx.send(action); }
+    fn emit(&self, action: MenuAction) {
+        let action = match (self.space, action) {
+            (Some(space), MenuAction::SetLayout(mode)) => MenuAction::ScopedLayout {
+                space,
+                command: LayoutCommand::SetWorkspaceLayout { workspace: None, mode },
+            },
+            (Some(space), MenuAction::NextWorkspace) => MenuAction::ScopedLayout {
+                space,
+                command: LayoutCommand::NextWorkspace(None),
+            },
+            (Some(space), MenuAction::PrevWorkspace) => MenuAction::ScopedLayout {
+                space,
+                command: LayoutCommand::PrevWorkspace(None),
+            },
+            (Some(space), MenuAction::SwitchToWorkspace(index)) => MenuAction::ScopedLayout {
+                space,
+                command: LayoutCommand::SwitchToWorkspace(index),
+            },
+            (Some(space), MenuAction::ToggleSpaceActivated) => MenuAction::ScopedToggle(space),
+            (Some(space), MenuAction::RestoreLayout { path, scope, source }) => {
+                MenuAction::ScopedRestore { space, path, scope, source }
+            }
+            (Some(space), MenuAction::RestoreMasterFile(scope))
+                if scope != RestoreScope::Displays =>
+            {
+                MenuAction::ScopedRestore {
+                    space,
+                    path: restore_file(),
+                    scope,
+                    source: RestoreSource::CurrentSpace,
+                }
+            }
+            (_, action) => action,
+        };
+        let _ = self.action_tx.send(action);
+    }
+
+    fn scoped(&self, space: SpaceId) -> Rc<Self> {
+        Rc::new(Self {
+            action_tx: self.action_tx.clone(),
+            reactor_tx: self.reactor_tx.clone(),
+            layout_files: RefCell::new(self.layout_files.borrow().clone()),
+            layout_folder: RefCell::new(self.layout_folder.borrow().clone()),
+            space: Some(space),
+            tracking: StateCell::new(false),
+        })
+    }
 
     fn set_layout_files(&self, paths: Vec<PathBuf>) { *self.layout_files.borrow_mut() = paths; }
 
@@ -1246,6 +1334,8 @@ mod layout_library_tests {
 
     fn workspace(id: &str, index: usize, name: &str, active: bool, layout: &str) -> Workspace {
         Workspace {
+            columns: Vec::new(),
+            key: Default::default(),
             id: id.to_owned(),
             index,
             name: name.to_owned(),
@@ -1253,6 +1343,7 @@ mod layout_library_tests {
             is_active: active,
             window_count: 0,
             windows: Vec::new(),
+            window_list: Vec::new(),
             has_fullscreen: false,
         }
     }
@@ -1350,9 +1441,12 @@ mod layout_library_tests {
     fn displays() -> Vec<DisplayWorkspaces> {
         (1..=2)
             .map(|number| DisplayWorkspaces {
+                screen_id: crate::sys::screen::ScreenId::new(0),
+                is_builtin: false,
                 display_uuid: format!("display-{number}"),
                 space: SpaceId::new(number),
                 is_active_context: number == 1,
+                space_is_activated: true,
                 workspaces: vec![
                     workspace("one", 0, "main", true, "bsp"),
                     workspace("two", 1, "web", false, "stack"),
@@ -1585,6 +1679,16 @@ mod layout_library_tests {
     }
 
     #[test]
+    fn menu_bar_none_style_omits_workspace_indicators() {
+        let settings = MenuBarSettings {
+            display_style: WorkspaceDisplayStyle::None,
+            show_empty: true,
+            ..Default::default()
+        };
+        assert!(render_inputs(&displays(), &settings).is_empty());
+    }
+
+    #[test]
     fn render_key_only_matches_visually_identical_inputs() {
         let mut workspace = workspace("one", 0, "main", true, "bsp");
         let key = MenuIconRenderKey::from_inputs(&[WorkspaceRenderInput {
@@ -1713,6 +1817,8 @@ impl MenuBarPreview {
         .into_iter()
         .enumerate()
         .map(|(i, (name, windows))| Workspace {
+            columns: Vec::new(),
+            key: Default::default(),
             id: name.into(),
             index: i,
             name: name.into(),
@@ -1720,6 +1826,7 @@ impl MenuBarPreview {
             is_active: i == 1,
             window_count: windows.len(),
             windows,
+            window_list: Vec::new(),
             has_fullscreen: name == "Reading",
         })
         .collect();
@@ -1730,16 +1837,24 @@ impl MenuBarPreview {
             view,
             displays: vec![
                 DisplayWorkspaces {
+                    screen_id: crate::sys::screen::ScreenId::new(0),
+                    is_builtin: false,
                     display_uuid: "preview".into(),
                     space: SpaceId::new(1),
                     is_active_context: true,
+                    space_is_activated: true,
                     workspaces,
                 },
                 DisplayWorkspaces {
+                    screen_id: crate::sys::screen::ScreenId::new(0),
+                    is_builtin: false,
                     display_uuid: "preview-secondary".into(),
                     space: SpaceId::new(2),
                     is_active_context: false,
+                    space_is_activated: true,
                     workspaces: vec![Workspace {
+                        columns: Vec::new(),
+                        key: Default::default(),
                         id: "mail".into(),
                         index: 0,
                         name: "Mail".into(),
@@ -1747,6 +1862,7 @@ impl MenuBarPreview {
                         is_active: true,
                         window_count: 1,
                         windows: vec![frame(0.0, 0.0, 1200.0, 800.0)],
+                        window_list: Vec::new(),
                         has_fullscreen: false,
                     }],
                 },
@@ -1789,9 +1905,12 @@ impl MenuBarPreview {
         let mut workspace = self.displays[0].workspaces[0].clone();
         workspace.is_active = false;
         let displays = vec![DisplayWorkspaces {
+            screen_id: crate::sys::screen::ScreenId::new(0),
+            is_builtin: false,
             display_uuid: "example".into(),
             space: SpaceId::new(1),
             is_active_context: true,
+            space_is_activated: true,
             workspaces: vec![workspace],
         }];
         let layout = build_layout(&render_inputs(&displays, &settings), &self.view.text_attrs);

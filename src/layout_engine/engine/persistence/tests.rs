@@ -39,6 +39,7 @@ fn live_state(window: WindowId) -> WindowState {
             is_standard: true,
             is_root: true,
             is_minimized: false,
+            is_modal: None,
             is_resizable: true,
             min_size: None,
             max_size: None,

@@ -190,7 +190,11 @@ jobs:
           ASSET="${ASSET_BASENAME}-${VERSION}.tar.gz"
           test -s rift.default.toml
           cp rift.default.toml dist/rift.default.toml
-          tar -C dist -czf "$ASSET" rift rift-cli rift.default.toml
+          mkdir -p dist/licenses/cgs
+          cp LICENSE dist/licenses/rift-LICENSE
+          cp cgs/LICENSE dist/licenses/cgs/LICENSE
+          cp cgs/third-party/ProgressiveBlurHeader.LICENSE dist/licenses/cgs/ProgressiveBlurHeader.LICENSE
+          tar -C dist -czf "$ASSET" rift rift-cli rift.default.toml licenses
           sha256=$(shasum -a 256 "$ASSET" | awk '{print $1}')
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "asset=${ASSET}" >> "$GITHUB_OUTPUT"

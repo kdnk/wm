@@ -35,6 +35,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Compile
         run: cargo check --locked
+      - name: Verify imported desktop checks
+        run: |
+          python3 tests/rift-settings-focus-verifier-test.py
+          python3 tests/rift-multi-resize-verifier-test.py
+      - name: Test exact capture
+        run: cargo test --locked --manifest-path cgs/Cargo.toml --lib exact_capture -- --test-threads=1
       # settings_native drives real AppKit windows, which is flaky on headless CI runners.
       # It is ignored by default; run it locally with
       # `cargo nextest run --run-ignored all -E 'binary(settings_native)'`.

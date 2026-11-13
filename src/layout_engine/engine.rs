@@ -770,6 +770,26 @@ impl LayoutEngine {
         }
     }
 
+    pub fn reorder_column(&mut self, request: super::ColumnReorderRequest) -> bool {
+        if self.workspaces.workspace_space(request.workspace) != Some(request.space)
+            || self.workspaces.active_workspace(request.space) != Some(request.workspace)
+        {
+            return false;
+        }
+        let Some(layout) = self.workspaces.active_layout(request.space, request.workspace) else {
+            return false;
+        };
+        let workspace = &mut self.workspaces[request.workspace];
+        if !matches!(workspace.layout_system, LayoutSystemKind::Scrolling(_)) {
+            return false;
+        }
+        let changed = workspace.layout_system.reorder_column(layout, &request);
+        if changed {
+            self.forget_native_layout_for_workspace(request.workspace);
+        }
+        changed
+    }
+
     pub fn active_layout_mode_at(&self, space: SpaceId) -> LayoutMode {
         self.workspaces
             .active_workspace(space)
@@ -4438,6 +4458,54 @@ mod tests {
     }
 
     #[test]
+    fn toggle_stack_scrolling_with_only_suspended_siblings_does_not_restack() {
+        let settings = LayoutSettings {
+            mode: LayoutMode::Scrolling,
+            ..Default::default()
+        };
+        let mut engine = LayoutEngine::new(&VirtualWorkspaceSettings::default(), &settings, None);
+        let mut store = WindowStore::default();
+        let space = SpaceId::new(94);
+        let windows = [
+            WindowId::new(1, 1),
+            WindowId::new(1, 2),
+            WindowId::new(1, 3),
+        ];
+        let _ = engine.handle_event(
+            &mut store,
+            LayoutEvent::SpaceExposed(space, CGSize::new(1200.0, 800.0)),
+        );
+        for window in windows {
+            let _ = engine.handle_event(&mut store, LayoutEvent::WindowAdded(space, window));
+        }
+        let _ = engine.handle_event(&mut store, LayoutEvent::WindowFocused(space, windows[0]));
+        let command = |engine: &mut LayoutEngine, store: &mut WindowStore| {
+            engine.handle_command(
+                store,
+                Some(space),
+                &[space],
+                &HashMap::default(),
+                LayoutCommand::ToggleStack,
+            )
+        };
+        let _ = command(&mut engine, &mut store);
+        store.invalidate_ax_identity(windows[1]);
+        let _ = engine.handle_event(&mut store, LayoutEvent::WindowSuspended(windows[1]));
+        let response = command(&mut engine, &mut store);
+        assert!(response.changed);
+        assert_eq!(response.raise_windows, vec![windows[0]]);
+        assert_eq!(response.focus_window, Some(windows[0]));
+        assert_eq!(engine.selected_window(space), Some(windows[0]));
+        let workspace = engine.workspaces.active_workspace(space).unwrap();
+        let layout = engine.workspaces[workspace].active_layout().unwrap();
+        let system = &engine.workspaces[workspace].layout_system;
+        for (index, window) in windows.into_iter().enumerate() {
+            assert_eq!(system.window_slot(layout, window), Some(vec![index, 0]));
+        }
+        assert!(!system.window_participates(windows[1]));
+    }
+
+    #[test]
     fn toggle_stack_preserves_focused_window() {
         let mut window_store = WindowStore::default();
         let mut engine = test_engine();
@@ -6648,3 +6716,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "column_reorder_tests.rs"]
+mod column_reorder_tests;

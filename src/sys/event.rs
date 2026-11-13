@@ -56,6 +56,13 @@ pub fn get_mouse_state() -> Option<MouseState> {
     })
 }
 
+pub(crate) fn hid_event_timestamp_now() -> u64 {
+    unsafe extern "C" {
+        fn mach_absolute_time() -> u64;
+    }
+    unsafe { mach_absolute_time() }
+}
+
 pub fn warp_mouse(point: CGPoint) -> Result<(), CGError> {
     let src = unsafe { CGEventSourceCreate(CGEventSourceStateID::CombinedSessionState) };
     unsafe { CGEventSourceSetLocalEventsSuppressionInterval(src, 0.0) };

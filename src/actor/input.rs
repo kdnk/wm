@@ -5,7 +5,7 @@ use std::panic::AssertUnwindSafe;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use objc2_app_kit::{NSEvent, NSEventType, NSWorkspace};
 use objc2_core_foundation::{CGPoint, CGRect};
@@ -130,6 +130,7 @@ impl Drop for Input {
 struct State {
     hide_count: u32,
     mouse_hides_on_focus: bool,
+    mouse_follows_focus: bool,
     focus_follows_mouse_config_enabled: bool,
     converter: CoordinateConverter,
     screens: Vec<CGRect>,
@@ -152,6 +153,7 @@ impl Default for State {
         Self {
             hide_count: 0,
             mouse_hides_on_focus: false,
+            mouse_follows_focus: false,
             focus_follows_mouse_config_enabled: false,
             converter: CoordinateConverter::default(),
             screens: Vec::new(),
@@ -198,18 +200,20 @@ impl Input {
         let keyed_disable =
             disable_hotkey.as_ref().is_some_and(|key| !is_modifier_key(key.key_code));
         let hotkeys_enabled = self.hotkeys.borrow().iter().any(|map| !map.is_empty());
+        let track_focus_input = state.event_processing_enabled && state.mouse_follows_focus;
         let mut mask = build_event_mask(
             // Keyboard launchers must end wake/unlock activation suppression
             // even when no Rift keyboard bindings are configured.
             true,
-            hotkeys_enabled || disable_hotkey.is_some(),
+            hotkeys_enabled || disable_hotkey.is_some() || track_focus_input,
             (state.event_processing_enabled
                 && (state.mouse_hides_on_focus
                     || self.horizontal_mouse_warp.get().is_some()
                     || (state.focus_follows_mouse_config_enabled
                         && state.focus_follows_mouse_enabled)))
                 || self.mission_control_active.get(),
-            state.event_processing_enabled && state.mouse_hides_on_focus,
+            state.event_processing_enabled
+                && (state.mouse_hides_on_focus || state.mouse_follows_focus),
             // Mouse-up delivery is part of the stable configured mask. Drag
             // start/stop is frequent enough that rebuilding the WindowServer
             // tap costs more than filtering these releases in the callback.
@@ -335,6 +339,7 @@ impl Input {
             .and_then(|spec| spec.to_hotkey());
         let mut state = State::default();
         state.mouse_hides_on_focus = config.settings.mouse_hides_on_focus;
+        state.mouse_follows_focus = config.settings.mouse_follows_focus;
         state.focus_follows_mouse_config_enabled = config.settings.focus_follows_mouse;
         state.mouse_features_enabled = config.settings.drag_drop.enabled;
         state.mouse_settings = config.settings.drag_drop;
@@ -516,9 +521,11 @@ impl Input {
                     Request::Warp(point) => point,
                     _ => unreachable!(),
                 };
+                self.mouse_focus_publisher.discard_through(event::hid_event_timestamp_now());
                 if let Err(e) = event::warp_mouse(point) {
                     warn!("Failed to warp mouse: {e:?}");
                 }
+                self.mouse_focus_publisher.discard_through(event::hid_event_timestamp_now());
                 if state.mouse_hides_on_focus && state.hide_count == 0 {
                     debug!("Hiding mouse");
                     state.hide_mouse();
@@ -615,6 +622,7 @@ impl Input {
                     let prev_focus_follows_mouse_config_enabled =
                         state.focus_follows_mouse_config_enabled;
                     state.mouse_hides_on_focus = mouse_hides_on_focus;
+                    state.mouse_follows_focus = new_config.settings.mouse_follows_focus;
                     state.focus_follows_mouse_config_enabled = focus_follows_mouse_config_enabled;
                     let direction = new_config.settings.horizontal_mouse_warp;
                     if self.horizontal_mouse_warp.replace(direction) != direction {
@@ -821,6 +829,12 @@ impl Input {
                         .reconcile_after_event_tap_reenabled(CGEvent::flags(Some(event)));
                     return true;
                 }
+                if matches!(event_type, CGEventType::KeyDown | CGEventType::FlagsChanged) {
+                    let state = self.state.borrow();
+                    if state.event_processing_enabled && state.mouse_follows_focus {
+                        self.events_tx.send(Event::PointerFocusIntent(None, Instant::now()));
+                    }
+                }
                 if event_type == CGEventType::KeyDown && self.mission_control_active.get() {
                     let keycode = CGEvent::integer_value_field(
                         Some(event),
@@ -974,6 +988,12 @@ impl Input {
                     });
                     return false;
                 }
+                if state.event_processing_enabled && state.mouse_follows_focus {
+                    self.events_tx.send(Event::PointerFocusIntent(
+                        window_server::window_under_cursor(),
+                        Instant::now(),
+                    ));
+                }
                 true
             }
             CGEventType::LeftMouseUp | CGEventType::RightMouseUp => {
@@ -1068,8 +1088,6 @@ impl Input {
             }
         }
 
-        // Publish positions only. WindowServer hit testing and focus eligibility
-        // belong on the reactor, outside the synchronous input callback.
         if state.focus_follows_mouse_config_enabled
             && state.focus_follows_mouse_enabled
             && !state.disable_hotkey_active
@@ -1079,14 +1097,12 @@ impl Input {
             // Secondary pointer consumers above do not participate in focus
             // suppression or window resolution.
             drop(state);
-            self.on_mouse_focus(loc);
+            _ = self
+                .mouse_focus_publisher
+                .publish(&self.events_tx, CGEvent::timestamp(Some(event)));
         }
 
         true
-    }
-
-    fn on_mouse_focus(&self, loc: CGPoint) {
-        _ = self.mouse_focus_publisher.publish(&self.events_tx, loc);
     }
 
     fn maybe_horizontal_mouse_warp(&self, event: &CGEvent) -> Option<CGPoint> {
@@ -2055,6 +2071,7 @@ mod tests {
         config.settings.focus_follows_mouse = false;
         config.settings.focus_follows_mouse_disable_hotkey = None;
         config.settings.mouse_hides_on_focus = false;
+        config.settings.mouse_follows_focus = false;
         let input = Input::new(
             config,
             events_tx,
@@ -2068,6 +2085,89 @@ mod tests {
             objc2_core_foundation::CGSize::new(1000., 1000.),
         ));
         (input, wm_rx, events_rx)
+    }
+
+    #[test]
+    fn pointer_focus_intent_captures_click_before_window_is_raised() {
+        let (input, _, mut events) = input();
+        {
+            let mut state = input.state.borrow_mut();
+            state.event_processing_enabled = true;
+            state.mouse_follows_focus = true;
+            state.mouse_features_enabled = false;
+        }
+        let mask = input.desired_event_mask();
+        for event_type in [
+            CGEventType::LeftMouseDown,
+            CGEventType::RightMouseDown,
+            CGEventType::KeyDown,
+            CGEventType::FlagsChanged,
+        ] {
+            assert_ne!(
+                mask & (1u64 << event_type.0),
+                0,
+                "must observe focus input {event_type:?}"
+            );
+        }
+        let source = window_server::WindowServerId::new(41);
+        let target = window_server::WindowServerId::new(42);
+        let event = CGEvent::new(None).unwrap();
+        for event_type in [CGEventType::LeftMouseDown, CGEventType::RightMouseDown] {
+            window_server::set_window_under_cursor_override(Some(Some(source)));
+            assert!(input.on_event(event_type, &event, None));
+            window_server::set_window_under_cursor_override(Some(Some(target)));
+            assert!(
+                matches!(events.try_recv().unwrap().1, Event::PointerFocusIntent(Some(window), _) if window == source)
+            );
+        }
+        window_server::set_window_under_cursor_override(None);
+        for event_type in [CGEventType::KeyDown, CGEventType::FlagsChanged] {
+            input.on_event(event_type, &event, None);
+            if event_type == CGEventType::KeyDown {
+                assert!(matches!(events.try_recv().unwrap().1, Event::KeyboardInput));
+            }
+            assert!(
+                matches!(events.try_recv().unwrap().1, Event::PointerFocusIntent(None, _)),
+                "keyboard must clear stale click intent"
+            );
+        }
+        assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn focus_warp_rejects_pre_warp_hid_motion() {
+        for relative in [false, true] {
+            let (input, _, mut events) = input();
+            {
+                let mut state = input.state.borrow_mut();
+                state.event_processing_enabled = true;
+                state.focus_follows_mouse_config_enabled = true;
+            }
+            let point = event::current_cursor_location().unwrap();
+            let request = if relative {
+                Request::WarpRelative {
+                    from: None,
+                    to: CGRect::new(point, objc2_core_foundation::CGSize::ZERO),
+                }
+            } else {
+                Request::Warp(point)
+            };
+            let (recovery_tx, _) = tokio::sync::mpsc::unbounded_channel();
+            input.on_request(request, &recovery_tx);
+            let motion = CGEvent::new(None).unwrap();
+            CGEvent::set_timestamp(Some(&motion), 1);
+            input.on_event(CGEventType::MouseMoved, &motion, None);
+            assert!(
+                events.try_recv().is_err(),
+                "relative={relative}: stale motion must not request focus"
+            );
+            CGEvent::set_timestamp(Some(&motion), event::hid_event_timestamp_now());
+            input.on_event(CGEventType::MouseMoved, &motion, None);
+            assert!(
+                matches!(events.try_recv().unwrap().1, Event::MouseFocusPending(_)),
+                "relative={relative}: first post-warp motion must resume focus following"
+            );
+        }
     }
 
     #[test]

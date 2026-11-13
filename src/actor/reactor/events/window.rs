@@ -286,8 +286,8 @@ pub fn handle_window_frame_changed(
     if let Some(window) = state.windows.window_mut(wid) {
         window.frame_monotonic = new_frame;
     }
-    // The external owner has geometry authority; keep only native facts current.
-    if state.windows.is_claimed(wid) {
+    // Admission owns layout participation. Other windows update only native facts.
+    if !state.windows.is_admitted(wid) {
         if old_space != new_space
             && let Some(server) = server_id
         {

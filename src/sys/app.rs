@@ -407,6 +407,8 @@ pub struct WindowInfo {
     #[serde(default)]
     pub is_minimized: bool,
     #[serde(default)]
+    pub is_modal: Option<bool>,
+    #[serde(default)]
     pub is_resizable: bool,
     pub title: String,
     #[serde(with = "CGRectDef")]
@@ -478,6 +480,10 @@ impl WindowInfo {
             .filter(|id| id.as_nonzero().is_some())
             .or_else(|| identity.resolve(|| WindowServerId::try_from(element).ok()));
         let is_resizable = element.can_resize().unwrap_or(true);
+        let is_modal = (ax_role.as_deref() == Some("AXWindow")
+            && ax_subrole.as_deref() == Some("AXDialog"))
+        .then(|| element.bool_attribute("AXModal").ok())
+        .flatten();
 
         let (bundle_id, path) = if ax_role.as_deref() != Some(AX_WINDOW_ROLE) {
             (None, None)
@@ -498,6 +504,7 @@ impl WindowInfo {
             is_standard,
             is_root,
             is_minimized,
+            is_modal,
             is_resizable,
             min_size,
             max_size,

@@ -815,6 +815,7 @@ pub enum ActiveWorkspaceLabel {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, ConfigEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceDisplayStyle {
+    None,
     #[default]
     Layout,
     Label,
@@ -835,6 +836,14 @@ pub struct MenuBarSettings {
     /// Show the active binding mode beside workspaces, except in default mode.
     #[setting(label = "Show binding mode", enabled_by = "enabled")]
     pub show_binding_mode: bool,
+    #[serde(default)]
+    /// Show the active workspace's windows in layout order.
+    #[setting(label = "Show window list", enabled_by = "enabled")]
+    pub show_window_list: bool,
+    #[serde(default)]
+    /// Combine windows from the same application into one icon.
+    #[setting(label = "Group application icons", enabled_by = "show_window_list")]
+    pub group_app_icons: bool,
     #[serde(default)]
     /// Only show workspaces from the display currently hosting the active menu bar.
     #[setting(label = "Only show current display", enabled_by = "enabled")]
@@ -878,6 +887,8 @@ impl Default for MenuBarSettings {
             enabled: false,
             show_empty: false,
             show_binding_mode: true,
+            show_window_list: false,
+            group_app_icons: false,
             current_display_only: false,
             mode: MenuBarDisplayMode::default(),
             active_label: ActiveWorkspaceLabel::default(),

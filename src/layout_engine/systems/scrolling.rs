@@ -20,15 +20,13 @@ use crate::layout_engine::systems::{
     LayoutSystem, WindowLayoutConstraints, reconcile_app_membership,
 };
 use crate::layout_engine::utils::compute_tiling_area;
-use crate::layout_engine::{Direction, LayoutId, ResizeOrientation, WindowDropAction};
+use crate::layout_engine::{
+    ColumnId, ColumnPlacement, Direction, LayoutId, ResizeOrientation, WindowDropAction,
+};
 use crate::model::hidden_window_placement::HiddenWindowPlacement;
 use crate::sys::geometry::Round;
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(transparent)]
-struct ColumnId(u64);
-
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
 enum ColumnWidth {
     #[default]
     Default,
@@ -180,8 +178,6 @@ impl CameraSpring {
             sampled: started,
         }
     }
-
-    pub(crate) fn current(&self) -> f64 { self.current }
 
     pub(crate) fn position_velocity(&self, now: Instant) -> (f64, f64) {
         let t = now.saturating_duration_since(self.started).as_secs_f64();
@@ -484,9 +480,7 @@ impl Geometry {
                         min: c.min_height,
                         fixed: c.fixed_for_axis(false),
                         max: (c.max_height > 0.0).then_some(c.max_height),
-                        weight: (column.height_weights.get(row).copied().unwrap_or(1.0)
-                            - c.min_height)
-                            .max(0.001),
+                        weight: column.height_weights.get(row).copied().unwrap_or(1.0).max(0.001),
                         can_grow: c.resizable_for_axis(false),
                     }
                 })
@@ -1927,15 +1921,17 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 ));
             }
             let column = &mut state.columns[col];
-            if height_changed && column.windows.len() > 1 {
+            let active_rows = column.windows.iter().filter(|w| !self.inactive.contains(*w)).count();
+            if height_changed && active_rows > 1 {
                 let total = (tiling.size.height
-                    - gaps.inner.vertical * column.windows.len().saturating_sub(1) as f64)
+                    - gaps.inner.vertical * active_rows.saturating_sub(1) as f64)
                     .max(1.0);
                 set_height_share(
                     column,
                     row,
                     (new_frame.size.height / total).clamp(0.05, 0.95),
                     total,
+                    &self.inactive,
                 );
             }
         });
@@ -1989,6 +1985,53 @@ impl LayoutSystem for ScrollingLayoutSystem {
         state.mutate(&self.settings, &self.inactive, |s| {
             s.transfer(source, target, action, &self.inactive)
         })
+    }
+
+    fn reorder_column(
+        &mut self,
+        layout: LayoutId,
+        request: &crate::layout_engine::ColumnReorderRequest,
+    ) -> bool {
+        let Some(state) = self.layouts.get_mut(layout) else {
+            return false;
+        };
+        let Some(source) = state.columns.iter().position(|column| column.id == request.source)
+        else {
+            return false;
+        };
+        let Some(target) = state.columns.iter().position(|column| column.id == request.target)
+        else {
+            return false;
+        };
+        if source == target
+            || state.columns[source].windows != request.source_members
+            || state.columns[target].windows != request.target_members
+            || !state.columns[source]
+                .windows
+                .iter()
+                .any(|window| !self.inactive.contains(window))
+            || !state.columns[target]
+                .windows
+                .iter()
+                .any(|window| !self.inactive.contains(window))
+        {
+            return false;
+        }
+        let slot = target + usize::from(request.placement == ColumnPlacement::After);
+        let destination = slot - usize::from(source < slot);
+        if source == destination {
+            return false;
+        }
+        let active = state.columns.get(state.active_column).map(|column| column.id);
+        state.transient_restore = None;
+        state.mutate(&self.settings, &self.inactive, |state| {
+            let column = state.columns.remove(source);
+            state.columns.insert(destination, column);
+            if let Some(index) = state.columns.iter().position(|column| Some(column.id) == active) {
+                state.active_column = index;
+            }
+        });
+        true
     }
 
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool {
@@ -2143,11 +2186,16 @@ impl LayoutSystem for ScrollingLayoutSystem {
         else {
             return Vec::new();
         };
-        let target = if col + 1 < state.columns.len() {
-            col + 1
-        } else if col > 0 {
-            col - 1
-        } else {
+        let participates = |index: &usize| {
+            state.columns[*index]
+                .windows
+                .iter()
+                .any(|window| !self.inactive.contains(window))
+        };
+        let Some(target) = (col + 1..state.columns.len())
+            .find(participates)
+            .or_else(|| (0..col).rev().find(participates))
+        else {
             return Vec::new();
         };
         let moved = state.columns[target].windows.clone();
@@ -2160,7 +2208,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
             column.height_weights.append(&mut neighbor.height_weights);
             state.activate(selected);
         });
-        moved
+        moved.into_iter().filter(|window| !self.inactive.contains(window)).collect()
     }
 
     fn unstack_parent_of_selection(
@@ -2175,6 +2223,16 @@ impl LayoutSystem for ScrollingLayoutSystem {
         let selected = state.selected(&self.inactive).unwrap();
         let moved: Vec<_> =
             state.columns[col].windows.iter().copied().filter(|w| *w != selected).collect();
+        let raised = if moved.is_empty() {
+            Vec::new()
+        } else {
+            state.columns[col]
+                .windows
+                .iter()
+                .copied()
+                .filter(|window| !self.inactive.contains(window))
+                .collect()
+        };
         state.transient_restore = None;
         state.mutate(&self.settings, &self.inactive, |state| {
             for (index, &wid) in moved.iter().enumerate() {
@@ -2183,7 +2241,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
             }
             state.activate(selected);
         });
-        moved
+        raised
     }
 
     fn parent_of_selection_is_stacked(&self, layout: LayoutId) -> bool {
@@ -2212,15 +2270,26 @@ impl LayoutSystem for ScrollingLayoutSystem {
         else {
             return;
         };
+        let active_rows = state.columns[col]
+            .windows
+            .iter()
+            .filter(|w| !self.inactive.contains(*w))
+            .count();
         let vertical = orientation == ResizeOrientation::Vertical
-            || (orientation == ResizeOrientation::Smart && state.columns[col].windows.len() > 1);
+            || (orientation == ResizeOrientation::Smart && active_rows > 1);
         state.mutate(&self.settings, &self.inactive, |state| {
             let column = &mut state.columns[col];
             if vertical {
-                if column.windows.len() > 1 {
-                    let total: f64 = column.height_weights.iter().sum();
+                if active_rows > 1 {
+                    let total: f64 = column
+                        .windows
+                        .iter()
+                        .zip(&column.height_weights)
+                        .filter(|(window, _)| !self.inactive.contains(*window))
+                        .map(|(_, weight)| weight)
+                        .sum();
                     let share = (column.height_weights[row] / total + amount).clamp(0.05, 0.95);
-                    set_height_share(column, row, share, total.max(10_000.0));
+                    set_height_share(column, row, share, total.max(10_000.0), &self.inactive);
                 }
             } else {
                 let ratio = state
@@ -2244,21 +2313,32 @@ impl LayoutSystem for ScrollingLayoutSystem {
     }
 }
 
-fn set_height_share(column: &mut Column, row: usize, share: f64, scale: f64) {
+fn set_height_share(
+    column: &mut Column,
+    row: usize,
+    share: f64,
+    scale: f64,
+    inactive: &HashSet<WindowId>,
+) {
     let other: f64 = column
         .height_weights
         .iter()
+        .zip(&column.windows)
         .enumerate()
-        .filter(|(i, _)| *i != row)
-        .map(|(_, w)| w)
+        .filter(|(i, (_, window))| *i != row && !inactive.contains(*window))
+        .map(|(_, (weight, _))| weight)
         .sum();
+    let active_total = column.height_weights[row] + other;
+    let active_rows = column.windows.iter().filter(|w| !inactive.contains(*w)).count();
     for (index, weight) in column.height_weights.iter_mut().enumerate() {
-        *weight = if index == row {
+        *weight = if inactive.contains(&column.windows[index]) {
+            *weight * scale / active_total
+        } else if index == row {
             share * scale
         } else if other > 0.0 {
             (1.0 - share) * scale * *weight / other
         } else {
-            (1.0 - share) * scale / column.windows.len().saturating_sub(1).max(1) as f64
+            (1.0 - share) * scale / active_rows.saturating_sub(1).max(1) as f64
         };
     }
 }
@@ -2355,6 +2435,171 @@ pub(crate) mod tests {
         fn drop(&mut self, source: u32, target: u32, action: WindowDropAction) {
             assert!(self.system.apply_window_drop(self.layout, wid(source), wid(target), action));
         }
+    }
+
+    #[test]
+    fn axis_constraints_mixed_bounds_keep_stacked_rows_within_screen() {
+        let mut f = Fixture::new(3);
+        f.screen.size.height = 1000.0;
+        f.drop(2, 1, WindowDropAction::Stack);
+        f.drop(3, 2, WindowDropAction::Stack);
+        for (index, min_height, max_height) in [(1, 600.0, 0.0), (2, 0.0, 600.0), (3, 200.0, 0.0)] {
+            f.constraints.insert(wid(index), WindowLayoutConstraints {
+                is_resizable: true,
+                min_height,
+                max_height,
+                ..Default::default()
+            });
+        }
+        f.system.layouts[f.layout].columns[0].height_weights = vec![1.0, 9.0, 1.0];
+        f.system.layouts[f.layout].geometry = None;
+        let frames = f.frames();
+        assert_eq!(frames.len(), 3);
+        for ((window, frame), (index, y, height)) in
+            frames.into_iter().zip([(1, 0.0, 600.0), (2, 600.0, 200.0), (3, 800.0, 200.0)])
+        {
+            assert_eq!(window, wid(index));
+            assert!((frame.origin.y - y).abs() < 0.001, "row {index}: {frame:?}");
+            assert!(
+                (frame.size.height - height).abs() < 0.001,
+                "row {index}: {frame:?}"
+            );
+        }
+    }
+
+    fn column_request(
+        f: &Fixture,
+        source: usize,
+        target: usize,
+        placement: ColumnPlacement,
+    ) -> crate::layout_engine::ColumnReorderRequest {
+        let columns = &f.system.layouts[f.layout].columns;
+        crate::layout_engine::ColumnReorderRequest {
+            space: crate::sys::screen::SpaceId::new(1),
+            workspace: <crate::layout_engine::VirtualWorkspaceId as slotmap::Key>::null(),
+            source: columns[source].id,
+            target: columns[target].id,
+            placement,
+            source_members: columns[source].windows.clone(),
+            target_members: columns[target].windows.clone(),
+        }
+    }
+
+    fn column_members(f: &Fixture) -> Vec<Vec<WindowId>> {
+        f.system.layouts[f.layout]
+            .columns
+            .iter()
+            .map(|column| column.windows.clone())
+            .collect()
+    }
+
+    #[test]
+    fn column_reorder_moves_first_middle_and_last_before_and_after() {
+        for (source, target, placement, expected) in [
+            (0, 2, ColumnPlacement::Before, vec![2, 1, 3, 4]),
+            (0, 2, ColumnPlacement::After, vec![2, 3, 1, 4]),
+            (3, 1, ColumnPlacement::Before, vec![1, 4, 2, 3]),
+            (3, 1, ColumnPlacement::After, vec![1, 2, 4, 3]),
+            (1, 3, ColumnPlacement::After, vec![1, 3, 4, 2]),
+            (2, 0, ColumnPlacement::Before, vec![3, 1, 2, 4]),
+        ] {
+            let mut f = Fixture::new(4);
+            let request = column_request(&f, source, target, placement);
+            assert!(f.system.reorder_column(f.layout, &request));
+            assert_eq!(
+                column_members(&f),
+                expected.into_iter().map(|n| vec![wid(n)]).collect::<Vec<_>>()
+            );
+            assert_eq!(f.selected(), Some(wid(1)));
+        }
+    }
+
+    #[test]
+    fn column_reorder_preserves_all_rows_ids_sizes_active_rows_and_camera_anchor() {
+        let mut f = Fixture::new(6);
+        f.drop(2, 1, WindowDropAction::Stack);
+        f.select(2);
+        f.system.resize_selection_by(f.layout, 0.25, ResizeOrientation::Vertical);
+        f.system.resize_selection_by(f.layout, 0.1, ResizeOrientation::Horizontal);
+        f.select(4);
+        let before_frame = f.frame(4);
+        let before: Vec<_> = f.system.layouts[f.layout]
+            .columns
+            .iter()
+            .map(|column| {
+                (
+                    column.id,
+                    column.windows.clone(),
+                    column.active_window,
+                    column.width,
+                    column.height_weights.clone(),
+                )
+            })
+            .collect();
+        let request = column_request(&f, 0, 3, ColumnPlacement::After);
+        assert!(f.system.reorder_column(f.layout, &request));
+        assert_eq!(column_members(&f), vec![
+            vec![wid(3)],
+            vec![wid(4)],
+            vec![wid(5)],
+            vec![wid(1), wid(2)],
+            vec![wid(6)]
+        ]);
+        for column in &f.system.layouts[f.layout].columns {
+            let old = before.iter().find(|old| old.0 == column.id).unwrap();
+            assert_eq!(column.windows, old.1);
+            assert_eq!(column.active_window, old.2);
+            assert_eq!(column.width, old.3);
+            assert_eq!(column.height_weights, old.4);
+        }
+        assert_eq!(f.selected(), Some(wid(4)));
+        assert_eq!(f.frame(4), before_frame);
+    }
+
+    #[test]
+    fn column_reorder_rejects_noops_missing_stale_and_inactive_columns() {
+        let mut f = Fixture::new(4);
+        for (source, target, placement) in [
+            (0, 0, ColumnPlacement::After),
+            (0, 1, ColumnPlacement::Before),
+            (2, 1, ColumnPlacement::After),
+        ] {
+            let request = column_request(&f, source, target, placement);
+            assert!(!f.system.reorder_column(f.layout, &request));
+        }
+        let before = column_members(&f);
+        let mut request = column_request(&f, 0, 3, ColumnPlacement::After);
+        request.source = ColumnId(u64::MAX);
+        assert!(!f.system.reorder_column(f.layout, &request));
+        let mut request = column_request(&f, 0, 3, ColumnPlacement::After);
+        request.target_members.push(wid(99));
+        assert!(!f.system.reorder_column(f.layout, &request));
+        let request = column_request(&f, 0, 3, ColumnPlacement::After);
+        f.system.set_window_participation(wid(1), false);
+        assert!(!f.system.reorder_column(f.layout, &request));
+        assert_eq!(column_members(&f), before);
+        f.system.set_window_participation(wid(1), true);
+        let request = column_request(&f, 0, 3, ColumnPlacement::After);
+        f.system.set_window_participation(wid(4), false);
+        assert!(!f.system.reorder_column(f.layout, &request));
+        f.system.set_window_participation(wid(4), true);
+        let request = column_request(&f, 0, 3, ColumnPlacement::After);
+        f.drop(2, 1, WindowDropAction::Stack);
+        assert!(!f.system.reorder_column(f.layout, &request));
+    }
+
+    #[test]
+    fn column_reorder_preserves_suspended_rows_with_full_membership_witnesses() {
+        let mut f = Fixture::new(4);
+        f.drop(2, 1, WindowDropAction::Stack);
+        f.system.set_window_participation(wid(2), false);
+        let request = column_request(&f, 0, 2, ColumnPlacement::After);
+        assert!(f.system.reorder_column(f.layout, &request));
+        assert_eq!(column_members(&f), vec![vec![wid(3)], vec![wid(4)], vec![
+            wid(1),
+            wid(2)
+        ]]);
+        assert!(!f.system.window_participates(wid(2)));
     }
 
     #[test]
@@ -2942,6 +3187,137 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn resize_visible_stacked_row_ignores_suspended_rows() {
+        for gap in [0.0, 20.0] {
+            let mut f = Fixture::new(3);
+            f.gaps.inner.vertical = gap;
+            f.drop(2, 1, WindowDropAction::Stack);
+            f.drop(3, 1, WindowDropAction::Stack);
+            let hidden_height = f.frame(3).size.height;
+            let hidden_slot = f.system.window_slot(f.layout, wid(3));
+            f.system.set_window_participation(wid(3), false);
+            f.select(1);
+            let available = 800.0 - gap;
+            assert_eq!(f.frame(1).size.height, available / 2.0);
+            let old = f.frame(1);
+            let new = CGRect::new(old.origin, CGSize::new(old.size.width, available * 0.75));
+            f.system.on_window_resized(f.layout, wid(1), old, new, f.screen, &f.gaps);
+            assert_eq!(f.frame(1).size.height, available * 0.75);
+            assert_eq!(f.frame(2).size.height, available * 0.25);
+            f.system.set_window_participation(wid(3), true);
+            assert!((f.frame(3).size.height - hidden_height).abs() <= 1.0);
+            assert_eq!(f.system.window_slot(f.layout, wid(3)), hidden_slot);
+        }
+    }
+
+    #[test]
+    fn resize_visible_stacked_row_command_ignores_suspended_rows() {
+        for gap in [0.0, 20.0] {
+            for orientation in [ResizeOrientation::Vertical, ResizeOrientation::Smart] {
+                let mut f = Fixture::new(3);
+                f.gaps.inner.vertical = gap;
+                f.drop(2, 1, WindowDropAction::Stack);
+                f.drop(3, 1, WindowDropAction::Stack);
+                let hidden_height = f.frame(3).size.height;
+                f.system.set_window_participation(wid(3), false);
+                f.select(1);
+                f.system.resize_selection_by(f.layout, 0.1, orientation);
+                assert_eq!(f.frame(1).size.height, (800.0 - gap) * 0.6);
+                assert_eq!(f.frame(2).size.height, (800.0 - gap) * 0.4);
+                f.system.set_window_participation(wid(3), true);
+                assert!((f.frame(3).size.height - hidden_height).abs() <= 1.0);
+            }
+        }
+    }
+
+    #[test]
+    fn resize_visible_stacked_row_singleton_uses_visible_row_count() {
+        for orientation in [ResizeOrientation::Vertical, ResizeOrientation::Smart] {
+            let mut f = Fixture::new(2);
+            f.drop(2, 1, WindowDropAction::Stack);
+            let hidden_height = f.frame(2).size.height;
+            f.system.set_window_participation(wid(2), false);
+            f.select(1);
+            f.system.resize_selection_by(f.layout, 0.1, orientation);
+            assert_eq!(f.frame(1).size.height, 800.0);
+            let expected_width = if orientation == ResizeOrientation::Smart {
+                600.0
+            } else {
+                500.0
+            };
+            assert_eq!(f.frame(1).size.width, expected_width);
+            f.system.set_window_participation(wid(2), true);
+            assert_eq!(f.frame(2).size.height, hidden_height);
+        }
+    }
+
+    #[test]
+    fn resize_visible_stacked_row_preserves_requested_sizes_with_minimum_heights() {
+        for suspended in [false, true] {
+            for native in [false, true] {
+                let mut f = Fixture::new(if suspended { 3 } else { 2 });
+                f.drop(2, 1, WindowDropAction::Stack);
+                if suspended {
+                    f.drop(3, 1, WindowDropAction::Stack);
+                    f.system.set_window_participation(wid(3), false);
+                }
+                for index in 1..=if suspended { 3 } else { 2 } {
+                    f.constraints.insert(wid(index), WindowLayoutConstraints {
+                        is_resizable: true,
+                        min_height: 40.0 + index as f64 * 10.0,
+                        ..Default::default()
+                    });
+                }
+                f.select(1);
+                assert_eq!(f.frame(1).size.height, 400.0);
+                assert_eq!(f.frame(2).size.height, 400.0);
+                let expected = if native { 600.0 } else { 480.0 };
+                if native {
+                    let old = f.frame(1);
+                    let new = CGRect::new(old.origin, CGSize::new(old.size.width, expected));
+                    f.system.on_window_resized(f.layout, wid(1), old, new, f.screen, &f.gaps);
+                } else {
+                    f.system.resize_selection_by(f.layout, 0.1, ResizeOrientation::Vertical);
+                }
+                assert_eq!(
+                    f.frame(1).size.height,
+                    expected,
+                    "suspended={suspended}, native={native}"
+                );
+                assert_eq!(f.frame(2).size.height, 800.0 - expected);
+            }
+        }
+    }
+
+    #[test]
+    fn resize_visible_stacked_row_still_enforces_fixed_and_maximum_heights() {
+        for fixed_sibling in [false, true] {
+            let mut f = Fixture::new(3);
+            f.drop(2, 1, WindowDropAction::Stack);
+            f.drop(3, 1, WindowDropAction::Stack);
+            f.system.set_window_participation(wid(3), false);
+            f.constraints.insert(wid(1), WindowLayoutConstraints {
+                is_resizable: true,
+                min_height: 50.0,
+                max_height: if fixed_sibling { 0.0 } else { 500.0 },
+                ..Default::default()
+            });
+            f.constraints.insert(wid(2), WindowLayoutConstraints {
+                is_resizable: !fixed_sibling,
+                min_height: 60.0,
+                locked_height: if fixed_sibling { 300.0 } else { 0.0 },
+                ..Default::default()
+            });
+            f.select(1);
+            let old = f.frame(1);
+            let new = CGRect::new(old.origin, CGSize::new(old.size.width, 600.0));
+            f.system.on_window_resized(f.layout, wid(1), old, new, f.screen, &f.gaps);
+            assert_eq!(f.frame(1).size.height, 500.0, "fixed_sibling={fixed_sibling}");
+            assert_eq!(f.frame(2).size.height, 300.0);
+        }
+    }
+
+    #[test]
     fn smart_and_vertical_resize_preserve_width_and_actual_row_heights() {
         for orientation in [ResizeOrientation::Vertical, ResizeOrientation::Smart] {
             let mut f = Fixture::new(2);
@@ -3197,6 +3573,119 @@ pub(crate) mod tests {
         assert_eq!(native[3].1.origin.x, f.screen.max().x - 1.0);
         assert!(logical[3].1.origin.x > native[3].1.origin.x);
         assert_eq!(presented_frames(&f.system, f.layout).collect::<Vec<_>>(), native);
+    }
+
+    #[test]
+    fn stacking_active_columns_skips_suspended_right_neighbor() {
+        let mut f = Fixture::new(4);
+        f.system.set_window_participation(wid(2), false);
+        f.select(1);
+        f.system
+            .apply_stacking_to_parent_of_selection(f.layout, StackDefaultOrientation::Horizontal);
+        assert_eq!(f.frame(1).size.height, 400.0);
+        assert_eq!(f.frame(3).size.height, 400.0);
+        assert_eq!(f.frame(4).size.height, 800.0);
+        assert_eq!(column_members(&f), vec![
+            vec![wid(1), wid(3)],
+            vec![wid(2)],
+            vec![wid(4)]
+        ]);
+        assert_eq!(f.selected(), Some(wid(1)));
+    }
+
+    #[test]
+    fn stacking_active_columns_falls_back_to_visible_left_neighbor() {
+        let mut f = Fixture::new(4);
+        f.system.set_window_participation(wid(2), false);
+        f.system.set_window_participation(wid(4), false);
+        f.select(3);
+        f.system
+            .apply_stacking_to_parent_of_selection(f.layout, StackDefaultOrientation::Horizontal);
+        assert_eq!(f.frame(3).size.height, 400.0);
+        assert_eq!(f.frame(1).size.height, 400.0);
+        assert_eq!(column_members(&f), vec![
+            vec![wid(2)],
+            vec![wid(3), wid(1)],
+            vec![wid(4)]
+        ]);
+        assert_eq!(f.selected(), Some(wid(3)));
+    }
+
+    #[test]
+    fn stacking_active_columns_leaves_suspended_only_neighbors_unchanged() {
+        for selected in [1, 2, 3] {
+            let mut f = Fixture::new(3);
+            f.select(selected);
+            for index in 1..=3 {
+                if index != selected {
+                    f.system.set_window_participation(wid(index), false);
+                }
+            }
+            let before = column_members(&f);
+            assert!(
+                f.system
+                    .apply_stacking_to_parent_of_selection(
+                        f.layout,
+                        StackDefaultOrientation::Horizontal,
+                    )
+                    .is_empty()
+            );
+            assert_eq!(column_members(&f), before);
+            assert_eq!(f.frame(selected).size.height, 800.0);
+            for index in 1..=3 {
+                f.system.set_window_participation(wid(index), true);
+            }
+            assert_eq!(column_members(&f), before);
+        }
+    }
+
+    #[test]
+    fn stacking_active_columns_retains_suspended_rows_in_a_visible_target() {
+        let mut f = Fixture::new(4);
+        f.drop(4, 3, WindowDropAction::Stack);
+        f.system.set_window_participation(wid(2), false);
+        f.system.set_window_participation(wid(4), false);
+        f.select(1);
+        let raised = f
+            .system
+            .apply_stacking_to_parent_of_selection(f.layout, StackDefaultOrientation::Horizontal);
+        assert_eq!(raised, vec![wid(3)]);
+        assert_eq!(column_members(&f), vec![vec![wid(1), wid(3), wid(4)], vec![
+            wid(2)
+        ]]);
+        assert_eq!(f.frame(1).size.height, 400.0);
+        assert_eq!(f.frame(3).size.height, 400.0);
+        assert!(!f.system.window_participates(wid(4)));
+        f.system.set_window_participation(wid(4), true);
+        for index in [1, 3, 4] {
+            assert!((f.frame(index).size.height - 800.0 / 3.0).abs() <= 1.0);
+        }
+        assert_eq!(f.selected(), Some(wid(1)));
+    }
+
+    #[test]
+    fn stacking_active_columns_unstack_preserves_suspended_rows_without_raising_them() {
+        let mut f = Fixture::new(3);
+        f.drop(2, 1, WindowDropAction::Stack);
+        f.drop(3, 2, WindowDropAction::Stack);
+        f.system.set_window_participation(wid(2), false);
+        f.select(1);
+        let raised = f
+            .system
+            .unstack_parent_of_selection(f.layout, StackDefaultOrientation::Horizontal);
+        assert_eq!(raised, vec![wid(1), wid(3)]);
+        assert_eq!(column_members(&f), vec![vec![wid(1)], vec![wid(2)], vec![wid(
+            3
+        )]]);
+        assert!(!f.system.window_participates(wid(2)));
+        assert_eq!(f.frame(1).size.height, 800.0);
+        assert_eq!(f.frame(3).size.height, 800.0);
+        assert_eq!(f.selected(), Some(wid(1)));
+        f.system.set_window_participation(wid(2), true);
+        assert_eq!(f.frame(2).size.height, 800.0);
+        assert_eq!(column_members(&f), vec![vec![wid(1)], vec![wid(2)], vec![wid(
+            3
+        )]]);
     }
 
     #[test]

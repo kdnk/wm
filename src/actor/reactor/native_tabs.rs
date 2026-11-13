@@ -95,6 +95,7 @@ impl Reactor {
         }
         #[cfg(not(test))]
         let successor = window_server::key_focused_window(space).and_then(|native| {
+            let native = self.resolve_native_focus(native);
             let frame = window_server::get_window(WindowServerId::new(native.idx.get()))?.frame;
             Some((native, frame))
         });

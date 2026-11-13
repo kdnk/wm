@@ -135,6 +135,13 @@ pub(crate) fn reconcile_app_membership(
 
 #[enum_dispatch]
 pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
+    fn reorder_column(
+        &mut self,
+        _layout: LayoutId,
+        _request: &crate::layout_engine::ColumnReorderRequest,
+    ) -> bool {
+        false
+    }
     fn window_participates(&self, _window: WindowId) -> bool { true }
     /// Change eligibility without changing canonical membership or sizing.
     fn set_window_participation(&mut self, _window: WindowId, _participates: bool) -> bool { false }

@@ -57,7 +57,7 @@ fn plist_path() -> io::Result<PathBuf> {
 fn find_rift_executable_in_path(path_env: &std::ffi::OsStr) -> io::Result<Option<PathBuf>> {
     let mut current_dir: Option<PathBuf> = None;
     for dir in env::split_paths(path_env) {
-        let candidate = dir.join("rift");
+        let candidate = dir.join("rift-patched");
         if candidate.is_file() {
             if candidate.is_absolute() {
                 return Ok(Some(candidate));
@@ -77,19 +77,22 @@ fn find_rift_executable_in_path(path_env: &std::ffi::OsStr) -> io::Result<Option
 }
 
 fn find_rift_executable() -> io::Result<PathBuf> {
-    if let Some(path_env) = env::var_os("PATH") {
-        if let Some(candidate) = find_rift_executable_in_path(&path_env)? {
-            return Ok(candidate);
-        }
-    }
-
     let exe_path = env::current_exe().map_err(|_| {
         io::Error::new(
             io::ErrorKind::Other,
             "unable to retrieve path of current executable",
         )
     })?;
-    let sibling = exe_path.with_file_name("rift");
+    if exe_path.file_name().is_some_and(|name| name == "rift") {
+        return Ok(exe_path);
+    }
+    if let Some(path_env) = env::var_os("PATH") {
+        if let Some(candidate) = find_rift_executable_in_path(&path_env)? {
+            return Ok(candidate);
+        }
+    }
+
+    let sibling = exe_path.with_file_name("rift-patched");
     if sibling.is_file() {
         return Ok(sibling);
     }
@@ -97,10 +100,14 @@ fn find_rift_executable() -> io::Result<PathBuf> {
     Err(io::Error::new(
         io::ErrorKind::NotFound,
         format!(
-            "rift agent executable not found: not present in $PATH and no sibling 'rift' next to current executable ('{}')",
+            "rift agent executable not found: not present in $PATH and no sibling 'rift-patched' next to current executable ('{}')",
             exe_path.display()
         ),
     ))
+}
+
+fn xml_text(value: &str) -> String {
+    value.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
 fn plist_contents() -> io::Result<String> {
@@ -114,10 +121,14 @@ fn plist_contents() -> io::Result<String> {
         .to_str()
         .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "non-UTF8 executable path"))?;
 
+    let install_dir = agent_exe.parent().and_then(Path::to_str).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::Other, "invalid Rift installation directory")
+    })?;
+
     let plist = format!(
-        r#"<?xml version=\"1.0\" encoding=\"UTF-8\"?>
-<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
-<plist version=\"1.0\">
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
 <dict>
     <key>Label</key>
     <string>{name}</string>
@@ -129,6 +140,8 @@ fn plist_contents() -> io::Result<String> {
     <dict>
         <key>PATH</key>
         <string>{path_env}</string>
+        <key>RIFT_INSTALL_DIR</key>
+        <string>{install_dir}</string>
         <key>RUST_LOG</key>
         <string>error,warn,info</string>
     </dict>
@@ -155,9 +168,10 @@ fn plist_contents() -> io::Result<String> {
 </plist>
 "#,
         name = RIFT_PLIST,
-        exe = exe_str,
-        path_env = path_env,
-        user = user
+        exe = xml_text(exe_str),
+        path_env = xml_text(&path_env),
+        install_dir = xml_text(install_dir),
+        user = xml_text(&user)
     );
 
     Ok(plist)
@@ -414,7 +428,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
 
-        let real = dir.join("rift-real");
+        let real = dir.join("rift-patched-real");
         fs::write(&real, b"#!/bin/sh\nexit 0\n").unwrap();
         let mut perms = fs::metadata(&real).unwrap().permissions();
         #[cfg(unix)]
@@ -424,7 +438,7 @@ mod tests {
             fs::set_permissions(&real, perms).unwrap();
         }
 
-        let link = dir.join("rift");
+        let link = dir.join("rift-patched");
         unix_fs::symlink(&real, &link).unwrap();
 
         let found = find_rift_executable_in_path(dir.as_os_str())

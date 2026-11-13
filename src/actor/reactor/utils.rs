@@ -94,6 +94,7 @@ mod tests {
             is_standard,
             is_root: true,
             is_minimized: false,
+            is_modal: None,
             is_resizable: true,
             title: "Window".into(),
             frame: CGRect::new(CGPoint::ZERO, CGSize::new(800.0, 600.0)),

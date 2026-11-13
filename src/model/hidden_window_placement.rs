@@ -43,16 +43,16 @@ impl ScrollingDisplayBounds {
     }
 
     pub(crate) fn resize_origin(self, frame: CGRect) -> Option<CGPoint> {
-        (frame.origin.x < self.screen.origin.x || frame.max().x > self.screen.max().x).then_some(
-            CGPoint::new(
+        (frame.origin.x < self.screen.origin.x
+            || (self.right && frame.max().x > self.screen.max().x))
+            .then_some(CGPoint::new(
                 if self.right {
                     self.screen.origin.x
                 } else {
                     self.screen.max().x - HiddenWindowPlacement::REVEAL_PX
                 },
                 self.screen.origin.y,
-            ),
-        )
+            ))
     }
 
     pub(crate) fn apply(self, mut frame: CGRect) -> CGRect {

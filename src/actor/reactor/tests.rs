@@ -14,6 +14,87 @@ use crate::sys::geometry::{Round, SameAs};
 use crate::sys::window_server::WindowServerId;
 
 #[test]
+fn duplicate_space_snapshot_does_not_stop_keyboard_navigation_midway() {
+    use super::animation::{AnimationManager, AnimationSender, Message};
+
+    for duplicate in [false, true] {
+        let (mut apps, mut reactor) = test_context();
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+        let space = SpaceId::new(1);
+        let snapshot =
+            forwarded_space_state(make_screen_snapshots(vec![screen], vec![Some(space)]));
+        reactor.handle_event(Event::SpaceStateChanged(snapshot.clone()));
+        apps.make_app_and_settle(&mut reactor, 1, make_windows(3));
+        let mut config = reactor.config.clone();
+        config.settings.layout.scrolling.column_width_ratio = 1.;
+        config.settings.layout.scrolling.preserve_window_sizes = false;
+        reactor
+            .layout_manager
+            .layout_engine
+            .set_layout_settings(&config.settings.layout);
+        reactor.config = config;
+        reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+            workspace: None,
+            mode: LayoutMode::Scrolling,
+        });
+        apps.simulate_until_quiet(&mut reactor);
+        reactor.send_layout_event(LayoutEvent::WindowFocused(space, WindowId::new(1, 1)));
+        reactor.update_layout_or_warn(false, false, Some(space));
+        apps.simulate_until_quiet(&mut reactor);
+
+        let (sender, receiver) = AnimationSender::channel();
+        reactor.animation_tx = Some(sender);
+        reactor.handle_test_layout_command(LayoutCommand::MoveFocus(Direction::Right));
+        let target = reactor.layout_manager.layout_engine.focused_window().unwrap();
+        assert_ne!(target, WindowId::new(1, 1));
+        let mut presenter = AnimationManager::new();
+        for message in receiver.commands.try_iter() {
+            presenter.handle_message(message);
+        }
+        let started = Instant::now();
+        presenter.tick_at(started + Duration::from_millis(50));
+        apps.simulate_events();
+        reactor.commit_presentations();
+        let midway = test_layout(&mut reactor, space, screen)
+            .into_iter()
+            .find(|(wid, _)| *wid == target)
+            .unwrap()
+            .1;
+        assert!(
+            midway.min().x > screen.min().x
+                && midway.min().x < screen.max().x
+                && midway.max().x > screen.max().x,
+            "snapshot must arrive after the target starts moving but remains clipped: {midway:?}"
+        );
+
+        if duplicate {
+            reactor.handle_loop_event(Event::SpaceStateChanged(snapshot));
+            for message in receiver.commands.try_iter() {
+                presenter.handle_message(message);
+            }
+        }
+        presenter.tick_at(started + Duration::from_secs(2));
+        presenter.handle_message(Message::Stop(Vec::new()));
+        apps.simulate_events();
+        reactor.commit_presentations();
+        let final_frame = test_layout(&mut reactor, space, screen)
+            .into_iter()
+            .find(|(wid, _)| *wid == target)
+            .unwrap()
+            .1;
+        let native = apps.windows[&target].frame;
+        assert!(
+            native.same_as(final_frame),
+            "native={native:?}, model={final_frame:?}"
+        );
+        assert!(
+            final_frame.min().x >= screen.min().x && final_frame.max().x <= screen.max().x,
+            "keyboard target remained clipped after duplicate={duplicate}: midway={midway:?}, final={final_frame:?}"
+        );
+    }
+}
+
+#[test]
 fn startup_ready_waits_for_queryable_authoritative_space_and_fires_once() {
     let mut reactor = test_reactor_with_workspace_count(9);
     reactor.config.settings.default_disable = true;
@@ -5261,6 +5342,7 @@ fn it_retains_windows_without_server_ids_after_login_visibility_failure() {
         is_standard: true,
         is_root: true,
         is_minimized: false,
+        is_modal: None,
         is_resizable: true,
         min_size: None,
         max_size: None,
@@ -11864,7 +11946,7 @@ fn ax_reclassification_updates_blocking_and_preserves_native_only_identity() {
 }
 
 #[test]
-fn native_admission_veto_survives_manage_rule() {
+fn managed_attached_window_requires_explicit_standard_rule() {
     let (mut apps, mut reactor, space, main, _) = pending_activation_context();
     let id = WindowServerId::new(20003);
     reactor.transient_focus.native(id, main.pid, space, true);
@@ -11874,13 +11956,133 @@ fn native_admission_veto_survives_manage_rule() {
     info.ax_role = Some("AXWindow".into());
     info.ax_subrole = Some("AXStandardWindow".into());
     reactor.handle_event(Event::WindowCreated(wid, info, None, None));
-    let window = reactor.state.windows.window_mut(wid).unwrap();
-    window.manage_override = Some(true);
-    assert!(!window.is_admitted());
+    for (role, subrole, manage, minimized, admitted) in [
+        (Some("AXWindow"), Some("AXStandardWindow"), None, false, false),
+        (
+            Some("AXWindow"),
+            Some("AXStandardWindow"),
+            Some(false),
+            false,
+            false,
+        ),
+        (
+            Some("AXWindow"),
+            Some("AXStandardWindow"),
+            Some(true),
+            false,
+            true,
+        ),
+        (
+            Some("AXWindow"),
+            Some("AXStandardWindow"),
+            Some(true),
+            true,
+            false,
+        ),
+        (Some("AXWindow"), Some("AXDialog"), Some(true), false, false),
+        (
+            Some("AXWindow"),
+            Some("AXSystemDialog"),
+            Some(true),
+            false,
+            false,
+        ),
+        (
+            Some("AXSheet"),
+            Some("AXStandardWindow"),
+            Some(true),
+            false,
+            false,
+        ),
+        (Some("AXPopover"), None, Some(true), false, false),
+        (Some("AXWindow"), Some("AXUnknown"), Some(true), false, false),
+        (Some("AXWindow"), None, Some(true), false, false),
+        (None, Some("AXStandardWindow"), Some(true), false, false),
+    ] {
+        let window = reactor.state.windows.window_mut(wid).unwrap();
+        window.info.ax_role = role.map(str::to_owned);
+        window.info.ax_subrole = subrole.map(str::to_owned);
+        window.info.is_minimized = minimized;
+        window.manage_override = manage;
+        assert_eq!(window.is_admitted(), admitted, "{role:?} {subrole:?} {manage:?}");
+    }
     assert!(reactor.test_workspace_for_window(space, wid).is_none());
     reactor.handle_event(Event::WindowServerAppeared(id, space, SpaceEventKind::User));
     assert!(!reactor.state.windows.window(wid).unwrap().native_transient);
     apps.simulate_until_quiet(&mut reactor);
+}
+
+#[test]
+fn managed_attached_window_tiles_without_blocking_hover_focus() {
+    let cfg = crate::common::config::VirtualWorkspaceSettings {
+        app_rules: vec![crate::common::config::AppWorkspaceRule {
+            app_id: Some("com.testapp2".into()),
+            title_regex: Some("^Settings$".into()),
+            ax_role: Some("AXWindow".into()),
+            ax_subrole: Some("AXStandardWindow".into()),
+            manage: Some(true),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let mut reactor = test_reactor_with_workspace_settings(&cfg);
+    let mut apps = Apps::new();
+    let space = SpaceId::new(1);
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let wid = WindowId::new(2, 2);
+    let id = WindowServerId::new(20002);
+    let mut windows = make_windows(2);
+    windows[1].title = "Settings".into();
+    windows[1].is_root = false;
+    windows[1].ax_role = Some("AXWindow".into());
+    windows[1].ax_subrole = Some("AXStandardWindow".into());
+    reactor.transient_focus.native(id, wid.pid, space, true);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, wid.pid, windows);
+    reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+        workspace: None,
+        mode: LayoutMode::Scrolling,
+    });
+    apps.simulate_until_quiet(&mut reactor);
+    reactor.handle_event(Event::ApplicationGloballyActivated(wid.pid));
+    assert!(reactor.state.windows.window(wid).unwrap().native_transient);
+    assert_eq!(
+        reactor.state.windows.window(wid).unwrap().manage_override,
+        Some(true)
+    );
+    assert!(reactor.query_window_info(wid).is_some_and(|window| !window.is_floating));
+    assert!(has_window_in_layout(&mut reactor, space, screen, wid));
+    assert!(!reactor.transient_blocks_mouse_focus());
+    assert!(reactor.transient_focus.windows.contains_key(&id));
+    let parent = WindowId::new(wid.pid, 1);
+    crate::sys::window_server::set_window_parent_override(
+        id,
+        Some(Some(WindowServerId::new(20001))),
+    );
+    reactor.handle_event(Event::WindowServerFocusChanged(wid, space));
+    assert!(reactor.query_window_info(wid).unwrap().is_focused);
+    reactor.handle_event(Event::WindowServerFocusChanged(parent, space));
+    assert!(reactor.query_window_info(parent).unwrap().is_focused);
+    reactor.handle_event(Event::WindowServerFocusChanged(wid, space));
+    assert!(reactor.query_window_info(wid).unwrap().is_focused);
+
+    reactor.state.windows.window_mut(wid).unwrap().manage_override = None;
+    assert!(reactor.transient_blocks_mouse_focus());
+    assert_eq!(reactor.resolve_native_focus(wid), parent);
+    reactor.state.windows.window_mut(wid).unwrap().manage_override = Some(true);
+    reactor.state.windows.window_mut(wid).unwrap().info.ax_subrole = Some("AXDialog".into());
+    assert!(reactor.transient_blocks_mouse_focus());
+    reactor.state.windows.window_mut(wid).unwrap().info.ax_subrole =
+        Some("AXStandardWindow".into());
+    assert!(!reactor.transient_blocks_mouse_focus());
+
+    let native_only = WindowServerId::new(20003);
+    reactor.transient_focus.native(native_only, wid.pid, space, true);
+    assert!(reactor.transient_blocks_mouse_focus());
+    reactor.transient_focus.windows.remove(&native_only);
+    reactor.transient_focus.native(id, wid.pid + 1, space, true);
+    reactor.handle_event(Event::ApplicationGloballyActivated(wid.pid + 1));
+    assert!(reactor.transient_blocks_mouse_focus());
+    crate::sys::window_server::set_window_parent_override(id, None);
 }
 
 #[test]
@@ -12217,4 +12419,1462 @@ fn presentation_inventory_tracks_visibility_without_forgetting_layout() {
         assert!(reactor.query_window_info(wid).is_none());
         assert!(!reactor.state.windows.contains_window(wid));
     }
+}
+
+#[test]
+fn excluded_tooltip_focus_does_not_raise_or_warp_its_document() {
+    for (mode, native_parent) in [LayoutMode::Traditional, LayoutMode::Scrolling]
+        .into_iter()
+        .flat_map(|mode| [false, true].map(move |parent| (mode, parent)))
+    {
+        for mouse_moved in [false, true] {
+            let (mut apps, mut reactor) = test_context();
+            let space = SpaceId::new(1);
+            let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+            reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+            reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+                workspace: None,
+                mode,
+            });
+            let document = WindowId::new(1, 1);
+            make_active_app(&mut apps, &mut reactor, 1, make_windows(1), Some(document));
+            reactor.handle_event(Event::WindowServerFocusChanged(document, space));
+            apps.simulate_until_quiet(&mut reactor);
+            let tooltip = WindowId::new(1, 2);
+            let tooltip_server = WindowServerId::new(10002);
+            let mut info = make_window(2);
+            info.is_standard = false;
+            info.is_resizable = false;
+            info.title.clear();
+            info.ax_role = Some("AXWindow".into());
+            info.ax_subrole = Some("AXUnknown".into());
+            info.sys_id = Some(tooltip_server);
+            info.frame = CGRect::new(CGPoint::new(21., 663.), CGSize::new(76., 34.));
+            reactor.handle_event(Event::WindowCreated(tooltip, info, None, None));
+            assert!(!reactor.state.windows.is_admitted(tooltip));
+            crate::sys::window_server::set_window_parent_override(
+                tooltip_server,
+                Some(native_parent.then(|| reactor.test_window_server_id(document))),
+            );
+            reactor.config.settings.mouse_follows_focus = true;
+            let (input_tx, mut input_rx) = actor::channel();
+            reactor.communication_manager.input_tx = Some(input_tx);
+            let (raise_tx, mut raise_rx) = actor::channel();
+            reactor.communication_manager.raise_manager_tx = raise_tx;
+
+            reactor.handle_event(Event::WindowServerFocusChanged(tooltip, space));
+            if mouse_moved {
+                for _ in 0..2 {
+                    reactor
+                        .handle_event(Event::MouseMoved(reactor.test_window_server_id(document)));
+                }
+            }
+            reactor.handle_event(Event::WindowServerHidden(tooltip_server));
+            reactor.handle_event(Event::WindowClosed(tooltip_server));
+            reactor.handle_event(Event::WindowServerFocusChanged(document, space));
+
+            assert!(
+                raise_rx.try_recv().is_err(),
+                "mode={mode:?}, mouse_moved={mouse_moved}, native_parent={native_parent}: a tooltip must not raise its document"
+            );
+            assert!(
+                !std::iter::from_fn(|| input_rx.try_recv().ok()).any(|(_, request)| matches!(
+                    request,
+                    input::Request::Warp(_) | input::Request::WarpRelative { .. }
+                )),
+                "mode={mode:?}, mouse_moved={mouse_moved}, native_parent={native_parent}: a tooltip must not move the cursor"
+            );
+            assert_eq!(reactor.query_window_info(document).unwrap().is_focused, true);
+            crate::sys::window_server::set_window_parent_override(tooltip_server, None);
+        }
+    }
+}
+
+#[test]
+fn nonstandard_focus_preserves_admission_claims_and_native_modals() {
+    use rift_protocol::WindowClaimFlags;
+
+    use crate::model::window_store::ClaimOwner;
+
+    for (case, native_parent) in ["admitted", "claimed", "native_modal"]
+        .into_iter()
+        .flat_map(|case| [false, true].map(move |parent| (case, parent)))
+    {
+        let (mut apps, mut reactor) = test_context();
+        let space = SpaceId::new(1);
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+        reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+        let document = WindowId::new(1, 1);
+        let target = WindowId::new(1, 2);
+        make_active_app(&mut apps, &mut reactor, 1, make_windows(2), Some(document));
+        reactor.handle_event(Event::WindowServerFocusChanged(document, space));
+        apps.simulate_until_quiet(&mut reactor);
+        let target_server = reactor.test_window_server_id(target);
+        let state = reactor.state.windows.window_mut(target).unwrap();
+        state.info.is_standard = false;
+        state.info.ax_role = Some("AXWindow".into());
+        state.info.ax_subrole = Some("AXUnknown".into());
+        state.is_manageable = false;
+        match case {
+            "admitted" => state.manage_override = Some(true),
+            "claimed" => {
+                reactor
+                    .claim_window(
+                        target,
+                        ClaimOwner(101),
+                        WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE,
+                    )
+                    .unwrap();
+            }
+            "native_modal" => {
+                state.native_transient = true;
+                reactor.transient_focus.native(target_server, target.pid, space, true);
+            }
+            _ => unreachable!(),
+        }
+        crate::sys::window_server::set_window_parent_override(
+            target_server,
+            Some(native_parent.then(|| reactor.test_window_server_id(document))),
+        );
+        reactor.config.settings.mouse_follows_focus = true;
+        let (input_tx, mut input_rx) = actor::channel();
+        reactor.communication_manager.input_tx = Some(input_tx);
+        reactor.handle_event(Event::WindowServerFocusChanged(target, space));
+        let expected_focus = if case == "native_modal" && native_parent {
+            document
+        } else {
+            target
+        };
+        assert_eq!(
+            reactor.main_window(),
+            Some(expected_focus),
+            "case={case}, native_parent={native_parent}"
+        );
+        let requests: Vec<_> = std::iter::from_fn(|| input_rx.try_recv().ok())
+            .map(|(_, request)| request)
+            .collect();
+        if case == "admitted" {
+            assert!(
+                requests.iter().any(|request| matches!(request, input::Request::Warp(_))),
+                "explicitly admitted nonstandard windows must retain cursor following"
+            );
+        } else if case == "claimed" {
+            assert!(
+                requests.iter().any(|request| matches!(
+                    request,
+                    input::Request::SetFocusFollowsMouseEnabled(false)
+                )),
+                "a focused nonstandard claim must suppress hover focus"
+            );
+        } else {
+            let (raise_tx, mut raise_rx) = actor::channel();
+            reactor.communication_manager.raise_manager_tx = raise_tx;
+            reactor.handle_event(Event::MouseMoved(reactor.test_window_server_id(document)));
+            assert!(
+                raise_rx.try_recv().is_err(),
+                "native modal focus must block hover raises"
+            );
+        }
+        crate::sys::window_server::set_window_parent_override(target_server, None);
+    }
+}
+
+#[test]
+fn external_application_activation_warps_to_destination() {
+    for mode in [LayoutMode::Traditional, LayoutMode::Scrolling] {
+        for (enabled, quiet, restored, pointer_on_target) in [
+            (true, Quiet::No, false, false),
+            (false, Quiet::No, false, false),
+            (true, Quiet::Yes, false, false),
+            (true, Quiet::No, true, false),
+            (true, Quiet::No, false, true),
+        ] {
+            let (mut apps, mut reactor) = test_context();
+            let space = SpaceId::new(1);
+            let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+            reactor.config.settings.layout.scrolling.column_width_ratio = 1.0;
+            reactor.config.settings.layout.scrolling.animate = Some(false);
+            reactor.config.settings.layout.scrolling.preserve_window_sizes = false;
+            reactor
+                .layout_manager
+                .layout_engine
+                .set_layout_settings(&reactor.config.settings.layout);
+            reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+            reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+                workspace: None,
+                mode,
+            });
+            let source = WindowId::new(1, 1);
+            let target = WindowId::new(2, 1);
+            apps.make_app_and_settle(&mut reactor, 2, make_windows(1));
+            make_active_app(&mut apps, &mut reactor, 1, make_windows(1), Some(source));
+            reactor.send_layout_event(LayoutEvent::WindowFocused(space, source));
+            apps.simulate_until_quiet(&mut reactor);
+            if mode == LayoutMode::Scrolling {
+                let frame = reactor.state.windows.window(target).unwrap().frame_monotonic;
+                assert!(
+                    !screen.contains(frame.mid()),
+                    "destination starts outside the viewport"
+                );
+            }
+            reactor.config.settings.mouse_follows_focus = enabled;
+            reactor.suppress_auto_workspace_switch_until_input = restored;
+            let hovered = pointer_on_target.then(|| reactor.test_window_server_id(target));
+            crate::sys::window_server::set_window_under_cursor_override(Some(hovered));
+            if pointer_on_target {
+                reactor.handle_event(Event::PointerFocusIntent(hovered, Instant::now()));
+            }
+            let (input_tx, mut input_rx) = actor::channel();
+            reactor.communication_manager.input_tx = Some(input_tx);
+
+            reactor.handle_event(Event::ApplicationGloballyActivated(target.pid));
+            reactor.handle_event(Event::ApplicationActivated(target.pid, quiet));
+
+            crate::sys::window_server::set_window_under_cursor_override(None);
+            let warps: Vec<_> = std::iter::from_fn(|| input_rx.try_recv().ok())
+                .filter_map(|(_, request)| match request {
+                    input::Request::Warp(point) => Some(point),
+                    _ => None,
+                })
+                .collect();
+            let expected = if enabled && quiet == Quiet::No && !restored && !pointer_on_target {
+                let frame = reactor.state.windows.window(target).unwrap().frame_monotonic;
+                assert!(
+                    screen.contains(frame.mid()),
+                    "activated destination must be revealed"
+                );
+                vec![frame.mid()]
+            } else {
+                vec![]
+            };
+            assert_eq!(
+                warps, expected,
+                "mode={mode:?}, enabled={enabled}, quiet={quiet:?}, restored={restored}, pointer_on_target={pointer_on_target}"
+            );
+        }
+    }
+}
+
+#[test]
+fn same_application_native_focus_warps_to_destination() {
+    for mode in [LayoutMode::Traditional, LayoutMode::Scrolling] {
+        for ax_first in [false, true] {
+            for (enabled, restored, pointer_on_target) in [
+                (true, false, false),
+                (false, false, false),
+                (true, true, false),
+                (true, false, true),
+            ] {
+                let (mut apps, mut reactor) = test_context();
+                let space = SpaceId::new(1);
+                let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+                reactor.config.settings.layout.scrolling.column_width_ratio = 1.0;
+                reactor.config.settings.layout.scrolling.animate = Some(false);
+                reactor.config.settings.layout.scrolling.preserve_window_sizes = false;
+                reactor
+                    .layout_manager
+                    .layout_engine
+                    .set_layout_settings(&reactor.config.settings.layout);
+                reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+                reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+                    workspace: None,
+                    mode,
+                });
+                let source = WindowId::new(1, 1);
+                let target = WindowId::new(1, 2);
+                make_active_app(&mut apps, &mut reactor, 1, make_windows(2), Some(source));
+                reactor.handle_event(Event::WindowServerFocusChanged(source, space));
+                apps.simulate_until_quiet(&mut reactor);
+                reactor.config.settings.mouse_follows_focus = enabled;
+                reactor.suppress_auto_workspace_switch_until_input = restored;
+                let hovered = pointer_on_target.then(|| reactor.test_window_server_id(target));
+                crate::sys::window_server::set_window_under_cursor_override(Some(hovered));
+                if pointer_on_target {
+                    reactor.handle_event(Event::PointerFocusIntent(hovered, Instant::now()));
+                }
+                let (input_tx, mut input_rx) = actor::channel();
+                reactor.communication_manager.input_tx = Some(input_tx);
+                let ax_event = Event::ApplicationMainWindowChanged(1, Some(target), Quiet::No);
+                if ax_first {
+                    reactor.handle_event(ax_event);
+                    reactor.handle_event(Event::WindowServerFocusChanged(target, space));
+                } else {
+                    reactor.handle_event(Event::WindowServerFocusChanged(target, space));
+                    reactor.handle_event(ax_event);
+                }
+                let warps: Vec<_> = std::iter::from_fn(|| input_rx.try_recv().ok())
+                    .filter_map(|(_, request)| match request {
+                        input::Request::Warp(point) => Some(point),
+                        _ => None,
+                    })
+                    .collect();
+                let expected = if enabled && !restored && !pointer_on_target {
+                    let frame = reactor.state.windows.window(target).unwrap().frame_monotonic;
+                    assert!(
+                        screen.contains(frame.mid()),
+                        "native destination must be revealed"
+                    );
+                    vec![frame.mid()]
+                } else {
+                    vec![]
+                };
+                assert_eq!(
+                    warps, expected,
+                    "mode={mode:?}, ax_first={ax_first}, enabled={enabled}, restored={restored}, pointer_on_target={pointer_on_target}"
+                );
+                reactor.handle_event(Event::WindowServerFocusChanged(target, space));
+                assert!(
+                    !std::iter::from_fn(|| input_rx.try_recv().ok())
+                        .any(|(_, request)| matches!(request, input::Request::Warp(_))),
+                    "duplicate native focus must not warp"
+                );
+                crate::sys::window_server::set_window_under_cursor_override(None);
+            }
+        }
+    }
+}
+
+#[test]
+fn url_link_activation_warps_when_browser_covers_click_source() {
+    let (mut apps, mut reactor) = test_context();
+    let space = SpaceId::new(1);
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    let source = WindowId::new(1, 1);
+    let browser = WindowId::new(2, 1);
+    apps.make_app_and_settle(&mut reactor, 2, make_windows(1));
+    make_active_app(&mut apps, &mut reactor, 1, make_windows(1), Some(source));
+    reactor.config.settings.mouse_follows_focus = true;
+    reactor.handle_event(Event::MouseMoved(reactor.test_window_server_id(browser)));
+    reactor.handle_event(Event::MouseMoved(reactor.test_window_server_id(source)));
+    crate::sys::window_server::set_window_under_cursor_override(Some(Some(
+        reactor.test_window_server_id(source),
+    )));
+    reactor.handle_event(Event::PointerFocusIntent(
+        Some(reactor.test_window_server_id(source)),
+        Instant::now(),
+    ));
+    reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+    let (input_tx, mut input_rx) = actor::channel();
+    reactor.communication_manager.input_tx = Some(input_tx);
+    crate::sys::window_server::set_window_under_cursor_override(Some(Some(
+        reactor.test_window_server_id(browser),
+    )));
+    reactor.handle_event(Event::ApplicationGloballyActivated(browser.pid));
+    reactor.handle_event(Event::ApplicationActivated(browser.pid, Quiet::No));
+    crate::sys::window_server::set_window_under_cursor_override(None);
+    let warps: Vec<_> = std::iter::from_fn(|| input_rx.try_recv().ok())
+        .filter_map(|(_, request)| match request {
+            input::Request::Warp(point) => Some(point),
+            _ => None,
+        })
+        .collect();
+    let browser_frame = reactor.state.windows.window(browser).unwrap().frame_monotonic;
+    assert_eq!(
+        warps,
+        vec![browser_frame.mid()],
+        "opening a link must follow the browser, even when the newly raised browser covers the source click"
+    );
+}
+
+#[test]
+fn external_focus_uses_recent_input_instead_of_raised_window_hit_test() {
+    for mode in [LayoutMode::Traditional, LayoutMode::Scrolling] {
+        for intent in [
+            "source-click",
+            "target-click",
+            "keyboard-after-click",
+            "expired-click",
+        ] {
+            let (mut apps, mut reactor) = test_context();
+            let space = SpaceId::new(1);
+            let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+            reactor.config.settings.layout.scrolling.animate = Some(false);
+            reactor
+                .layout_manager
+                .layout_engine
+                .set_layout_settings(&reactor.config.settings.layout);
+            reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+            reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+                workspace: None,
+                mode,
+            });
+            let source = WindowId::new(1, 1);
+            let target = WindowId::new(2, 1);
+            apps.make_app_and_settle(&mut reactor, 2, make_windows(1));
+            make_active_app(&mut apps, &mut reactor, 1, make_windows(1), Some(source));
+            reactor.config.settings.mouse_follows_focus = true;
+            let clicked = if intent == "source-click" {
+                source
+            } else {
+                target
+            };
+            let captured = Instant::now()
+                - if intent == "expired-click" {
+                    Duration::from_secs(2)
+                } else {
+                    Duration::ZERO
+                };
+            reactor.handle_event(Event::PointerFocusIntent(
+                Some(reactor.test_window_server_id(clicked)),
+                captured,
+            ));
+            if intent == "keyboard-after-click" {
+                reactor.handle_event(Event::PointerFocusIntent(None, Instant::now()));
+            }
+            crate::sys::window_server::set_window_under_cursor_override(Some(Some(
+                reactor.test_window_server_id(target),
+            )));
+            let (input_tx, mut input_rx) = actor::channel();
+            reactor.communication_manager.input_tx = Some(input_tx);
+            reactor.handle_event(Event::ApplicationGloballyActivated(target.pid));
+            reactor.handle_event(Event::ApplicationActivated(target.pid, Quiet::No));
+            crate::sys::window_server::set_window_under_cursor_override(None);
+            let warps: Vec<_> = std::iter::from_fn(|| input_rx.try_recv().ok())
+                .filter_map(|(_, request)| match request {
+                    input::Request::Warp(point) => Some(point),
+                    _ => None,
+                })
+                .collect();
+            let expected = if intent == "target-click" {
+                vec![]
+            } else {
+                vec![reactor.state.windows.window(target).unwrap().frame_monotonic.mid()]
+            };
+            assert_eq!(warps, expected, "mode={mode:?}, intent={intent}");
+        }
+    }
+}
+
+#[test]
+fn external_focus_warp_uses_animated_destination_after_native_focus() {
+    for ratio in [0.6, 1.0] {
+        for native_first in [false, true] {
+            for same_app in [false, true] {
+                let (mut apps, mut reactor) = test_context();
+                let space = SpaceId::new(1);
+                let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+                reactor.config.settings.layout.scrolling.column_width_ratio = ratio;
+                reactor.config.settings.layout.scrolling.max_column_width_ratio = 1.0;
+                reactor.config.settings.layout.scrolling.animate = Some(false);
+                reactor.config.settings.layout.scrolling.preserve_window_sizes = false;
+                reactor
+                    .layout_manager
+                    .layout_engine
+                    .set_layout_settings(&reactor.config.settings.layout);
+                reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+                reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+                    workspace: None,
+                    mode: LayoutMode::Scrolling,
+                });
+                let source = WindowId::new(1, 1);
+                let target = if same_app {
+                    WindowId::new(1, 2)
+                } else {
+                    WindowId::new(2, 1)
+                };
+                if same_app {
+                    make_active_app(&mut apps, &mut reactor, 1, make_windows(2), Some(source));
+                } else {
+                    apps.make_app_and_settle(&mut reactor, 2, make_windows(1));
+                    make_active_app(&mut apps, &mut reactor, 1, make_windows(1), Some(source));
+                }
+                reactor.handle_event(Event::WindowServerFocusChanged(source, space));
+                apps.simulate_until_quiet(&mut reactor);
+                let old_center =
+                    reactor.state.windows.window(target).unwrap().frame_monotonic.mid();
+                reactor.config.settings.layout.scrolling.animate = Some(true);
+                reactor
+                    .layout_manager
+                    .layout_engine
+                    .set_layout_settings(&reactor.config.settings.layout);
+                let (animation_tx, _animation_rx) = super::animation::AnimationSender::channel();
+                reactor.animation_tx = Some(animation_tx);
+                reactor.config.settings.mouse_follows_focus = true;
+                let (input_tx, mut input_rx) = actor::channel();
+                reactor.communication_manager.input_tx = Some(input_tx);
+                if !same_app {
+                    reactor.handle_event(Event::ApplicationGloballyActivated(target.pid));
+                }
+                if native_first {
+                    reactor.handle_event(Event::WindowServerFocusChanged(target, space));
+                }
+                if same_app {
+                    reactor.handle_event(Event::ApplicationMainWindowChanged(
+                        target.pid,
+                        Some(target),
+                        Quiet::No,
+                    ));
+                } else {
+                    reactor.handle_event(Event::ApplicationActivated(target.pid, Quiet::No));
+                }
+                if !native_first {
+                    reactor.handle_event(Event::WindowServerFocusChanged(target, space));
+                }
+                let warps: Vec<_> = std::iter::from_fn(|| input_rx.try_recv().ok())
+                    .filter_map(|(_, request)| match request {
+                        input::Request::Warp(point) => Some(point),
+                        _ => None,
+                    })
+                    .collect();
+                let destination = CGPoint::new(
+                    if ratio == 1.0 {
+                        500.0
+                    } else if same_app {
+                        700.0
+                    } else {
+                        300.0
+                    },
+                    500.0,
+                );
+                assert!(screen.contains(destination));
+                assert_ne!(
+                    old_center, destination,
+                    "fixture must reveal a different target center"
+                );
+                assert!(
+                    !warps.is_empty(),
+                    "missing warp: native_first={native_first}, same_app={same_app}, target={destination:?}"
+                );
+                assert!(
+                    warps.iter().all(|point| *point == destination),
+                    "stale warp: native_first={native_first}, same_app={same_app}, warps={warps:?}, target={destination:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn hover_focus_preserves_pointer_on_boundary() {
+    for mode in [LayoutMode::Traditional, LayoutMode::Scrolling] {
+        for enabled in [false, true] {
+            let (mut apps, mut reactor) = test_context();
+            let space = SpaceId::new(1);
+            let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+            reactor.config.settings.layout.scrolling.animate = Some(false);
+            reactor
+                .layout_manager
+                .layout_engine
+                .set_layout_settings(&reactor.config.settings.layout);
+            reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+            reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+                workspace: None,
+                mode,
+            });
+            let source = WindowId::new(1, 1);
+            let target = WindowId::new(2, 1);
+            apps.make_app_and_settle(&mut reactor, 2, make_windows(1));
+            make_active_app(&mut apps, &mut reactor, 1, make_windows(1), Some(source));
+            apps.simulate_until_quiet(&mut reactor);
+            reactor.config.settings.mouse_follows_focus = enabled;
+            let (input_tx, mut input_rx) = actor::channel();
+            reactor.communication_manager.input_tx = Some(input_tx);
+            let (raise_tx, mut raise_rx) = actor::channel();
+            reactor.communication_manager.raise_manager_tx = raise_tx;
+            reactor.handle_event(Event::MouseMoved(reactor.test_window_server_id(target)));
+            assert!(matches!(
+                raise_rx.try_recv().unwrap().1,
+                raise_manager::Event::MouseRaiseRequest(..)
+            ));
+            let warps: Vec<_> = std::iter::from_fn(|| input_rx.try_recv().ok())
+                .filter_map(|(_, request)| match request {
+                    input::Request::Warp(point) => Some(point),
+                    input::Request::WarpRelative { .. } => {
+                        panic!("hover focus must not request a relative warp")
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                warps.is_empty(),
+                "mode={mode:?}, enabled={enabled}: hover focus must preserve the pointer"
+            );
+        }
+    }
+}
+
+#[test]
+fn hover_focus_preserves_pointer_after_raise_completion_unless_keyboard_intervenes() {
+    for complete_first in [false, true] {
+        for keyboard in [false, true] {
+            let (mut apps, mut reactor) = test_context();
+            let space = SpaceId::new(1);
+            let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+            reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+            let source = WindowId::new(1, 1);
+            let target = WindowId::new(1, 2);
+            make_active_app(&mut apps, &mut reactor, 1, make_windows(2), Some(source));
+            reactor.handle_event(Event::WindowServerFocusChanged(source, space));
+            apps.simulate_until_quiet(&mut reactor);
+            reactor.config.settings.mouse_follows_focus = true;
+            let (input_tx, mut input_rx) = actor::channel();
+            reactor.communication_manager.input_tx = Some(input_tx);
+            let (raise_tx, mut raise_rx) = actor::channel();
+            reactor.communication_manager.raise_manager_tx = raise_tx;
+            reactor.handle_event(Event::MouseMoved(reactor.test_window_server_id(target)));
+            assert!(
+                matches!(
+                    raise_rx.try_recv().unwrap().1,
+                    raise_manager::Event::MouseRaiseRequest(..)
+                ),
+                "hover must request focus"
+            );
+            if complete_first {
+                reactor.handle_event(Event::RaiseCompleted {
+                    window_id: target,
+                    sequence_id: 0,
+                });
+            }
+            if keyboard {
+                reactor.handle_event(Event::PointerFocusIntent(None, Instant::now()));
+            }
+            reactor.handle_event(Event::WindowServerFocusChanged(target, space));
+            if !complete_first {
+                reactor.handle_event(Event::RaiseCompleted {
+                    window_id: target,
+                    sequence_id: 0,
+                });
+            }
+            let warps: Vec<_> = std::iter::from_fn(|| input_rx.try_recv().ok())
+                .filter_map(|(_, request)| match request {
+                    input::Request::Warp(point) => Some(point),
+                    input::Request::WarpRelative { .. } => {
+                        panic!("hover focus must not request a relative warp")
+                    }
+                    _ => None,
+                })
+                .collect();
+            let expected = if keyboard {
+                vec![reactor.state.windows.window(target).unwrap().frame_monotonic.mid()]
+            } else {
+                vec![]
+            };
+            assert_eq!(
+                warps, expected,
+                "complete_first={complete_first}, keyboard={keyboard}"
+            );
+        }
+    }
+}
+
+#[test]
+fn rapid_hover_focus_notifications_preserve_pointer() {
+    for mode in [LayoutMode::Traditional, LayoutMode::Scrolling] {
+        let (mut apps, mut reactor) = test_context();
+        let space = SpaceId::new(1);
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+        reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+        reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+            workspace: None,
+            mode,
+        });
+        let source = WindowId::new(1, 1);
+        let first = WindowId::new(1, 2);
+        let second = WindowId::new(1, 3);
+        make_active_app(&mut apps, &mut reactor, 1, make_windows(3), Some(source));
+        reactor.handle_event(Event::WindowServerFocusChanged(source, space));
+        apps.simulate_until_quiet(&mut reactor);
+        reactor.config.settings.mouse_follows_focus = true;
+        let (input_tx, mut input_rx) = actor::channel();
+        reactor.communication_manager.input_tx = Some(input_tx);
+        let (raise_tx, mut raise_rx) = actor::channel();
+        reactor.communication_manager.raise_manager_tx = raise_tx;
+        reactor.workspace_switch_manager.pending_focus_mouse_warp = Some(source);
+        for target in [first, second] {
+            reactor.handle_event(Event::MouseMoved(reactor.test_window_server_id(target)));
+            assert!(matches!(
+                raise_rx.try_recv().unwrap().1,
+                raise_manager::Event::MouseRaiseRequest(..)
+            ));
+        }
+        for target in [first, second] {
+            reactor.handle_event(Event::WindowServerFocusChanged(target, space));
+            reactor.handle_event(Event::RaiseCompleted {
+                window_id: target,
+                sequence_id: 0,
+            });
+        }
+        let warps: Vec<_> = std::iter::from_fn(|| input_rx.try_recv().ok())
+            .filter_map(|(_, request)| match request {
+                input::Request::Warp(point) => Some(point),
+                input::Request::WarpRelative { .. } => {
+                    panic!("hover focus must not request a relative warp")
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            warps.is_empty(),
+            "mode={mode:?}, rapid hover must not warp: {warps:?}"
+        );
+    }
+}
+
+#[test]
+fn hover_focus_layout_response_preserves_pointer() {
+    for mode in [LayoutMode::Traditional, LayoutMode::Scrolling] {
+        let (mut apps, mut reactor) = test_context();
+        let space = SpaceId::new(1);
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+        reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+        reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+            workspace: None,
+            mode,
+        });
+        let source = WindowId::new(1, 1);
+        let target = WindowId::new(2, 1);
+        apps.make_app_and_settle(&mut reactor, 2, make_windows(1));
+        make_active_app(&mut apps, &mut reactor, 1, make_windows(1), Some(source));
+        apps.simulate_until_quiet(&mut reactor);
+        reactor.config.settings.mouse_follows_focus = true;
+        let (input_tx, mut input_rx) = actor::channel();
+        reactor.communication_manager.input_tx = Some(input_tx);
+        let (raise_tx, mut raise_rx) = actor::channel();
+        reactor.communication_manager.raise_manager_tx = raise_tx;
+        reactor.handle_event(Event::MouseMoved(reactor.test_window_server_id(target)));
+        assert!(matches!(
+            raise_rx.try_recv().unwrap().1,
+            raise_manager::Event::MouseRaiseRequest(..)
+        ));
+        reactor.handle_event(Event::ApplicationGloballyActivated(target.pid));
+        reactor.handle_event(Event::ApplicationActivated(target.pid, Quiet::No));
+        reactor.handle_event(Event::WindowServerFocusChanged(target, space));
+        reactor.handle_layout_response(
+            layout::EventResponse {
+                changed: true,
+                raise_windows: vec![target],
+                focus_window: Some(target),
+                ..layout::EventResponse::default()
+            },
+            None,
+        );
+        let mut raise_warps = Vec::new();
+        while let Ok((_, event)) = raise_rx.try_recv() {
+            if let raise_manager::Event::RaiseRequest(request) = event {
+                if let Some((_, Some(point))) = request.focus_window {
+                    raise_warps.push(point);
+                }
+            }
+        }
+        let warps: Vec<_> = std::iter::from_fn(|| input_rx.try_recv().ok())
+            .filter_map(|(_, request)| match request {
+                input::Request::Warp(point) => Some(point),
+                input::Request::WarpRelative { .. } => {
+                    panic!("hover focus must not request a relative warp")
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            raise_warps.is_empty(),
+            "mode={mode:?}, hover layout must not carry warp: {raise_warps:?}"
+        );
+        assert!(
+            warps.is_empty(),
+            "mode={mode:?}, hover activation must not warp: {warps:?}"
+        );
+        assert_eq!(
+            reactor.workspace_switch_manager.pending_focus_mouse_warp, None,
+            "hover layout must not schedule a deferred warp"
+        );
+    }
+}
+
+#[test]
+fn explicit_focus_after_hover_follows_the_pointer() {
+    for menu in [false, true] {
+        let (mut apps, mut reactor) = test_context();
+        let space = SpaceId::new(1);
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+        reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+        let source = WindowId::new(1, 1);
+        let target = WindowId::new(1, 2);
+        make_active_app(&mut apps, &mut reactor, 1, make_windows(2), Some(source));
+        reactor.handle_event(Event::WindowServerFocusChanged(source, space));
+        apps.simulate_until_quiet(&mut reactor);
+        reactor.config.settings.mouse_follows_focus = true;
+        let (input_tx, mut input_rx) = actor::channel();
+        reactor.communication_manager.input_tx = Some(input_tx);
+        let (raise_tx, mut raise_rx) = actor::channel();
+        reactor.communication_manager.raise_manager_tx = raise_tx;
+        reactor.handle_event(Event::MouseMoved(reactor.test_window_server_id(target)));
+        assert!(matches!(
+            raise_rx.try_recv().unwrap().1,
+            raise_manager::Event::MouseRaiseRequest(..)
+        ));
+        if menu {
+            reactor.handle_event(Event::MenuBarFocusWindow(target));
+        } else {
+            reactor.handle_event(Event::Command(Command::Reactor(ReactorCommand::FocusWindow {
+                window_id: target.into(),
+                window_server_id: None,
+            })));
+        }
+        reactor.handle_event(Event::WindowServerFocusChanged(target, space));
+        let mut warps: Vec<_> = std::iter::from_fn(|| input_rx.try_recv().ok())
+            .filter_map(|(_, request)| match request {
+                input::Request::Warp(point) => Some(point),
+                input::Request::WarpRelative { .. } => {
+                    panic!("document focus must not warp between displays")
+                }
+                _ => None,
+            })
+            .collect();
+        while let Ok((_, event)) = raise_rx.try_recv() {
+            if let raise_manager::Event::RaiseRequest(request) = event {
+                if let Some((_, Some(point))) = request.focus_window {
+                    warps.push(point);
+                }
+            }
+        }
+        assert!(
+            !warps.is_empty(),
+            "menu={menu}: explicit focus after hover must move the cursor"
+        );
+    }
+}
+
+#[test]
+fn expired_hover_intent_does_not_suppress_native_focus() {
+    let (mut apps, mut reactor) = test_context();
+    let space = SpaceId::new(1);
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    let source = WindowId::new(1, 1);
+    let target = WindowId::new(1, 2);
+    make_active_app(&mut apps, &mut reactor, 1, make_windows(2), Some(source));
+    reactor.handle_event(Event::WindowServerFocusChanged(source, space));
+    apps.simulate_until_quiet(&mut reactor);
+    reactor.config.settings.mouse_follows_focus = true;
+    let (input_tx, mut input_rx) = actor::channel();
+    reactor.communication_manager.input_tx = Some(input_tx);
+    let (raise_tx, _raise_rx) = actor::channel();
+    reactor.communication_manager.raise_manager_tx = raise_tx;
+    reactor.handle_event(Event::MouseMoved(reactor.test_window_server_id(target)));
+    reactor
+        .hover_focus_intents
+        .insert(target, Instant::now() - Duration::from_secs(2));
+    reactor.handle_event(Event::WindowServerFocusChanged(target, space));
+    assert!(
+        std::iter::from_fn(|| input_rx.try_recv().ok())
+            .any(|(_, request)| matches!(request, input::Request::Warp(_))),
+        "expired hover intent must allow native cursor following"
+    );
+}
+
+#[test]
+fn focus_warp_request_rejects_queued_hover_before_hit_testing() {
+    let (mut apps, mut reactor) = test_context();
+    let space = SpaceId::new(1);
+    reactor.handle_event(space_state_event(
+        vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.))],
+        vec![Some(space)],
+    ));
+    let source = WindowId::new(1, 1);
+    let target = WindowId::new(2, 1);
+    apps.make_app_and_settle(&mut reactor, 2, make_windows(1));
+    make_active_app(&mut apps, &mut reactor, 1, make_windows(1), Some(source));
+    apps.simulate_until_quiet(&mut reactor);
+    let (input_tx, _input_rx) = actor::channel();
+    reactor.communication_manager.input_tx = Some(input_tx);
+    let (raise_tx, mut raise_rx) = actor::channel();
+    reactor.communication_manager.raise_manager_tx = raise_tx;
+    let publisher = MouseFocusPublisher::default();
+    let (sender, mut receiver) = actor::channel();
+    publisher.publish(&sender, 1).unwrap();
+    reactor.warp_mouse(CGPoint::new(500., 500.));
+    window_server::set_window_under_cursor_override(Some(Some(
+        reactor.test_window_server_id(target),
+    )));
+    let reactor = Rc::new(RefCell::new(reactor));
+    Reactor::handle_thread_event(&reactor, receiver.try_recv().unwrap().1);
+    assert!(
+        raise_rx.try_recv().is_err(),
+        "pre-request hover must not raise another window"
+    );
+    publisher
+        .publish(&sender, crate::sys::event::hid_event_timestamp_now())
+        .unwrap();
+    Reactor::handle_thread_event(&reactor, receiver.try_recv().unwrap().1);
+    assert!(matches!(
+        raise_rx.try_recv().unwrap().1,
+        raise_manager::Event::MouseRaiseRequest(..)
+    ));
+    window_server::set_window_under_cursor_override(None);
+}
+
+#[test]
+fn screen_zoom_hover_uses_current_logical_cursor_at_window_boundaries() {
+    for (hid_x, current_x, expected_index) in [
+        (400., 600., 2),
+        (600., 400., 1),
+        (400., 400., 1),
+        (600., 600., 2),
+    ] {
+        let (mut apps, mut reactor) = test_context();
+        let space = SpaceId::new(1);
+        reactor.handle_event(space_state_event(
+            vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.))],
+            vec![Some(space)],
+        ));
+        apps.make_app_and_settle(&mut reactor, 2, make_windows(2));
+        let source = WindowId::new(1, 1);
+        make_active_app(&mut apps, &mut reactor, 1, make_windows(1), Some(source));
+        reactor.send_layout_event(LayoutEvent::WindowFocused(space, source));
+        apps.simulate_until_quiet(&mut reactor);
+        let first = WindowId::new(2, 1);
+        let second = WindowId::new(2, 2);
+        window_server::set_window_at_point_regions(Some(vec![
+            (
+                CGRect::new(CGPoint::ZERO, CGSize::new(500., 1000.)),
+                reactor.test_window_server_id(first),
+            ),
+            (
+                CGRect::new(CGPoint::new(500., 0.), CGSize::new(500., 1000.)),
+                reactor.test_window_server_id(second),
+            ),
+        ]));
+        window_server::set_cursor_location_override(Some(CGPoint::new(current_x, 500.)));
+        let (raise_tx, mut raise_rx) = actor::channel();
+        reactor.communication_manager.raise_manager_tx = raise_tx;
+        let reactor = Rc::new(RefCell::new(reactor));
+        let publisher = MouseFocusPublisher::default();
+        let (sender, mut receiver) = actor::channel();
+        publisher.publish(&sender, 1).unwrap();
+        publisher.publish(&sender, 2).unwrap();
+        let event = receiver.try_recv().unwrap().1;
+        assert!(
+            receiver.try_recv().is_err(),
+            "pointer motions should coalesce into one wake"
+        );
+        Reactor::handle_thread_event(&reactor, event);
+        let (_, raise_manager::Event::MouseRaiseRequest(request, _)) = raise_rx.try_recv().unwrap()
+        else {
+            panic!("expected pointer focus request");
+        };
+        assert_eq!(
+            request.focus_window.map(|(window, _)| window),
+            Some(WindowId::new(2, expected_index)),
+            "hid_x={hid_x}, current_x={current_x}"
+        );
+        assert!(raise_rx.try_recv().is_err());
+        Reactor::handle_thread_event(&reactor, Event::MouseFocusPending(publisher));
+        assert!(
+            raise_rx.try_recv().is_err(),
+            "drained wake must not repeat pointer focus"
+        );
+        window_server::set_cursor_location_override(None);
+        window_server::set_window_at_point_regions(None);
+    }
+}
+
+#[test]
+fn menu_bar_window_list_tracks_scrolling_order_titles_focus_and_workspace() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(3));
+    reactor.handle_event(Event::ApplicationGloballyActivated(1));
+    reactor.handle_event(Event::WindowServerFocusChanged(WindowId::new(1, 1), space));
+    let native_ids = (1..=3)
+        .map(|idx| reactor.test_window_server_id(WindowId::new(1, idx)))
+        .collect::<Vec<_>>();
+    for id in &native_ids {
+        crate::sys::window_server::set_window_ordered_in_override(*id, Some(true));
+    }
+    reactor.config.settings.ui.menu_bar.enabled = true;
+    reactor.config.settings.ui.menu_bar.show_window_list = true;
+    reactor.config.settings.ui.menu_bar.display_style =
+        crate::common::config::WorkspaceDisplayStyle::Label;
+    reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+        workspace: None,
+        mode: LayoutMode::Scrolling,
+    });
+    apps.simulate_until_quiet(&mut reactor);
+    let (tx, mut rx) = crate::actor::channel();
+    reactor.menu_manager.menu_tx = Some(tx);
+    reactor.maybe_send_menu_update();
+    let latest = |rx: &mut crate::actor::Receiver<menu_bar::Event>, stage: &str| {
+        let mut latest = None;
+        while let Ok((_, event)) = rx.try_recv() {
+            if let menu_bar::Event::Update(update) = event {
+                latest = Some(update);
+            }
+        }
+        latest.unwrap_or_else(|| panic!("menu update must be published after {stage}"))
+    };
+    let update = latest(&mut rx, "initial projection");
+    let windows = &update
+        .context_workspaces()
+        .iter()
+        .find(|workspace| workspace.is_active)
+        .unwrap()
+        .window_list;
+    let expected = reactor
+        .query_windows(None)
+        .into_iter()
+        .map(|window| window.id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        windows.iter().map(|window| window.id).collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(windows.len(), 3);
+    let runtime = reactor.query_windows(None);
+    for window in windows {
+        let expected_position = runtime
+            .iter()
+            .find(|entry| entry.id == window.id)
+            .unwrap()
+            .layout_position
+            .unwrap();
+        assert_eq!(
+            window.layout_position,
+            Some(menu_bar::MenuLayoutPosition {
+                column_id: window.layout_position.unwrap().column_id,
+                column: expected_position.column,
+                row: expected_position.row,
+            })
+        );
+    }
+
+    let target = windows[0].id;
+    let focus_target = windows.iter().find(|window| !window.focused).unwrap().id;
+    reactor.handle_event(Event::WindowTitleChanged(
+        target,
+        "renamed without moving".into(),
+    ));
+    let update = latest(&mut rx, "title change");
+    assert_eq!(
+        update.context_workspaces()[0].window_list[0].title,
+        "renamed without moving"
+    );
+    reactor.handle_event(Event::Command(Command::Reactor(ReactorCommand::FocusWindow {
+        window_id: focus_target.into(),
+        window_server_id: None,
+    })));
+    apps.simulate_until_quiet(&mut reactor);
+    reactor.handle_event(Event::WindowServerFocusChanged(focus_target, space));
+    reactor.handle_event(Event::ApplicationMainWindowChanged(
+        focus_target.pid,
+        Some(focus_target),
+        Quiet::No,
+    ));
+    let update = latest(&mut rx, "focus change");
+    assert_eq!(
+        update.context_workspaces()[0]
+            .window_list
+            .iter()
+            .filter(|window| window.focused)
+            .map(|window| window.id)
+            .collect::<Vec<_>>(),
+        [focus_target]
+    );
+    reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(1));
+    let update = latest(&mut rx, "workspace switch");
+    assert!(
+        update
+            .context_workspaces()
+            .iter()
+            .find(|workspace| workspace.is_active)
+            .unwrap()
+            .window_list
+            .is_empty()
+    );
+    let parked = update
+        .context_workspaces()
+        .iter()
+        .find(|workspace| !workspace.window_list.is_empty())
+        .unwrap();
+    assert!(!parked.is_active);
+    assert_eq!(
+        parked.window_list.iter().map(|window| window.id).collect::<Vec<_>>(),
+        expected
+    );
+    reactor.config.settings.ui.menu_bar.mode = crate::common::config::MenuBarDisplayMode::Active;
+    reactor.maybe_send_menu_update();
+    let update = latest(&mut rx, "active-only mode");
+    assert!(
+        update
+            .context_workspaces()
+            .iter()
+            .all(|workspace| workspace.window_list.is_empty())
+    );
+    reactor.config.settings.ui.menu_bar.show_window_list = false;
+    reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(0));
+    let update = latest(&mut rx, "disable");
+    assert!(
+        update
+            .context_workspaces()
+            .iter()
+            .all(|workspace| workspace.window_list.is_empty())
+    );
+    for id in native_ids {
+        crate::sys::window_server::set_window_ordered_in_override(id, None);
+    }
+}
+
+#[test]
+fn menu_bar_native_visibility_omits_hidden_windows_without_retiring_layout_membership() {
+    let (mut apps, mut reactor) = test_context();
+    let space = SpaceId::new(1);
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(3));
+    let ids = (1..=3)
+        .map(|idx| reactor.test_window_server_id(WindowId::new(1, idx)))
+        .collect::<Vec<_>>();
+    for id in &ids {
+        crate::sys::window_server::set_window_ordered_in_override(*id, Some(true));
+    }
+    let hidden = WindowId::new(1, 2);
+    let owner = reactor.state.windows.workspace_for_window(hidden);
+    reactor.config.settings.ui.menu_bar.enabled = true;
+    reactor.config.settings.ui.menu_bar.show_window_list = true;
+    reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+        workspace: None,
+        mode: LayoutMode::Scrolling,
+    });
+    let (tx, mut rx) = crate::actor::channel();
+    reactor.menu_manager.menu_tx = Some(tx);
+    let latest = |rx: &mut crate::actor::Receiver<menu_bar::Event>| {
+        let mut update = None;
+        while let Ok((_, event)) = rx.try_recv() {
+            if let menu_bar::Event::Update(value) = event {
+                update = Some(value);
+            }
+        }
+        update.expect("native visibility must refresh the menu")
+    };
+    reactor.maybe_send_menu_update();
+    let initial = latest(&mut rx);
+    assert_eq!(initial.context_workspaces()[0].window_list.len(), 3);
+    let canonical_columns = initial.context_workspaces()[0].columns.clone();
+    assert!(canonical_columns.iter().any(|column| column.members.contains(&hidden)));
+    assert_eq!(initial.context_workspaces()[0].key, owner.unwrap());
+    crate::sys::window_server::set_window_ordered_in_override(ids[1], Some(false));
+    reactor.handle_event(Event::WindowServerHidden(ids[1]));
+    let update = latest(&mut rx);
+    assert_eq!(
+        update.context_workspaces()[0].columns,
+        canonical_columns,
+        "drag witnesses retain rows hidden from visible menu icons"
+    );
+    let shown = &update.context_workspaces()[0].window_list;
+    assert_eq!(shown.len(), 2);
+    assert!(shown.iter().all(|window| window.id != hidden));
+    assert!(shown.iter().any(|window| window.id == WindowId::new(1, 1)));
+    assert_eq!(reactor.state.windows.workspace_for_window(hidden), owner);
+    assert!(reactor.state.windows.contains_window(hidden));
+    reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(1));
+    let update = latest(&mut rx);
+    let inactive = update
+        .context_workspaces()
+        .iter()
+        .find(|workspace| workspace.index == 0)
+        .unwrap();
+    assert!(!inactive.is_active);
+    assert_eq!(inactive.window_list.len(), 2);
+    assert!(inactive.window_list.iter().all(|window| window.id != hidden));
+    crate::sys::window_server::set_window_ordered_in_override(ids[1], Some(true));
+    reactor.handle_event(Event::WindowServerUnhidden(ids[1]));
+    assert_eq!(latest(&mut rx).context_workspaces()[0].window_list.len(), 3);
+    for id in ids {
+        crate::sys::window_server::set_window_ordered_in_override(id, None);
+    }
+}
+
+#[test]
+fn inventory_ax_invalidation_updates_menu_and_retires_closed_scrolling_window() {
+    for native_hide_first in [false, true] {
+        let (mut apps, mut reactor) = test_context();
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+        let space = SpaceId::new(1);
+        apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(3));
+        reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+            workspace: None,
+            mode: LayoutMode::Scrolling,
+        });
+        apps.simulate_until_quiet(&mut reactor);
+        let hidden = WindowId::new(1, 2);
+        let survivors = [WindowId::new(1, 1), WindowId::new(1, 3)];
+        let wsid = reactor.test_window_server_id(hidden);
+        let owner = reactor.state.windows.workspace_for_window(hidden);
+        let original = test_layout(&mut reactor, space, screen);
+        let info = reactor.state.windows.window(hidden).unwrap().info.clone();
+        let ids: Vec<_> = (1..=3)
+            .map(|idx| reactor.test_window_server_id(WindowId::new(1, idx)))
+            .collect();
+        for id in &ids {
+            crate::sys::window_server::set_window_ordered_in_override(*id, Some(true));
+        }
+        crate::sys::window_server::set_window_suitability_override(wsid, Some(true));
+        reactor.config.settings.ui.menu_bar.enabled = true;
+        reactor.config.settings.ui.menu_bar.show_window_list = true;
+        let (tx, mut rx) = crate::actor::channel();
+        reactor.menu_manager.menu_tx = Some(tx);
+        reactor.maybe_send_menu_update();
+        while rx.try_recv().is_ok() {}
+        crate::sys::window_server::set_window_ordered_in_override(wsid, Some(false));
+        if native_hide_first {
+            reactor.handle_event(Event::WindowServerHidden(wsid));
+        }
+        reactor.handle_event(Event::WindowInvalidated(
+            hidden,
+            super::WindowInvalidationSource::AxDestroyedNotification,
+        ));
+        let layout = test_layout(&mut reactor, space, screen);
+        assert_eq!(layout.len(), 2, "invalid AX window must leave no blank tile");
+        assert!(layout.iter().all(|(wid, _)| *wid != hidden));
+        assert_eq!(reactor.state.windows.workspace_for_window(hidden), owner);
+        assert!(reactor.state.windows.contains_window(hidden));
+        crate::sys::window_server::set_window_ordered_in_override(wsid, Some(true));
+        reactor.discover_test_windows(1, vec![(hidden, info.clone())], vec![
+            hidden,
+            survivors[0],
+            survivors[1],
+        ]);
+        apps.simulate_until_quiet(&mut reactor);
+        assert_eq!(test_layout(&mut reactor, space, screen), original);
+        crate::sys::window_server::set_window_ordered_in_override(wsid, Some(false));
+        reactor.handle_event(Event::WindowInvalidated(
+            hidden,
+            super::WindowInvalidationSource::AxDestroyedNotification,
+        ));
+        apps.windows.remove(&hidden);
+        apps.requests();
+        reactor.discover_test_windows(1, vec![], survivors.to_vec());
+        assert!(!reactor.state.windows.contains_window(hidden));
+        assert_eq!(reactor.state.windows.workspace_for_window(hidden), None);
+        let layout = test_layout(&mut reactor, space, screen);
+        assert_eq!(layout.len(), 2, "closed window must leave no blank tile");
+        assert!(layout.iter().all(|(wid, _)| *wid != hidden));
+        let requests = apps.requests();
+        assert!(
+            !requests.iter().any(|request| matches!(request,
+                Request::SetWindowFrames(frames, ..) if frames.iter().any(|(wid, _)| *wid == hidden)
+            )),
+            "closed window must receive no frame writes"
+        );
+        for event in apps.simulate_events_for_requests(requests) {
+            reactor.handle_event(event);
+        }
+        apps.simulate_until_quiet(&mut reactor);
+        let mut update = None;
+        while let Ok((_, event)) = rx.try_recv() {
+            if let menu_bar::Event::Update(value) = event {
+                update = Some(value);
+            }
+        }
+        let update = update.expect("inventory retirement must refresh the menu");
+        assert_eq!(update.context_workspaces()[0].window_list.len(), 2);
+        assert!(
+            update.context_workspaces()[0]
+                .window_list
+                .iter()
+                .all(|window| window.id != hidden)
+        );
+        let arrangements = reactor.layout_update_count;
+        reactor.discover_test_windows(1, vec![], survivors.to_vec());
+        assert_eq!(
+            reactor.layout_update_count, arrangements,
+            "duplicate inventory must not arrange again"
+        );
+        for id in ids {
+            crate::sys::window_server::set_window_ordered_in_override(id, None);
+        }
+        crate::sys::window_server::set_window_suitability_override(wsid, None);
+    }
+}
+
+#[test]
+fn inventory_native_ordering_out_preserves_scrolling_slot_and_refocus() {
+    for native_hide_notification in [false, true] {
+        let (mut apps, mut reactor) = test_context();
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+        let space = SpaceId::new(1);
+        apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(3));
+        reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+            workspace: None,
+            mode: LayoutMode::Scrolling,
+        });
+        apps.simulate_until_quiet(&mut reactor);
+        let hidden = WindowId::new(1, 2);
+        let survivors = [WindowId::new(1, 1), WindowId::new(1, 3)];
+        let wsid = reactor.test_window_server_id(hidden);
+        let owner = reactor.state.windows.workspace_for_window(hidden);
+        let original = test_layout(&mut reactor, space, screen);
+        let ids: Vec<_> = (1..=3)
+            .map(|idx| reactor.test_window_server_id(WindowId::new(1, idx)))
+            .collect();
+        for id in &ids {
+            crate::sys::window_server::set_window_ordered_in_override(*id, Some(true));
+        }
+        crate::sys::window_server::set_window_suitability_override(wsid, Some(true));
+        crate::sys::window_server::set_window_ordered_in_override(wsid, Some(false));
+        if native_hide_notification {
+            reactor.handle_event(Event::WindowServerHidden(wsid));
+        }
+        apps.requests();
+        for _ in 0..2 {
+            reactor.discover_test_windows(1, vec![], survivors.to_vec());
+            assert_eq!(
+                test_layout(&mut reactor, space, screen),
+                original,
+                "native ordering and AX inventory omission must retain a live window's slot"
+            );
+            assert_eq!(reactor.state.windows.workspace_for_window(hidden), owner);
+            assert!(reactor.state.windows.contains_window(hidden));
+        }
+        crate::sys::window_server::set_window_ordered_in_override(wsid, Some(true));
+        reactor.handle_event(Event::WindowServerUnhidden(wsid));
+        reactor.discover_test_windows(1, vec![], vec![survivors[0], hidden, survivors[1]]);
+        let (raise_tx, mut raise_rx) = actor::channel();
+        reactor.communication_manager.raise_manager_tx = raise_tx;
+        reactor.handle_event(Event::Command(Command::Reactor(ReactorCommand::FocusWindow {
+            window_id: hidden.into(),
+            window_server_id: Some(wsid.as_u32()),
+        })));
+        assert!(
+            std::iter::from_fn(|| raise_rx.try_recv().ok()).any(|(_, event)| matches!(
+                event,
+                raise_manager::Event::RaiseRequest(RaiseRequest { focus_window: Some((wid, _)), .. })
+                    if wid == hidden
+            )),
+            "a restored native window must accept an explicit focus request"
+        );
+        reactor.handle_event(Event::ApplicationGloballyActivated(hidden.pid));
+        reactor.handle_event(Event::WindowServerFocusChanged(hidden, space));
+        reactor.handle_event(Event::ApplicationMainWindowChanged(
+            hidden.pid,
+            Some(hidden),
+            Quiet::No,
+        ));
+        apps.simulate_until_quiet(&mut reactor);
+        assert_eq!(
+            reactor.layout_manager.layout_engine.focused_window(),
+            Some(hidden)
+        );
+        assert!(reactor.query_window_info(hidden).unwrap().is_focused);
+        assert_eq!(reactor.state.windows.workspace_for_window(hidden), owner);
+        assert_eq!(
+            test_layout(&mut reactor, space, screen)
+                .iter()
+                .map(|(wid, _)| *wid)
+                .collect::<Vec<_>>(),
+            original.iter().map(|(wid, _)| *wid).collect::<Vec<_>>(),
+            "restoring and focusing a live window must preserve column order"
+        );
+        for id in ids {
+            crate::sys::window_server::set_window_ordered_in_override(id, None);
+        }
+        crate::sys::window_server::set_window_suitability_override(wsid, None);
+    }
+}
+
+#[test]
+fn managed_nonmodal_dialog_requires_positive_modal_evidence_and_explicit_rule() {
+    let mut info = make_windows(1).remove(0);
+    info.is_standard = false;
+    info.ax_role = Some("AXWindow".into());
+    info.ax_subrole = Some("AXDialog".into());
+    for modal in [None, Some(true), Some(false)] {
+        for manage in [None, Some(false), Some(true)] {
+            let mut window = WindowState::from(info.clone());
+            window.info.is_modal = modal;
+            window.manage_override = manage;
+            assert_eq!(
+                window.is_admitted(),
+                modal == Some(false) && manage == Some(true)
+            );
+        }
+    }
+    for (role, subrole, root, resizable, native, minimized) in [
+        ("AXWindow", "AXDialog", false, true, false, false),
+        ("AXWindow", "AXDialog", true, false, false, false),
+        ("AXWindow", "AXDialog", true, true, true, false),
+        ("AXWindow", "AXDialog", true, true, false, true),
+        ("AXWindow", "AXSheet", true, true, false, false),
+        ("AXWindow", "AXSystemDialog", true, true, false, false),
+        ("AXSheet", "AXDialog", true, true, false, false),
+    ] {
+        let mut window = WindowState::from(info.clone());
+        window.info.ax_role = Some(role.into());
+        window.info.ax_subrole = Some(subrole.into());
+        window.info.is_modal = Some(false);
+        window.info.is_root = root;
+        window.info.is_resizable = resizable;
+        window.info.is_minimized = minimized;
+        window.native_transient = native;
+        window.manage_override = Some(true);
+        assert!(
+            !window.is_admitted(),
+            "{role} {subrole} root={root} resizable={resizable} native={native} minimized={minimized}"
+        );
+    }
+    let mut legacy = serde_json::to_value(&info).unwrap();
+    legacy.as_object_mut().unwrap().remove("is_modal");
+    let restored: WindowInfo = serde_json::from_value(legacy).unwrap();
+    assert_eq!(restored.is_modal, None);
+    assert!(!WindowState::from(restored).is_admitted_with_override(Some(true)));
+}
+
+#[test]
+fn managed_nonmodal_dialog_rule_tiles_preferences_and_preserves_raw_guard() {
+    let cfg = crate::common::config::VirtualWorkspaceSettings {
+        app_rules: vec![crate::common::config::AppWorkspaceRule {
+            app_id: Some("net.ankiweb.anki".into()),
+            title_regex: Some("^Preferences$".into()),
+            ax_role: Some("AXWindow".into()),
+            ax_subrole: Some("AXDialog".into()),
+            manage: Some(true),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let mut reactor = test_reactor_with_workspace_settings(&cfg);
+    let mut apps = Apps::new();
+    let space = SpaceId::new(1);
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let wid = WindowId::new(2, 2);
+    let id = WindowServerId::new(20002);
+    let mut windows = make_windows(2);
+    for window in &mut windows {
+        window.bundle_id = Some("net.ankiweb.anki".into());
+    }
+    windows[1].title = "Preferences".into();
+    windows[1].is_standard = false;
+    windows[1].is_modal = Some(false);
+    windows[1].ax_role = Some("AXWindow".into());
+    windows[1].ax_subrole = Some("AXDialog".into());
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    let mut launched = apps.make_app(wid.pid, windows);
+    for event in &mut launched {
+        if let Event::ApplicationLaunched { info, .. } = event {
+            info.bundle_id = Some("net.ankiweb.anki".into());
+        }
+    }
+    reactor.handle_events(launched);
+    apps.simulate_until_quiet(&mut reactor);
+    reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+        workspace: None,
+        mode: LayoutMode::Scrolling,
+    });
+    apps.simulate_until_quiet(&mut reactor);
+    reactor.handle_event(Event::ApplicationGloballyActivated(wid.pid));
+    assert_eq!(
+        reactor.state.windows.window(wid).unwrap().manage_override,
+        Some(true)
+    );
+    assert!(reactor.query_window_info(wid).is_some_and(|window| !window.is_floating));
+    assert!(has_window_in_layout(&mut reactor, space, screen, wid));
+    assert!(reactor.transient_focus.windows.contains_key(&id));
+    assert!(!reactor.transient_blocks_mouse_focus());
+    reactor.state.windows.window_mut(wid).unwrap().info.is_modal = Some(true);
+    assert!(reactor.query_window_info(wid).is_none());
+    assert!(reactor.transient_blocks_mouse_focus());
+    reactor.state.windows.window_mut(wid).unwrap().info.is_modal = Some(false);
+    reactor.state.windows.window_mut(wid).unwrap().manage_override = None;
+    assert!(reactor.query_window_info(wid).is_none());
+    assert!(reactor.transient_blocks_mouse_focus());
 }

@@ -1,0 +1,136 @@
+--- a/src/actor/reactor/animation.rs
++++ b/src/actor/reactor/animation.rs
+@@ -3092,7 +3092,7 @@
+     }
+ 
+     #[test]
+-    fn restated_space_snapshot_preserves_animation_but_new_revision_cancels_it() {
++    fn restated_space_snapshot_preserves_animation_but_topology_change_cancels_it() {
+         use super::super::testing::*;
+         use crate::actor::reactor::Event;
+ 
+@@ -3115,7 +3115,11 @@
+             .insert(wid, (reactor.app_manager.apps[&1].handle.clone(), frame));
+         let control = Arc::clone(&sender.control);
+         reactor.animation_tx = Some(sender);
+-        for revision in [snapshot.revision, snapshot.revision.saturating_sub(1)] {
++        for revision in [
++            snapshot.revision,
++            snapshot.revision.saturating_sub(1),
++            snapshot.revision + 1,
++        ] {
+             let mut restated = snapshot.clone();
+             restated.revision = revision;
+             reactor.handle_event(Event::SpaceStateChanged(restated));
+@@ -3124,7 +3128,8 @@
+                 receiver.commands.try_iter().all(|message| !matches!(message, Message::Stop(_)))
+             );
+         }
+-        snapshot.revision += 1;
++        snapshot.revision += 2;
++        snapshot.screens[0].frame.size.width += 100.;
+         reactor.handle_event(Event::SpaceStateChanged(snapshot));
+         assert!(!control.lock().frames.contains_key(&wid));
+         assert!(receiver.commands.try_iter().any(|message| matches!(message, Message::Stop(_))));
+@@ -3509,9 +3514,18 @@
+                 Some(MouseState::Up),
+             ))
+             .unwrap();
++        assert_eq!(
++            outcome.arrange.passes, 1,
++            "a stale target cannot absorb native geometry"
++        );
++        assert!(!outcome.arrange.is_resize);
+         assert!(
+-            outcome.arrange.is_resize,
+-            "a later genuine mouse-up resize must not be absorbed by a stale pending target"
++            outcome.layout_events.is_empty(),
++            "mouse-up geometry cannot persist layout widths"
++        );
++        assert_eq!(
++            reactor.state.windows.window(wid).unwrap().frame_monotonic,
++            resized
+         );
+     }
+ 
+@@ -3595,11 +3609,20 @@
+                 Some(MouseState::Up),
+             ))
+             .unwrap();
++        assert_eq!(
++            outcome.arrange.passes, 1,
++            "a different native size remains observable"
++        );
++        assert!(!outcome.arrange.is_resize);
+         assert!(
+-            outcome.arrange.is_resize,
+-            "a different native size remains observable"
+-        );
+-        reactor
++            outcome.layout_events.is_empty(),
++            "mouse-up geometry cannot persist layout widths"
++        );
++        assert_eq!(
++            reactor.state.windows.window(wid).unwrap().frame_monotonic,
++            rect(950.)
++        );
++        let outcome = reactor
+             .dispatch_workflow(ReactorEvent::WindowFrameChanged(
+                 wid,
+                 rect(940.),
+@@ -3608,6 +3631,14 @@
+                 Some(MouseState::Down),
+             ))
+             .unwrap();
++        assert!(
++            outcome.layout_events.iter().any(|event| matches!(
++                event,
++                crate::layout_engine::LayoutEvent::WindowResized { wid: resized, new_frame, .. }
++                    if *resized == wid && *new_frame == rect(940.)
++            )),
++            "a real resize gesture updates layout widths"
++        );
+         assert!(
+             !ticket.is_current(),
+             "a real resize gesture owns native geometry"
+--- a/src/bin/rift.rs
++++ b/src/bin/rift.rs
+@@ -38,7 +38,7 @@
+ embed_plist::embed_info_plist!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/Info.plist"));
+ 
+ #[derive(Parser)]
+-#[command(name = "rift-patched", version = env!("RIFT_VERSION"))]
++#[command(name = "rift", version = env!("RIFT_VERSION"))]
+ struct Cli {
+     /// Only run the window manager on the current space.
+     #[arg(long)]
+--- a/src/sys/service.rs
++++ b/src/sys/service.rs
+@@ -77,18 +77,21 @@
+ }
+ 
+ fn find_rift_executable() -> io::Result<PathBuf> {
+-    if let Some(path_env) = env::var_os("PATH") {
+-        if let Some(candidate) = find_rift_executable_in_path(&path_env)? {
+-            return Ok(candidate);
+-        }
+-    }
+-
+     let exe_path = env::current_exe().map_err(|_| {
+         io::Error::new(
+             io::ErrorKind::Other,
+             "unable to retrieve path of current executable",
+         )
+     })?;
++    if exe_path.file_name().is_some_and(|name| name == "rift") {
++        return Ok(exe_path);
++    }
++    if let Some(path_env) = env::var_os("PATH") {
++        if let Some(candidate) = find_rift_executable_in_path(&path_env)? {
++            return Ok(candidate);
++        }
++    }
++
+     let sibling = exe_path.with_file_name("rift-patched");
+     if sibling.is_file() {
+         return Ok(sibling);

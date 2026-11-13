@@ -564,11 +564,11 @@ impl LayoutManager {
                 && reactor.workspace_switch_manager.pending_display_warp.is_none()
                 && reactor.layout_manager.layout_engine.active_layout_mode_at(space)
                     == LayoutMode::Scrolling
-                && let Some((_, frame)) = layout.iter().find(|(wid, _)| *wid == window)
+                && layout.iter().any(|(wid, _)| *wid == window)
             {
                 reactor.workspace_switch_manager.pending_focus_mouse_warp = None;
-                if reactor.screen_for_point(frame.mid()).is_some() {
-                    reactor.warp_mouse(frame.mid());
+                if let Some(center) = reactor.focus_warp_center(window) {
+                    reactor.warp_mouse(center);
                 }
             }
         }

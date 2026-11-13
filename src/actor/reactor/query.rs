@@ -307,7 +307,15 @@ impl Reactor {
             .screens
             .iter()
             .filter_map(|screen| {
-                screen.space.map(|space| (screen.frame, screen.display_uuid.clone(), space))
+                screen.space.map(|space| {
+                    (
+                        screen.frame,
+                        screen.display_uuid.clone(),
+                        space,
+                        screen.id,
+                        screen.is_builtin,
+                    )
+                })
             })
             .collect();
         screens.sort_by(|a, b| {
@@ -319,12 +327,17 @@ impl Reactor {
         });
         let displays = screens
             .into_iter()
-            .map(|(_, display_uuid, space)| menu_bar::DisplayWorkspaces {
-                display_uuid,
-                space,
-                is_active_context: Some(space) == active_space,
-                workspaces: self.menu_workspaces(space),
-            })
+            .map(
+                |(_, display_uuid, space, screen_id, is_builtin)| menu_bar::DisplayWorkspaces {
+                    screen_id,
+                    is_builtin,
+                    display_uuid,
+                    space,
+                    is_active_context: Some(space) == active_space,
+                    space_is_activated: self.is_space_active(space),
+                    workspaces: self.menu_workspaces(space),
+                },
+            )
             .collect();
 
         let update = menu_bar::Update {
@@ -363,6 +376,8 @@ impl Reactor {
         let show_layout =
             settings.enabled && settings.display_style == WorkspaceDisplayStyle::Layout;
         let active_only = settings.mode == MenuBarDisplayMode::Active;
+        let show_window_list = settings.enabled && settings.show_window_list;
+        let focused_window = self.main_window();
         let workspaces = self.visible_workspace_view(space, Some(space));
         workspaces
             .into_iter()
@@ -385,17 +400,99 @@ impl Reactor {
                 let has_fullscreen =
                     self.layout_manager.layout_engine.workspace_has_fullscreen(space, id, &windows);
                 let mut frames = Vec::new();
-                if show_layout && (!active_only || is_active) && !windows.is_empty() {
-                    // Preserve scrolling visual order without rich per-window snapshots
-                    // or logical-frame maps that the menu never consumes.
-                    let positions = self.logical_window_positions_for(Some(space), Some(index));
+                let columns: Vec<menu_bar::MenuColumn> = self
+                    .resolve_query_workspace(space, Some(index))
+                    .and_then(|target| {
+                        self.layout_manager.layout_engine.query_workspace_layout(target)
+                    })
+                    .map(|snapshot| {
+                        snapshot
+                            .container_tree
+                            .children
+                            .iter()
+                            .filter(|node| node.role.as_deref() == Some("column"))
+                            .map(|column| menu_bar::MenuColumn {
+                                id: crate::layout_engine::ColumnId(column.node_id),
+                                members: column
+                                    .children
+                                    .iter()
+                                    .filter_map(|node| {
+                                        node.window_id
+                                            .map(|window| WindowId::new(window.pid, window.idx))
+                                    })
+                                    .collect(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let menu_columns: HashMap<WindowId, crate::layout_engine::ColumnId> = columns
+                    .iter()
+                    .flat_map(|column| column.members.iter().map(|window| (*window, column.id)))
+                    .collect();
+                let positions = if (show_layout || show_window_list)
+                    && (!active_only || is_active)
+                    && !windows.is_empty()
+                {
+                    self.logical_window_positions_for(Some(space), Some(index))
+                } else {
+                    HashMap::default()
+                };
+                if (show_layout || show_window_list)
+                    && (!active_only || is_active)
+                    && !windows.is_empty()
+                {
                     windows.sort_by_key(|wid| {
                         let position =
                             (!self.layout_manager.layout_engine.is_window_floating(*wid))
                                 .then(|| positions.get(wid))
                                 .flatten();
-                        position.map_or((1, usize::MAX, usize::MAX), |p| (0, p.column, p.row))
+                        position.map_or((1, usize::MAX, usize::MAX, wid.pid, wid.idx), |p| {
+                            (0, p.column, p.row, wid.pid, wid.idx)
+                        })
                     });
+                }
+                let window_list = if show_window_list && (!active_only || is_active) {
+                    windows
+                        .iter()
+                        .filter_map(|wid| {
+                            let app = self.app_manager.apps.get(&wid.pid)?;
+                            let window = self.state.windows.window(*wid)?;
+                            if window.info.sys_id.is_some_and(|id| {
+                                crate::sys::window_server::window_ordered_in(id) == Some(false)
+                            }) {
+                                return None;
+                            }
+                            Some(menu_bar::MenuWindow {
+                                id: *wid,
+                                app_name: app
+                                    .info
+                                    .localized_name
+                                    .clone()
+                                    .or_else(|| app.info.bundle_id.clone())
+                                    .unwrap_or_else(|| "Window".into()),
+                                bundle_id: app.info.bundle_id.clone(),
+                                title: window.info.title.clone(),
+                                focused: focused_window == Some(*wid),
+                                layout_position: (!self
+                                    .layout_manager
+                                    .layout_engine
+                                    .is_window_floating(*wid))
+                                .then(|| positions.get(wid))
+                                .flatten()
+                                .and_then(|position| {
+                                    Some(menu_bar::MenuLayoutPosition {
+                                        column_id: *menu_columns.get(wid)?,
+                                        column: position.column,
+                                        row: position.row,
+                                    })
+                                }),
+                            })
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                if show_layout && (!active_only || is_active) && !windows.is_empty() {
                     let predicted: std::collections::HashMap<WindowId, CGRect> = if !is_active {
                         self.space_state
                             .screen_by_space(space)
@@ -434,12 +531,15 @@ impl Reactor {
                         .collect();
                 }
                 menu_bar::Workspace {
+                    columns,
+                    key: id,
                     id: format!("{id:?}"),
                     index,
                     name,
                     is_active,
                     window_count,
                     windows: frames,
+                    window_list,
                     has_fullscreen,
                     layout_mode: self
                         .layout_manager
