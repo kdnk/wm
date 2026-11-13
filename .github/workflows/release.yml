@@ -23,14 +23,14 @@ env:
 jobs:
   prepare:
     name: Plan version release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       release: ${{ steps.plan.outputs.release }}
       sha: ${{ steps.plan.outputs.sha }}
       tag: ${{ steps.plan.outputs.tag }}
       version: ${{ steps.plan.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ github.sha }}
@@ -58,11 +58,11 @@ jobs:
   tag:
     name: Create immutable version tag
     needs: [prepare, verify]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.sha }}
       - name: Create or verify the version tag
@@ -85,7 +85,7 @@ jobs:
 
     steps:
       - name: Checkout source at release tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ needs.prepare.outputs.sha }}
@@ -137,7 +137,7 @@ jobs:
 
     steps:
       - name: Checkout source at release tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ needs.prepare.outputs.sha }}

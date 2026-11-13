@@ -24,9 +24,9 @@ env:
 
 jobs:
   format:
-    runs-on: macos-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.source_sha || github.sha }}
       - uses: dtolnay/rust-toolchain@nightly
@@ -38,7 +38,7 @@ jobs:
   test:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.source_sha || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
