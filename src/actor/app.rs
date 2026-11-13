@@ -3017,7 +3017,6 @@ mod frame_tests {
         assert!(window.placements.borrow().is_empty());
     }
 
-
     #[test]
     fn stepped_sizes_keep_display_intersection_without_animation_reads() {
         let screen = rect(623., 1726., 1728., 1000.);
@@ -3112,7 +3111,10 @@ mod frame_tests {
             ..Default::default()
         };
         let authority = FrameAuthority(None, ScrollingDisplayBounds::for_screen(screen, &[]));
-        let target = AuthorizedFrameTarget { target: &window, authority: &authority };
+        let target = AuthorizedFrameTarget {
+            target: &window,
+            authority: &authority,
+        };
         let mut accepted = from;
         write_interactive_frame(&target, &mut accepted, to, true, FrameSource::Viewport);
         assert_eq!(accepted, to);
@@ -3134,7 +3136,10 @@ mod frame_tests {
             ..Default::default()
         };
         let authority = FrameAuthority(None, ScrollingDisplayBounds::for_screen(screen, &[]));
-        let target = AuthorizedFrameTarget { target: &window, authority: &authority };
+        let target = AuthorizedFrameTarget {
+            target: &window,
+            authority: &authority,
+        };
         let mut accepted = from;
         write_interactive_frame(&target, &mut accepted, to, true, FrameSource::Viewport);
         assert_eq!(accepted, to);
