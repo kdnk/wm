@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 //! WindowServer-hosted Metal previews. All control and presentation is owner-thread confined.
 //! Capture callbacks only replace a single retained, immutable sample; they never render.
 mod capture;

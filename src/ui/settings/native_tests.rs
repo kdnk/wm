@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use cgs::controls::SheetActions;
 use cgs::layout::VStack;
 use cgs::settings::Section;
@@ -272,7 +273,7 @@ pub fn run(ui: Ui) {
             visible.len() == 1 && std::ptr::eq(&*visible[0], keyboard.ns_view()),
             "a display change off the layout pages keeps the current page"
         );
-        settings.refresh_applications(vec![rift_protocol::ApplicationData {
+        settings.refresh_applications(vec![wm_protocol::ApplicationData {
             pid: 1,
             bundle_id: Some("dev.test.Editor".into()),
             name: "Editor".into(),
@@ -1147,7 +1148,7 @@ fn keyboard_controls(
     settings: &Settings,
     pending: &mut tokio::sync::mpsc::UnboundedReceiver<Request>,
 ) {
-    use rift_protocol::{Direction, DisplaySelector, LayoutCommand as L, ReactorCommand as R};
+    use wm_protocol::{Direction, DisplaySelector, LayoutCommand as L, ReactorCommand as R};
 
     use crate::actor::reactor::Command;
     use crate::actor::wm_controller::{WmCmd, WmCommand};
@@ -1482,10 +1483,10 @@ fn keyboard_controls(
         edited.keys["Alt + G"],
         WmCommand::ConfiguredLayout(
             crate::actor::wm_controller::ConfiguredLayoutCommand::ToggleWindowFloating(
-                rift_protocol::ToggleWindowFloatingOptions {
+                wm_protocol::ToggleWindowFloatingOptions {
                     center: true,
-                    size: Some(rift_protocol::FloatingWindowSize::Preset(
-                        rift_protocol::FloatingWindowSizePreset::Smart
+                    size: Some(wm_protocol::FloatingWindowSize::Preset(
+                        wm_protocol::FloatingWindowSizePreset::Smart
                     ))
                 }
             )
@@ -1626,7 +1627,7 @@ fn keyboard_controls(
     assert!(
         edited.keys.values().any(|command| *command
             == WmCommand::ReactorCommand(Command::Reactor(R::FocusWindow {
-                window_id: rift_protocol::WindowId { pid: 345, idx: 7 },
+                window_id: wm_protocol::WindowId { pid: 345, idx: 7 },
                 window_server_id: Some(42)
             }))),
         "recording must retain every field of the structured command"
@@ -1883,7 +1884,7 @@ fn interface_controls(
         .update(|current| current.settings.ui = source.settings.ui.clone())
         .unwrap();
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("rift.toml");
+    let path = directory.path().join("wm.toml");
     document.save(&path).unwrap();
     let loaded = ConfigDocument::read(&path).unwrap().source().unwrap();
     assert_eq!(loaded.settings.ui, source.settings.ui);
@@ -1920,7 +1921,7 @@ pub fn run_about(ui: Ui) {
         let status = named::<NSTextField>(page.ns_view(), "Update status").unwrap();
         assert_eq!(status.stringValue().to_string(), "Not checked yet");
         for (result, expected) in [
-            (Ok(updates::Release::Current), "Rift is up to date."),
+            (Ok(updates::Release::Current), "Wm is up to date."),
             (
                 Ok(updates::Release::Available("0.7.0".into())),
                 "Version 0.7.0 is available.",
@@ -2147,7 +2148,7 @@ fn late_runtime_populates_picker(
     let window = settings.model().sheet.borrow().as_ref().unwrap().ns_window().retain();
     let list = find::<NSTableView>(&window.contentView().unwrap()).unwrap();
     assert_eq!(list.numberOfRows(), 0);
-    settings.refresh_applications(vec![rift_protocol::ApplicationData {
+    settings.refresh_applications(vec![wm_protocol::ApplicationData {
         pid: 1,
         bundle_id: Some("dev.test.Late".into()),
         name: "Late".into(),
@@ -2304,7 +2305,7 @@ pub fn render(
             .or_default()
             .max_column_width_ratio = Some(0.9);
     }
-    snapshot.settings.ui.menu_bar.layout_folder = "/Users/atticus/.config/rift/layouts".into();
+    snapshot.settings.ui.menu_bar.layout_folder = "/Users/atticus/.config/wm/layouts".into();
     snapshot.settings.run_on_start = vec!["sketchybar --reload".into()];
     snapshot
         .virtual_workspaces

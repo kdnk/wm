@@ -1,3 +1,4 @@
+# Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 name: release
 
 on:
@@ -9,25 +10,18 @@ on:
         description: Existing release tag to rebuild and publish (e.g. v0.7.2)
         required: true
         type: string
-      trigger_docs:
-        description: Also trigger the documentation build
-        required: false
-        default: true
-        type: boolean
 
 permissions:
   contents: write
 
 concurrency:
-  group: rift-release-publish
+  group: wm-release-publish
   cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
   DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
-  ASSET_BASENAME: rift-universal-macos
-  TAP_REPO: acsandmann/homebrew-tap
-  TAP_FILE_PATH: Formula/rift.rb
+  ASSET_BASENAME: wm-universal-macos
   RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
   RELEASE_REPOSITORY: ${{ github.repository }}
 
@@ -77,20 +71,20 @@ jobs:
       - name: Build release
         run: |
           set -euxo pipefail
-          cargo build --release --locked --package rift-wm \
-            --bin rift --bin rift-cli --target "${{ matrix.target }}"
+          cargo build --release --locked --package wm \
+            --bin wm --bin wm-cli --target "${{ matrix.target }}"
 
       - name: Bundle architecture binaries
         run: |
           set -euxo pipefail
           mkdir -p artifacts
           tar -C "target/${{ matrix.target }}/release" \
-            -czf "artifacts/${{ matrix.target }}.tar.gz" rift rift-cli
+            -czf "artifacts/${{ matrix.target }}.tar.gz" wm wm-cli
 
       - name: Upload architecture binaries
         uses: actions/upload-artifact@v4
         with:
-          name: rift-${{ matrix.target }}
+          name: wm-${{ matrix.target }}
           path: artifacts/${{ matrix.target }}.tar.gz
           if-no-files-found: error
           compression-level: 0
@@ -111,7 +105,7 @@ jobs:
       - name: Download architecture binaries
         uses: actions/download-artifact@v4
         with:
-          pattern: rift-*-apple-darwin
+          pattern: wm-*-apple-darwin
           path: artifacts
           merge-multiple: true
 
@@ -125,16 +119,16 @@ jobs:
             tar -xzf "artifacts/${arch}.tar.gz" -C "slices/${arch}"
           done
           lipo -create \
-            slices/aarch64-apple-darwin/rift \
-            slices/x86_64-apple-darwin/rift \
-            -output dist/rift
+            slices/aarch64-apple-darwin/wm \
+            slices/x86_64-apple-darwin/wm \
+            -output dist/wm
           lipo -create \
-            slices/aarch64-apple-darwin/rift-cli \
-            slices/x86_64-apple-darwin/rift-cli \
-            -output dist/rift-cli
-          strip -x dist/rift dist/rift-cli
-          chmod +x dist/rift dist/rift-cli
-          for bin in dist/rift dist/rift-cli; do
+            slices/aarch64-apple-darwin/wm-cli \
+            slices/x86_64-apple-darwin/wm-cli \
+            -output dist/wm-cli
+          strip -x dist/wm dist/wm-cli
+          chmod +x dist/wm dist/wm-cli
+          for bin in dist/wm dist/wm-cli; do
             for arch in arm64 x86_64; do
               lipo "$bin" -verify_arch "$arch"
             done
@@ -143,24 +137,24 @@ jobs:
       - name: Import signing certificate
         uses: apple-actions/import-codesign-certs@v7
         with:
-          p12-file-base64: ${{ secrets.RIFT_SIGNING_P12 }}
-          p12-password: ${{ secrets.RIFT_SIGNING_PASSWORD }}
+          p12-file-base64: ${{ secrets.WM_SIGNING_P12 }}
+          p12-password: ${{ secrets.WM_SIGNING_PASSWORD }}
 
       - name: Trust signing certificate
         run: |
           security find-certificate -p signing_temp.keychain \
-            > "$RUNNER_TEMP/rift.crt"
+            > "$RUNNER_TEMP/wm.crt"
 
           sudo security add-trusted-cert \
             -d -r trustRoot -p codeSign \
             -k /Library/Keychains/System.keychain \
-            "$RUNNER_TEMP/rift.crt"
+            "$RUNNER_TEMP/wm.crt"
 
       - name: Sign release binaries
         run: |
           set -euo pipefail
 
-          SIGNER=$(openssl x509 -in "$RUNNER_TEMP/rift.crt" \
+          SIGNER=$(openssl x509 -in "$RUNNER_TEMP/wm.crt" \
             -noout -fingerprint -sha1 |
             cut -d= -f2 | tr -d ':')
 
@@ -169,17 +163,17 @@ jobs:
 
           codesign --force --timestamp=none \
             --sign "$SIGNER" \
-            --identifier git.acsandmann.rift \
-            dist/rift
+            --identifier git.kdnk.wm \
+            dist/wm
 
           codesign --force --timestamp=none \
             --sign "$SIGNER" \
-            --identifier git.acsandmann.rift.cli \
-            dist/rift-cli
+            --identifier git.kdnk.wm.cli \
+            dist/wm-cli
 
-          codesign --verify --verbose=2 dist/rift
-          codesign --verify --verbose=2 dist/rift-cli
-          codesign -dr - dist/rift
+          codesign --verify --verbose=2 dist/wm
+          codesign --verify --verbose=2 dist/wm-cli
+          codesign -dr - dist/wm
 
 
       - name: Package tarball
@@ -188,13 +182,14 @@ jobs:
           set -euxo pipefail
           VERSION="${RELEASE_TAG#v}"
           ASSET="${ASSET_BASENAME}-${VERSION}.tar.gz"
-          test -s rift.default.toml
-          cp rift.default.toml dist/rift.default.toml
+          test -s wm.default.toml
+          cp wm.default.toml dist/wm.default.toml
           mkdir -p dist/licenses/cgs
-          cp LICENSE dist/licenses/rift-LICENSE
+          cp LICENSE dist/licenses/wm-LICENSE
+          cp NOTICE dist/licenses/wm-NOTICE
           cp cgs/LICENSE dist/licenses/cgs/LICENSE
           cp cgs/third-party/ProgressiveBlurHeader.LICENSE dist/licenses/cgs/ProgressiveBlurHeader.LICENSE
-          tar -C dist -czf "$ASSET" rift rift-cli rift.default.toml licenses
+          tar -C dist -czf "$ASSET" wm wm-cli wm.default.toml licenses
           sha256=$(shasum -a 256 "$ASSET" | awk '{print $1}')
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "asset=${ASSET}" >> "$GITHUB_OUTPUT"
@@ -205,9 +200,9 @@ jobs:
           VERSION: ${{ steps.pkg.outputs.version }}
         run: |
           set -euo pipefail
-          test "$(dist/rift --version)" = "rift ${VERSION}"
-          test "$(dist/rift-cli --version)" = "rift-cli ${VERSION}"
-          test -s dist/rift.default.toml
+          test "$(dist/wm --version)" = "wm ${VERSION}"
+          test "$(dist/wm-cli --version)" = "wm-cli ${VERSION}"
+          test -s dist/wm.default.toml
 
       - name: Replace release asset
         env:
@@ -216,81 +211,3 @@ jobs:
         run: |
           set -euo pipefail
           gh release upload "$RELEASE_TAG" "$ASSET" --clobber --repo "$RELEASE_REPOSITORY"
-
-      - name: Checkout Homebrew tap
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.TAP_REPO }}
-          path: tap
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-
-      - name: Update formula URL, checksum and revision
-        env:
-          VERSION: ${{ steps.pkg.outputs.version }}
-          SHA256: ${{ steps.pkg.outputs.sha256 }}
-          ASSET: ${{ steps.pkg.outputs.asset }}
-        run: |
-          set -euo pipefail
-          export FORMULA="tap/${TAP_FILE_PATH}"
-          export ASSET_URL="https://github.com/${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/${ASSET}"
-          ruby <<'RUBY'
-          path = ENV.fetch("FORMULA")
-          contents = File.read(path)
-          stable, head_line, head_rest = contents.partition(/^  head\b.*$/)
-
-          read_field = lambda do |key|
-            matches = stable.scan(/^  #{Regexp.escape(key)} "([^"]*)"$/)
-            abort "Expected exactly one #{key} in #{path}" unless matches.length == 1
-            matches.first.first
-          end
-
-          old_url = read_field.call("url")
-          old_version = read_field.call("version")
-          old_sha = read_field.call("sha256")
-          old_revisions = stable.scan(/^  revision (\d+)$/)
-          abort "Multiple revisions in #{path}" if old_revisions.length > 1
-          old_revision = old_revisions.empty? ? 0 : old_revisions.first.first.to_i
-
-          version = ENV.fetch("VERSION")
-          sha = ENV.fetch("SHA256")
-          url = ENV.fetch("ASSET_URL")
-          revision = if old_version == version
-            old_revision + (old_url != url || old_sha != sha ? 1 : 0)
-          else
-            0
-          end
-
-          { "url" => url, "version" => version, "sha256" => sha }.each do |key, value|
-            stable.sub!(/^  #{Regexp.escape(key)} "[^"]*"$/) { "  #{key} \"#{value}\"" }
-          end
-          stable.sub!(/^  revision \d+\n/, "")
-          if revision > 0
-            stable.sub!(/^  sha256 "[^"]*"\n/) { |line| "#{line}  revision #{revision}\n" }
-          end
-
-          File.write(path, stable + head_line + head_rest)
-          puts "Homebrew formula: #{version}#{revision > 0 ? "_#{revision}" : ""}"
-          RUBY
-          ruby -c "$FORMULA"
-
-      - name: Commit and push Homebrew formula update
-        run: |
-          set -euxo pipefail
-          git -C tap config user.name "github-actions[bot]"
-          git -C tap config user.email "github-actions[bot]@users.noreply.github.com"
-          git -C tap add "$TAP_FILE_PATH"
-          if git -C tap diff --cached --quiet; then
-            echo "Homebrew formula unchanged."
-            exit 0
-          fi
-          git -C tap commit -m "chore(formula): rift ${{ steps.pkg.outputs.version }} (universal) - sha256 ${{ steps.pkg.outputs.sha256 }}"
-          git -C tap push origin HEAD
-
-      - name: Trigger documentation build
-        if: github.event_name == 'release' || inputs.trigger_docs
-        uses: peter-evans/repository-dispatch@v3
-        with:
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          repository: acsandmann/rift-docs
-          event-type: rift-release
-          client-payload: '{"rift_ref":"${{ env.RELEASE_TAG }}"}'

@@ -1,6 +1,7 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use rift_protocol::DirectionalDistance;
 use serde::{Deserialize, Serialize};
+use wm_protocol::DirectionalDistance;
 
 use super::{LayoutSystem, WindowLayoutConstraints};
 use crate::actor::app::{WindowId, pid_t};
@@ -371,7 +372,7 @@ impl LayoutSystem for FloatingLayoutSystem {
 
     fn draw_tree(&self, layout: LayoutId) -> String { self.inner.draw_tree(layout) }
 
-    fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
+    fn container_tree(&self, layout: LayoutId) -> wm_protocol::ContainerTreeNode {
         self.inner.container_tree(layout)
     }
 

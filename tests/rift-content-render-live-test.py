@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 import argparse
 import ctypes
 import importlib.util
@@ -18,7 +19,7 @@ def fixture(label):
     from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget
 
     app = QApplication([])
-    app.setApplicationName("Rift content fixture")
+    app.setApplicationName("Wm content fixture")
     app.setQuitOnLastWindowClosed(False)
     objc = ctypes.CDLL("/usr/lib/libobjc.A.dylib")
     objc.sel_registerName.argtypes = [ctypes.c_char_p]
@@ -94,9 +95,9 @@ def fixture(label):
             super().moveEvent(move_event)
             event("move", self, qt_position=[self.x(), self.y()])
 
-    window_count = int(os.environ.get("RIFT_FIXTURE_WINDOW_COUNT", "2"))
+    window_count = int(os.environ.get("WM_FIXTURE_WINDOW_COUNT", "2"))
     if not 1 <= window_count <= 8:
-        raise ValueError("RIFT_FIXTURE_WINDOW_COUNT must be between 1 and 8")
+        raise ValueError("WM_FIXTURE_WINDOW_COUNT must be between 1 and 8")
     windows = []
     for index in range(window_count):
         window = Window()
@@ -151,7 +152,7 @@ def fixture(label):
 
 def run(args):
     spec = importlib.util.spec_from_file_location(
-        "rift_focus_check", Path(__file__).with_name("rift-settings-focus-live-test.py")
+        "wm_focus_check", Path(__file__).with_name("rift-settings-focus-live-test.py")
     )
     focus_check = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(focus_check)
@@ -177,7 +178,7 @@ def run(args):
                   and w["window_count"] == 0 and w["layout_mode"] == "scrolling"), None)
     if empty is None:
         raise RuntimeError("An empty scrolling workspace on the focused display is required")
-    report = {"label": "rift-motion-" + uuid.uuid4().hex[:8], "scenes": [], "failures": []}
+    report = {"label": "wm-motion-" + uuid.uuid4().hex[:8], "scenes": [], "failures": []}
     label = report["label"]
     child = None
     execute("workspace", "switch", str(empty["index"]))
@@ -208,7 +209,7 @@ def run(args):
 
         deadline = time.monotonic() + 8
         while len(windows()) != 2:
-            assert time.monotonic() < deadline, "Rift did not manage both fixture windows"
+            assert time.monotonic() < deadline, "Wm did not manage both fixture windows"
             time.sleep(0.1)
         target = next(w for w in windows() if w["title"] == label + "-0")
         focus(target)
@@ -312,8 +313,8 @@ if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "--fixture":
         fixture(sys.argv[2])
     else:
-        parser = argparse.ArgumentParser(description="Record Rift native geometry and real content paint events during resizing.")
-        parser.add_argument("--client", type=Path, default=Path(__file__).resolve().parents[1] / "target/debug/rift-cli")
+        parser = argparse.ArgumentParser(description="Record Wm native geometry and real content paint events during resizing.")
+        parser.add_argument("--client", type=Path, default=Path(__file__).resolve().parents[1] / "target/debug/wm-cli")
         parser.add_argument("--qt-python", type=Path, default=Path("/Applications/Anki.app/Contents/Frameworks/Python.framework/Versions/3.13/bin/python3.13"))
         parser.add_argument("--qt-packages", type=Path, default=Path("/Applications/Anki.app/Contents/Resources/app_packages"))
         parser.add_argument("--output", type=Path, help="Save native samples and command timestamps, including failures.")

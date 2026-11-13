@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use cgs::app::Application;
 use cgs::collection::SettingsList;
 use cgs::controls::{
@@ -76,7 +77,7 @@ fn general(ui: Ui, model: &Rc<Model>) -> Page {
     f.finish(SettingsPage::new(&ui, "").section(section))
 }
 
-/// Stable window identities let the emblem demonstrate Rift without rebuilding views.
+/// Stable window identities let the emblem demonstrate Wm without rebuilding views.
 fn about_layout(index: usize) -> [PreviewWindow; 3] {
     let frames = match index {
         1 => [
@@ -119,7 +120,7 @@ fn about_identity(ui: &Ui) -> VStack {
     emblem.width(268.0);
     emblem.height(144.0);
     emblem.accessibility_label("Rearrange windows");
-    emblem.accessibility_help("Show another Rift layout. Respects Reduce Motion.");
+    emblem.accessibility_help("Show another Wm layout. Respects Reduce Motion.");
     emblem.tooltip("A place for every window. Click to try another layout.");
     emblem.ns_button().setFocusRingType(objc2_app_kit::NSFocusRingType::Exterior);
     emblem.ns_view().addSubview(preview.ns_view());
@@ -142,7 +143,7 @@ fn about_identity(ui: &Ui) -> VStack {
         .spacing(6.0)
         .push(stage(ui, emblem, None))
         .push(centered(
-            "Rift",
+            "Wm",
             &objc2_app_kit::NSFont::systemFontOfSize_weight(28.0, unsafe {
                 objc2_app_kit::NSFontWeightSemibold
             }),
@@ -191,7 +192,7 @@ fn about_updates(ui: &Ui, env: &Rc<Env>) -> Section {
             Action::CheckUpdates(Box::new(move |result| {
                 let (text, symbol, color) = match result {
                     Ok(updates::Release::Current) => (
-                        "Rift is up to date.".to_owned(),
+                        "Wm is up to date.".to_owned(),
                         "checkmark.circle",
                         cgs::style::Color::secondary_label(),
                     ),
@@ -231,21 +232,25 @@ fn about_updates(ui: &Ui, env: &Rc<Env>) -> Section {
 fn about_resources(ui: &Ui) -> Section {
     const RESOURCES: [(&str, &str, &str); 4] = [
         (
-            "Documentation",
+            "Rift documentation",
             "book",
             "https://acsandmann.github.io/rift-docs/",
         ),
         (
             "Release Notes",
             "clock.arrow.circlepath",
-            "https://github.com/acsandmann/rift/releases",
+            "https://github.com/kdnk/wm/releases",
         ),
         (
-            "Matrix Room",
+            "Rift community",
             "bubble.left.and.bubble.right",
             "https://matrix.to/#/#rift:matrix.org",
         ),
-        ("Sponsor Rift", "heart", "https://github.com/sponsors/acsandmann"),
+        (
+            "Sponsor Rift upstream",
+            "heart",
+            "https://github.com/sponsors/acsandmann",
+        ),
     ];
     let resource_group = |rows: Vec<(&'static str, &'static str, &'static str)>| {
         let destinations = rows.clone();
@@ -1046,7 +1051,7 @@ pub(super) fn optional_number(value: &str) -> Result<Option<f64>, String> {
 }
 
 fn focus_suspend(f: &mut FormBuilder) -> Section {
-    use super::commands::{from_rift_modifiers, recorded_key, to_rift_modifiers};
+    use super::commands::{from_wm_modifiers, recorded_key, to_wm_modifiers};
     use crate::sys::hotkey::{Hotkey, HotkeySpec};
     let ui = f.ui;
     let message = Rc::new(ValidationMessage::new(&ui));
@@ -1077,7 +1082,7 @@ fn focus_suspend(f: &mut FormBuilder) -> Section {
     let record = submit.clone();
     let modifier_recorder = Rc::new(ModifierRecorder::new(&ui).on_change(move |flags| {
         record((!flags.is_empty()).then(|| HotkeySpec::ModifiersOnly {
-            modifiers: to_rift_modifiers(flags),
+            modifiers: to_wm_modifiers(flags),
         }));
     }));
     f.sync_when(
@@ -1104,9 +1109,7 @@ fn focus_suspend(f: &mut FormBuilder) -> Section {
         |s| {
             (
                 match &s.settings.focus_follows_mouse_disable_hotkey {
-                    Some(HotkeySpec::ModifiersOnly { modifiers }) => {
-                        from_rift_modifiers(*modifiers)
-                    }
+                    Some(HotkeySpec::ModifiersOnly { modifiers }) => from_wm_modifiers(*modifiers),
                     _ => Modifiers::empty(),
                 },
                 s.settings.focus_follows_mouse,
@@ -1114,7 +1117,7 @@ fn focus_suspend(f: &mut FormBuilder) -> Section {
         },
         |recorder, s| {
             recorder.set_value(match &s.settings.focus_follows_mouse_disable_hotkey {
-                Some(HotkeySpec::ModifiersOnly { modifiers }) => from_rift_modifiers(*modifiers),
+                Some(HotkeySpec::ModifiersOnly { modifiers }) => from_wm_modifiers(*modifiers),
                 _ => Modifiers::empty(),
             });
             recorder.set_enabled(s.settings.focus_follows_mouse);

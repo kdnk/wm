@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use objc2_core_foundation::CGRect;
 use tracing::debug;
 
@@ -22,7 +23,7 @@ pub struct WindowCreatedPayload {
 }
 
 pub fn handle_window_created(
-    state: &mut crate::model::RiftState,
+    state: &mut crate::model::WmState,
     layout: &mut crate::actor::reactor::managers::LayoutManager,
     transactions: &TransactionManager,
     payload: WindowCreatedPayload,
@@ -71,7 +72,7 @@ pub struct WindowDestroyedPayload {
 }
 
 pub fn handle_window_destroyed(
-    state: &mut crate::model::RiftState,
+    state: &mut crate::model::WmState,
     transactions: &TransactionManager,
     drag: &mut DragManager,
     payload: WindowDestroyedPayload,
@@ -102,7 +103,7 @@ pub(crate) fn apply_window_retirement(
 
 /// Application hiding and AX minimization share one suspension/return lifecycle.
 pub fn handle_window_visibility_changed(
-    state: &mut crate::model::RiftState,
+    state: &mut crate::model::WmState,
     wid: WindowId,
     visible: bool,
 ) -> anyhow::Result<crate::actor::reactor::events::EventOutcome> {
@@ -178,7 +179,7 @@ pub enum FrameChangeDisposition {
 }
 
 pub fn classify_window_frame_change(
-    state: &mut crate::model::RiftState,
+    state: &mut crate::model::WmState,
     transactions: &TransactionManager,
     drag: &mut DragManager,
     wid: WindowId,
@@ -251,7 +252,7 @@ fn query_mouse_for_active_drag(drag: &DragManager, mouse_state: &mut Option<Mous
 }
 
 pub fn handle_window_frame_changed(
-    state: &mut crate::model::RiftState,
+    state: &mut crate::model::WmState,
     layout: &mut crate::actor::reactor::managers::LayoutManager,
     drag: &mut DragManager,
     payload: WindowFrameChangedPayload,
@@ -414,7 +415,7 @@ pub struct WindowTitleChangedPayload {
 }
 
 pub fn handle_window_title_changed(
-    state: &mut crate::model::RiftState,
+    state: &mut crate::model::WmState,
     payload: WindowTitleChangedPayload,
 ) -> anyhow::Result<crate::actor::reactor::events::EventOutcome> {
     let WindowTitleChangedPayload { window: wid, title: new_title } = payload;

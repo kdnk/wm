@@ -1,77 +1,52 @@
-<div align="center">
+# wm
 
-# rift
-  <p>rift is a tiling window manager for macOS that focuses on performance and usability. </p>
-  <img src="assets/demo.gif" alt="Rift demo" />
+wm is a tiling window manager for macOS, forked from [Rift](https://github.com/acsandmann/rift). This fork integrates the window-management changes previously maintained in [kdnk/dot](https://github.com/kdnk/dot/tree/f502e0bdaac397f7ede56e2b4b384c018d8a4126/tools/rift).
 
-  <p>
-    <a href="https://github.com/acsandmann/rift/actions/workflows/rust.yml">
-      <img src="https://img.shields.io/github/actions/workflow/status/acsandmann/rift/rust.yml?style=flat-square" alt="Rust CI Status" />
-    </a>
-    <a href="https://github.com/acsandmann/rift/commits/main">
-      <img src="https://img.shields.io/github/last-commit/acsandmann/rift?style=flat-square" alt="Last Commit" />
-    </a>
-    <a href="https://github.com/acsandmann/rift/issues">
-      <img src="https://img.shields.io/github/issues/acsandmann/rift?style=flat-square" alt="Open Issues" />
-    </a>
-    <a href="https://github.com/acsandmann/rift/stargazers">
-      <img src="https://img.shields.io/github/stars/acsandmann/rift?style=flat-square" alt="GitHub stars" />
-    </a>
-    <a href="https://matrix.to/#/%23rift:matrix.org">
-      <img src="https://img.shields.io/matrix/rift%3Amatrix.org?style=flat-square" alt="Matrix" />
-    </a>
-  </p>
-</div>
+wm supports scrolling columns, binary space partitioning, master-stack, floating, and stacked layouts. It includes focus follows mouse, native window lists in the menu bar, saved layouts, trackpad gestures, and animated window resizing. It does not require disabling System Integrity Protection.
 
-## features
-- multiple layout styles
-  - tiling (i3/sway-like)
-  - binary space partitioning (bspwm-like)
-  - floating (independent window frames with optional stacks)
-  - master-stack (dwm-like)
-  - scrolling columns (niri-style)
-  - stack (accordion)
-- menubar icon that opens a menu for switching workspaces, changing layouts, and accessing quick rift controls <details> <summary><sup>click to see the menu bar icon</sup></summary><img src="assets/menu_menu.png" alt="Rift menu bar icon" /></details>
-- save and restore layouts from the menu bar or CLI, with reusable layouts listed from a configurable folder <details> <summary><sup>click to see the menu</sup></summary><img src="assets/menu_layouts.png" alt="Rift menu for restoring layouts" /></details>
-- niri-style mission control for viewing workspaces and dragging windows between them
- <!--<details><summary><sup>click to see mission control</sup></summary><img src="assets/mission_control.png" alt="Rift Mission Control view" /></details> -->
-- focus follows the mouse with auto raise
-<!-- - drag windows over one another to swap positions -->
-- does **not** require disabling SIP
-- native macOS tab support
-- performant animations <sup>(as seen in the [demo](#rift))</sup>
-- switch to next/previous workspace with trackpad gestures <sup>(just like native macOS)</sup>
-- hot reloadable configuration
-- mach port based IPC for communicating with rift from <a href="https://acsandmann.github.io/rift-docs/ecosystem/plugins/">third-party programs</a> (sketchybar, etc)
-- works with "Displays have separate Spaces" enabled (unlike all other major WMs)
+## Build
 
-## quick start
-Get up and running via the docs:
-<br>
+Use macOS with Apple's Command Line Tools and Rust 1.95.0 or later.
 
-[<kbd><br>config<br></kbd>][config_link]
+```sh
+cargo build --locked --release --bin wm --bin wm-cli
+```
 
-[<kbd><br>quick start<br></kbd>][quick_start]
-<br>
+The executables are `target/release/wm` and `target/release/wm-cli`. Put both executables in a stable location on PATH before registering the service.
 
-## community
+## Configure and run
 
-Join [#rift:matrix.org](https://matrix.to/#/#rift:matrix.org) for discussion, support, and development.
+Create a wm configuration from the included example:
 
-## support
+```sh
+mkdir -p ~/.config/wm
+cp wm.default.toml ~/.config/wm/config.toml
+```
 
-If rift is part of your daily workflow, consider [sponsoring its development](https://github.com/sponsors/acsandmann).
+Stop any other window manager before starting wm. Grant Accessibility access to the wm executable. Composited live resizing also needs Screen Recording access for the same executable.
 
-## motivation
-Aerospace worked well for me, but I missed animations and the ability to use fullscreen on one display while working on the other. I also prefer leveraging private/undocumented APIs as they tend to be more reliable (due to the OS being built on them and all the public APIs) and performant.
-<sup><sup>for more on why rift exists and what rift strives to do, see the [manifesto](manifesto.md)</sup></sup>
+```sh
+wm service install
+wm service start
+wm-cli query windows
+```
 
+The service is registered as `git.kdnk.wm`. Configuration defaults to `~/.config/wm/config.toml`, and the saved layout defaults to `~/.wm/layout.ron`. Environment variables use the `WM_` prefix, including `WM_BS_NAME` and `WM_LIVE_RESIZE_TRACE`.
 
-## credits
-Rift began as a fork (and is licensed as such) of <a href="https://github.com/glide-wm/glide">glide-wm</a> but has since diverged significantly. It uses private APIs reverse engineered by yabai and other projects. It is not affiliated with glide-wm or yabai.
+For an existing Rift configuration, copy the TOML file to the wm configuration path and update commands such as `rift-cli` to `wm-cli`. wm uses its own service, IPC identity, and state directory. Existing Rift services and settings remain separate.
 
+## Verify changes
 
-<!---------------------------------------------------------------------------->
+```sh
+bash scripts/verify-dot-port.sh
+```
 
-[config_link]: https://acsandmann.github.io/rift-docs/reference/configuration/
-[quick_start]: https://acsandmann.github.io/rift-docs/quick-start/
+The [import and verification notes](docs/dot-port.md) describe the native tests, desktop checks, and retained upstream provenance. The [Rift configuration reference](https://acsandmann.github.io/rift-docs/reference/configuration/) documents the inherited configuration format; use wm command names and paths with this fork.
+
+## Origin and licenses
+
+wm is an independent fork of Rift and is not an official Rift release. Rift began as a fork of [glide-wm](https://github.com/glide-wm/glide) and uses private APIs reverse engineered by yabai and other projects.
+
+The original copyright and Apache 2.0 license text remain in [LICENSE](LICENSE). Modified source files identify the fork's changes. The vendored [cgs library](cgs/README.fork.md) is GPLv3; distribution of the linked executable must also comply with GPLv3, including its corresponding-source requirements. Dependency license notices are included in release archives.
+
+The retained [manifesto](manifesto.md) and [roadmap](roadmap.md) describe the upstream Rift project. They are preserved as source history.

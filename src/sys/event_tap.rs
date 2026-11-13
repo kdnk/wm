@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::ffi::c_void;
 
 use objc2_core_foundation::{
@@ -105,7 +106,7 @@ pub struct EventTap {
 }
 
 impl EventTap {
-    /// Creates a tap on the current run loop (Rift input uses active HID).
+    /// Creates a tap on the current run loop (Wm input uses active HID).
     /// On failure the caller retains ownership of `user_info`.
     pub unsafe fn new(
         location: CGTapLoc,
@@ -131,7 +132,7 @@ impl EventTap {
             CGEvent::tap_create(
                 location,
                 // Append so active taps installed earlier at the HID level, such as
-                // Raycast's Hyper Key remap, see events before rift does.
+                // Raycast's Hyper Key remap, see events before wm does.
                 CGTapPlace::TailAppendEventTap,
                 options,
                 mask,

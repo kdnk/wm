@@ -1,6 +1,7 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::error::Error;
 
-use rift_client::{EventKind, RiftMachClient};
+use wm_client::{EventKind, WmMachClient};
 
 fn main() -> Result<(), Box<dyn Error>> {
     // Pass a specific event on the command line, or listen to every event by default.
@@ -15,10 +16,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some("*") | None => EventKind::All,
         Some(other) => return Err(format!("unknown event kind: {other}").into()),
     };
-    let client = RiftMachClient::connect()?;
+    let client = WmMachClient::connect()?;
     let subscription = client.subscribe(event)?;
 
-    eprintln!("Listening for Rift event '{event}'. Press Ctrl-C to stop.");
+    eprintln!("Listening for Wm event '{event}'. Press Ctrl-C to stop.");
     loop {
         let event = subscription.recv_event()?;
         println!("{}", serde_json::to_string_pretty(&event)?);

@@ -1,14 +1,15 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 #[cfg(feature = "timing")]
 use std::time::Duration;
 use std::time::Instant;
 
-pub use rift_protocol::MetricsCommand;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, Registry};
 #[cfg(feature = "timing")]
 use tracing_timing::{Histogram, group};
 use tracing_tree::time::UtcDateTime;
+pub use wm_protocol::MetricsCommand;
 
 pub fn init_logging() {
     // Keep timing independent of output verbosity so profiling can run without
@@ -58,9 +59,7 @@ pub fn show_timing() {
         }
     });
     #[cfg(not(feature = "timing"))]
-    println!(
-        "Timing collection is disabled. Build rift with --features timing to collect metrics."
-    );
+    println!("Timing collection is disabled. Build wm with --features timing to collect metrics.");
 }
 
 #[cfg(feature = "timing")]

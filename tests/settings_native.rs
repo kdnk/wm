@@ -1,4 +1,5 @@
-pub use rift_wm::{actor, common, layout_engine, sys, ui};
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
+pub use wm::{actor, common, layout_engine, sys, ui};
 #[allow(dead_code, unused_imports)]
 #[path = "../src/ui/settings/mod.rs"]
 mod settings;

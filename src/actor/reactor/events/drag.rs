@@ -1,13 +1,14 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use tracing::{trace, warn};
 
 use crate::actor::reactor::LayoutEvent;
 use crate::actor::reactor::events::EventOutcome;
 use crate::actor::reactor::managers::{DragManager, LayoutManager};
-use crate::model::RiftState;
+use crate::model::WmState;
 use crate::sys::screen::SpaceId;
 
 pub fn build_drag_scene(
-    state: &RiftState,
+    state: &WmState,
     layout: &LayoutManager,
     source: crate::actor::app::WindowId,
     space: SpaceId,
@@ -61,7 +62,7 @@ pub fn handle_cancel(drag: &mut DragManager) -> EventOutcome {
 }
 
 pub fn handle_mouse_up(
-    state: &mut RiftState,
+    state: &mut WmState,
     layout: &mut LayoutManager,
     drag: &mut DragManager,
     payload: MouseUpPayload,

@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::process::Command;
 
 fn git(args: &[&str]) -> Option<String> {
@@ -36,7 +37,7 @@ fn main() {
         let commit = git(&["rev-parse", "--short=12", "HEAD"]).unwrap_or_else(|| "unknown".into());
         format!("{version}+{commit}{}", if dirty { ".dirty" } else { "" })
     };
-    println!("cargo:rustc-env=RIFT_VERSION={display_version}");
+    println!("cargo:rustc-env=WM_VERSION={display_version}");
     println!("cargo:rustc-link-search=framework=/System/Library/PrivateFrameworks");
 
     println!("cargo:rustc-link-lib=framework=SkyLight");

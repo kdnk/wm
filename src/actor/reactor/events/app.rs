@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use tracing::debug;
 
 use crate::actor::app::{AppInfo, AppThreadHandle, Quiet, WindowId};
@@ -47,7 +48,7 @@ pub fn handle_application_terminated(pid: i32) -> anyhow::Result<EventOutcome> {
 }
 
 pub fn handle_application_thread_terminated(
-    state: &mut crate::model::RiftState,
+    state: &mut crate::model::WmState,
     apps: &mut AppManager,
     pid: i32,
 ) -> anyhow::Result<EventOutcome> {
@@ -71,7 +72,7 @@ pub fn handle_application_activated(
     if quiet == Quiet::Yes {
         debug!(
             pid,
-            "Skipping auto workspace switch for quiet app activation (initiated by Rift)"
+            "Skipping auto workspace switch for quiet app activation (initiated by Wm)"
         );
         return Ok(EventOutcome::no_change());
     }

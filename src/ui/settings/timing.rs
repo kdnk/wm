@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 //! Opt-in Settings phase measurements and parent-to-visible startup latency.
 use std::time::Instant;
 
@@ -17,7 +18,7 @@ fn cpu_time() -> std::time::Duration {
 }
 
 pub fn start() -> Option<Start> {
-    (std::env::var_os("RIFT_SETTINGS_STARTUP_TIMING").as_deref() == Some(std::ffi::OsStr::new("1")))
+    (std::env::var_os("WM_SETTINGS_STARTUP_TIMING").as_deref() == Some(std::ffi::OsStr::new("1")))
         .then(|| Start {
             wall: Instant::now(),
             cpu: cpu_time(),
@@ -50,7 +51,7 @@ pub fn finish_from_parent(stage: &str) {
     if start().is_none() {
         return;
     }
-    if let Some(parent) = std::env::var("RIFT_SETTINGS_SPAWN_TIME_NS")
+    if let Some(parent) = std::env::var("WM_SETTINGS_SPAWN_TIME_NS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
     {

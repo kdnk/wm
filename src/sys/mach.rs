@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 // this is a mess and needs a heavy cleanup
 
 #![allow(non_camel_case_types)]
@@ -15,16 +16,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::vec::Vec;
 
 use tracing::{debug, error, info};
+use wm_protocol::DEFAULT_SERVICE_NAME;
 
 const MAX_MESSAGE_SIZE: u32 = 262_144;
-const MACH_BS_NAME_FMT_PREFIX: &str = "git.";
-static G_NAME: &str = "acsandmann.rift";
-
 fn bs_name() -> CString {
-    if let Ok(name) = std::env::var("RIFT_BS_NAME") {
-        return CString::new(name).unwrap();
-    }
-    CString::new(format!("{}{}", MACH_BS_NAME_FMT_PREFIX, G_NAME)).unwrap()
+    let name = std::env::var("WM_BS_NAME").unwrap_or_else(|_| DEFAULT_SERVICE_NAME.to_owned());
+    CString::new(name).unwrap()
 }
 
 pub fn is_mach_server_registered() -> bool {
@@ -592,7 +589,7 @@ unsafe fn create_connection_server_port() -> mach_port_t {
     msg.0.magic2 = 0x110000;
     msg.0.magic3 = 0x110000;
 
-    let bundle = b"com.acsandmann.rift";
+    let bundle = DEFAULT_SERVICE_NAME.as_bytes();
     let copy_len = bundle.len().min(msg.0.bundle_name.len());
     msg.0.bundle_name[..copy_len].copy_from_slice(&bundle[..copy_len]);
     msg.0.bundle_size = copy_len as i32;
@@ -1625,6 +1622,12 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bootstrap_service_name_uses_the_wm_namespace() {
+        let expected = std::env::var("WM_BS_NAME").unwrap_or_else(|_| "git.kdnk.wm".to_owned());
+        assert_eq!(super::bs_name().to_str().unwrap(), expected);
+    }
+
     use super::*;
 
     #[test]

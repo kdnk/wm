@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 //! A simple async executor that integrates with CFRunLoop or AppKit.
 
 use std::cell::RefCell;
@@ -51,7 +52,7 @@ impl Executor {
         let mut context = Context::from_waker(&waker);
 
         loop {
-            // Polling Rift can create autoreleased AppKit objects even without a UI event.
+            // Polling Wm can create autoreleased AppKit objects even without a UI event.
             if objc2::rc::autoreleasepool(|_| task.as_mut().poll(&mut context)) == Poll::Ready(()) {
                 break;
             }

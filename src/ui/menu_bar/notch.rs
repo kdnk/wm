@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::ptr::NonNull;
 use std::time::{Duration, Instant};
 
@@ -65,14 +66,14 @@ impl MenuRead {
                 attribute,
                 stage = "before_rpc",
                 elapsed_ms = now.duration_since(self.started).as_millis(),
-                "Rift menu read deadline expired"
+                "Wm menu read deadline expired"
             );
             return None;
         };
         let status = unsafe { element.retained().set_messaging_timeout(remaining.as_secs_f32()) };
         if status != AXError::Success {
             tracing::debug!(pid = self.pid, attribute, stage = "set_timeout", error = ?status,
-                elapsed_ms = self.started.elapsed().as_millis(), "Rift menu read failed");
+                elapsed_ms = self.started.elapsed().as_millis(), "Wm menu read failed");
             return None;
         }
         let result = operation();
@@ -83,7 +84,7 @@ impl MenuRead {
                 attribute,
                 stage = "after_rpc",
                 elapsed_ms = finished.duration_since(self.started).as_millis(),
-                "Rift menu read deadline expired"
+                "Wm menu read deadline expired"
             );
             return None;
         }
@@ -91,7 +92,7 @@ impl MenuRead {
             Ok(value) => Some(value),
             Err(error) => {
                 tracing::debug!(pid = self.pid, attribute, stage = "rpc", error = ?error,
-                    elapsed_ms = finished.duration_since(self.started).as_millis(), "Rift menu read failed");
+                    elapsed_ms = finished.duration_since(self.started).as_millis(), "Wm menu read failed");
                 None
             }
         }
@@ -139,7 +140,7 @@ pub(super) fn menu_width_for_pid(pid: i32) -> Option<f64> {
             pid,
             stage = "empty_children",
             elapsed_ms = read.started.elapsed().as_millis(),
-            "Rift menu read failed"
+            "Wm menu read failed"
         );
         return None;
     }

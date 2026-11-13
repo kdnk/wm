@@ -5,3 +5,5 @@
 - Run `bash scripts/verify-dot-port.sh` after changing the imported Rift features. Pass a configuration file as the optional argument to validate additional app rules.
 - The verification script tests LaunchAgent serialization with an isolated HOME. It must not start or stop the user's service, change signing identities, or install the daemon.
 - Desktop tests under `tests/rift-*-live-test.py` require a running matching daemon and macOS permissions. Native geometry tests alone do not prove composited content rendering; retain display video and daemon traces for live resize verification.
+- The fork's commands are `wm` and `wm-cli`. Keep Rift names in upstream attribution, archived import references, and historical verifier filenames.
+- Create dependent branches with `but branch new NAME --above BASE` so their changes can reference commits on the base branch.

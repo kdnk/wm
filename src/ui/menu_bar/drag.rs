@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::cell::{Cell, RefCell};
 
 use objc2::rc::Retained;
@@ -18,8 +19,8 @@ use crate::actor::reactor::{Event, Sender};
 use crate::layout_engine::{ColumnId, ColumnPlacement, ColumnReorderRequest, VirtualWorkspaceId};
 use crate::sys::screen::SpaceId;
 
-const TYPE: &str = "app.rift.menu-column";
-const MARKER_MOTION: &str = "rift-insertion-position";
+const TYPE: &str = "app.wm.menu-column";
+const MARKER_MOTION: &str = "wm-insertion-position";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct ColumnIdentity {

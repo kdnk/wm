@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
@@ -52,7 +53,7 @@ impl Controls {
         set_menu_item_hotkey(&built.prev_workspace_item, shortcuts.prev_workspace.as_ref());
         set_menu_item_hotkey(&built.tiling_item, shortcuts.toggle_space_activation.as_ref());
         set_menu_item_hotkey(&built.reload_item, shortcuts.reload_config.as_ref());
-        set_menu_item_hotkey(&built.quit_item, shortcuts.quit_rift.as_ref());
+        set_menu_item_hotkey(&built.quit_item, shortcuts.quit_wm.as_ref());
         for workspace in &display.workspaces {
             let item = add_action_item(
                 &built.workspace_submenu,
@@ -221,7 +222,7 @@ impl<A: Clone + PartialEq> MenuWidthSnapshots<A> {
             cached_width = ?self.entries.get(&pid).map(|snapshot| snapshot.width),
             unavailable_age_ms = ?self.entries.get(&pid).and_then(|snapshot| snapshot.first_unavailable_at).map(|first| now.duration_since(first).as_millis()),
             identity_matches = self.entries.get(&pid).is_some_and(|snapshot| snapshot.application == *application),
-            "Rift menu width observed");
+            "Wm menu width observed");
         let resolved = if let Some(width) = measured {
             self.entries.insert(pid, MenuWidthSnapshot {
                 application: application.clone(),
@@ -238,7 +239,7 @@ impl<A: Clone + PartialEq> MenuWidthSnapshots<A> {
                     (now.duration_since(*first) < MENU_WIDTH_RETRY_GRACE).then_some(snapshot.width)
                 })
         };
-        tracing::debug!(pid, resolved_width = ?resolved, "Rift menu width resolved");
+        tracing::debug!(pid, resolved_width = ?resolved, "Wm menu width resolved");
         resolved
     }
 }
@@ -272,7 +273,7 @@ impl DisplayPanels {
     ) {
         self.displays.retain(|id, _| {
             let keep = displays.iter().any(|display| display.screen_id == *id);
-            if !keep { tracing::debug!(screen = ?id, display_count = displays.len(), "Rift display panels removed"); }
+            if !keep { tracing::debug!(screen = ?id, display_count = displays.len(), "Wm display panels removed"); }
             keep
         });
         let unlocked = super::notch::session_unlocked();
@@ -331,13 +332,13 @@ impl DisplayPanels {
             foreground_application.and_then(|application| {
                 let pid = application.processIdentifier();
                 if application.isTerminated() {
-                    tracing::debug!(pid, "Rift foreground application terminated");
+                    tracing::debug!(pid, "Wm foreground application terminated");
                     self.menu_widths.entries.remove(&pid);
                     return None;
                 }
                 let measured = super::notch::menu_width_for_pid(pid);
                 if application.isTerminated() {
-                    tracing::debug!(pid, "Rift foreground application terminated");
+                    tracing::debug!(pid, "Wm foreground application terminated");
                     self.menu_widths.entries.remove(&pid);
                     return None;
                 }

@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 //! Generated field metadata supplies the shape; edits replace one value without
 //! reconstructing a command or dropping arguments the UI did not change.
 use cgs::settings::{CommandForm, FormEdit, FormField, FormValue};
@@ -112,25 +113,25 @@ pub(super) fn editor(
                 ("Disabled".into(), json(false)),
             ]),
             "RestoreScope" => Some(
-                rift_protocol::RestoreScope::CONFIG_CHOICES
+                wm_protocol::RestoreScope::CONFIG_CHOICES
                     .iter()
                     .enumerate()
                     .map(|(i, (title, _))| {
                         (
                             title.to_string(),
-                            json(rift_protocol::RestoreScope::from_config_choice(i).unwrap()),
+                            json(wm_protocol::RestoreScope::from_config_choice(i).unwrap()),
                         )
                     })
                     .collect(),
             ),
             "RestoreSource" => Some(
-                rift_protocol::RestoreSource::CONFIG_CHOICES
+                wm_protocol::RestoreSource::CONFIG_CHOICES
                     .iter()
                     .enumerate()
                     .map(|(i, (title, _))| {
                         (
                             title.to_string(),
-                            json(rift_protocol::RestoreSource::from_config_choice(i).unwrap()),
+                            json(wm_protocol::RestoreSource::from_config_choice(i).unwrap()),
                         )
                     })
                     .collect(),

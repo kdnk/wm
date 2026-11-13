@@ -1,4 +1,5 @@
-//! Dims every window in each active Rift workspace except the focused window.
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
+//! Dims every window in each active Wm workspace except the focused window.
 
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -6,7 +7,7 @@ use std::ffi::c_float;
 use std::io;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use rift_client::{EventKind, RiftEvent, RiftMachClient};
+use wm_client::{EventKind, WmEvent, WmMachClient};
 
 type ConnID = i32;
 type WinID = u32;
@@ -31,14 +32,14 @@ unsafe extern "C" {
 }
 
 struct Dimmer {
-    client: RiftMachClient,
+    client: WmMachClient,
     cid: ConnID,
     dimmed: Arc<Mutex<DimmedBySpace>>,
     space_by_display: HashMap<String, u64>,
 }
 
 impl Dimmer {
-    fn new(client: RiftMachClient) -> Self {
+    fn new(client: WmMachClient) -> Self {
         Self {
             client,
             cid: unsafe { SLSMainConnectionID() },
@@ -65,13 +66,13 @@ impl Dimmer {
         Ok(())
     }
 
-    fn handle_event(&mut self, event: &RiftEvent) -> Result<()> {
+    fn handle_event(&mut self, event: &WmEvent) -> Result<()> {
         let Some(space_id) = event.space_id_opt() else {
             return Ok(());
         };
 
         match event {
-            RiftEvent::WorkspaceChanged { display_uuid, .. } => {
+            WmEvent::WorkspaceChanged { display_uuid, .. } => {
                 if let Some(display) = display_uuid.as_deref()
                     && let Some(old_space) = self.space_by_display.insert(display.into(), space_id)
                     && old_space != space_id
@@ -82,7 +83,7 @@ impl Dimmer {
                 self.refresh(space_id)?;
             }
 
-            RiftEvent::FocusedWindowChanged { .. } | RiftEvent::WindowsChanged { .. } => {
+            WmEvent::FocusedWindowChanged { .. } | WmEvent::WindowsChanged { .. } => {
                 self.refresh(space_id)?;
             }
 
@@ -171,7 +172,7 @@ fn set_brightness(cid: ConnID, changes: impl IntoIterator<Item = (WinID, f32)>) 
 }
 
 fn main() -> Result<()> {
-    let client = RiftMachClient::connect()?;
+    let client = WmMachClient::connect()?;
     let events = client.subscribe(EventKind::All)?;
     let mut dimmer = Dimmer::new(client);
 

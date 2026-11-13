@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use objc2_core_foundation::{CGRect, CGSize};
 use serde::{Deserialize, Serialize};
 use slotmap::Key;
@@ -1561,12 +1562,12 @@ impl LayoutSystem for BspLayoutSystem {
         }
     }
 
-    fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
+    fn container_tree(&self, layout: LayoutId) -> wm_protocol::ContainerTreeNode {
         fn snapshot(
             system: &BspLayoutSystem,
             node: NodeId,
             selected: NodeId,
-        ) -> rift_protocol::ContainerTreeNode {
+        ) -> wm_protocol::ContainerTreeNode {
             let weight = node.parent(&system.tree.map).and_then(|parent| {
                 let NodeKind::Split { ratio, .. } = system.kind.get(parent)? else {
                     return None;
@@ -1580,11 +1581,11 @@ impl LayoutSystem for BspLayoutSystem {
             });
 
             match system.kind.get(node) {
-                Some(NodeKind::Split { orientation, .. }) => rift_protocol::ContainerTreeNode {
+                Some(NodeKind::Split { orientation, .. }) => wm_protocol::ContainerTreeNode {
                     node_id: node.data().as_ffi(),
-                    node_type: rift_protocol::ContainerNodeType::Container,
+                    node_type: wm_protocol::ContainerNodeType::Container,
                     frame: Default::default(),
-                    layout_kind: Some(rift_protocol::LayoutKind::from(*orientation)),
+                    layout_kind: Some(wm_protocol::LayoutKind::from(*orientation)),
                     weight,
                     window_id: None,
                     is_selected: node == selected,
@@ -1605,17 +1606,17 @@ impl LayoutSystem for BspLayoutSystem {
                 }) => {
                     let members = system.stacks.get(&node);
                     let stacked = members.is_some();
-                    rift_protocol::ContainerTreeNode {
+                    wm_protocol::ContainerTreeNode {
                         node_id: node.data().as_ffi(),
                         node_type: if stacked {
-                            rift_protocol::ContainerNodeType::Container
+                            wm_protocol::ContainerNodeType::Container
                         } else if window.is_some() {
-                            rift_protocol::ContainerNodeType::Window
+                            wm_protocol::ContainerNodeType::Window
                         } else {
-                            rift_protocol::ContainerNodeType::Placeholder
+                            wm_protocol::ContainerNodeType::Placeholder
                         },
                         frame: Default::default(),
-                        layout_kind: stacked.then_some(rift_protocol::LayoutKind::HorizontalStack),
+                        layout_kind: stacked.then_some(wm_protocol::LayoutKind::HorizontalStack),
                         weight,
                         window_id: if stacked {
                             None
@@ -1630,10 +1631,10 @@ impl LayoutSystem for BspLayoutSystem {
                         children: members.map_or_else(Vec::new, |members| {
                             members
                                 .iter()
-                                .map(|member| rift_protocol::ContainerTreeNode {
+                                .map(|member| wm_protocol::ContainerTreeNode {
                                     node_id: (u64::from(member.pid as u32) << 32)
                                         | u64::from(member.idx.get()),
-                                    node_type: rift_protocol::ContainerNodeType::Window,
+                                    node_type: wm_protocol::ContainerNodeType::Window,
                                     frame: Default::default(),
                                     layout_kind: None,
                                     weight: None,

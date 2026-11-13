@@ -1,9 +1,10 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use objc2_core_foundation::CGRect;
-use rift_protocol::StackInfo;
 use tracing::trace;
+use wm_protocol::StackInfo;
 
 use super::replay::Record;
 use super::{AppState, Event, WorkspaceSwitchOrigin, WorkspaceSwitchState};
@@ -63,7 +64,7 @@ impl DragManager {
         self.native_motion_active.store(active, Ordering::Release);
     }
 
-    /// A window leaving Rift's control can no longer be dragged by it.
+    /// A window leaving Wm's control can no longer be dragged by it.
     pub fn forget_window(&mut self, wid: WindowId) {
         if self.actor.window_removed(wid) && self.externally_controlled_window == Some(wid) {
             self.externally_controlled_window = None;
@@ -510,16 +511,16 @@ impl LayoutManager {
                                 total_count: g.total_count,
                                 container_kind: match g.container_kind {
                                     crate::layout_engine::LayoutKind::Horizontal => {
-                                        rift_protocol::LayoutKind::Horizontal
+                                        wm_protocol::LayoutKind::Horizontal
                                     }
                                     crate::layout_engine::LayoutKind::Vertical => {
-                                        rift_protocol::LayoutKind::Vertical
+                                        wm_protocol::LayoutKind::Vertical
                                     }
                                     crate::layout_engine::LayoutKind::HorizontalStack => {
-                                        rift_protocol::LayoutKind::HorizontalStack
+                                        wm_protocol::LayoutKind::HorizontalStack
                                     }
                                     crate::layout_engine::LayoutKind::VerticalStack => {
-                                        rift_protocol::LayoutKind::VerticalStack
+                                        wm_protocol::LayoutKind::VerticalStack
                                     }
                                 },
                                 selected_index,

@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use cgs::app::Application;
 use cgs::collection::{EditableList, SettingsList};
 use cgs::controls::{AddRemoveControl, Button, IconButton, NumberField, Popup, SheetActions};
@@ -992,7 +993,7 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
     let mut page = f.finish(
         SettingsPage::new(&ui, "")
             .subtitle(
-                "Choose which windows Rift manages and where they open. Drag rules to change their order.",
+                "Choose which windows Wm manages and where they open. Drag rules to change their order.",
             )
             .section(table)
             .bottom_bar(HStack::new(&ui).push(controls).spacer(&ui).push(edit))
@@ -1276,7 +1277,7 @@ fn add_rule(ui: Ui, model: &Rc<Model>, edit_rule: Rc<dyn Fn(usize)>) {
         .push(SectionTitle::new(&ui, "Add App Rule"))
         .push(Caption::new(
             &ui,
-            "Choose an app, then set how Rift should handle its windows.",
+            "Choose an app, then set how Wm should handle its windows.",
         ))
         .push(picker)
         .push(Disclosure::new(&ui, "Enter a bundle identifier manually", input))
@@ -1765,7 +1766,7 @@ pub(super) fn display_inspector(ui: Ui, model: &Rc<Model>) -> Page {
                 .push(HStack::new(&ui).push(Spacer::new(&ui)).push(cancel).push(add))
                 .push({
                     let hint =
-                        Caption::new(&ui, "Find a display’s UUID with rift-cli query displays.");
+                        Caption::new(&ui, "Find a display’s UUID with wm-cli query displays.");
                     hint.ns_text_field().setAlignment(objc2_app_kit::NSTextAlignment::Right);
                     hint
                 }),

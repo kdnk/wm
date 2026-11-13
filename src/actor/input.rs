@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 //! Keyboard, mouse and native gesture arbitration on one HID input thread.
 
 use std::cell::{Cell, RefCell};
@@ -53,7 +54,7 @@ pub enum Request {
     SetBindingMode(String),
     KeyboardLayoutChanged,
     ConfigUpdated(Config),
-    /// Complete gesture routes for visible spaces with Rift management enabled.
+    /// Complete gesture routes for visible spaces with Wm management enabled.
     LayoutModesChanged(Vec<(SpaceId, crate::common::config::LayoutMode)>),
     SetLowPowerMode(bool),
     SetMissionControlActive(bool, Vec<CGRect>),
@@ -203,7 +204,7 @@ impl Input {
         let track_focus_input = state.event_processing_enabled && state.mouse_follows_focus;
         let mut mask = build_event_mask(
             // Keyboard launchers must end wake/unlock activation suppression
-            // even when no Rift keyboard bindings are configured.
+            // even when no Wm keyboard bindings are configured.
             true,
             hotkeys_enabled || disable_hotkey.is_some() || track_focus_input,
             (state.event_processing_enabled
@@ -817,7 +818,7 @@ impl Input {
                 }
             }
             CGEventType::KeyDown | CGEventType::KeyUp | CGEventType::FlagsChanged => {
-                if event::is_rift_synthetic_event(event) {
+                if event::is_wm_synthetic_event(event) {
                     return true;
                 }
                 if event_type == CGEventType::KeyDown {
@@ -1694,7 +1695,7 @@ mod tests {
             gesture::Owner::Undecided,
             "native delivery timeout must not impose a minimum recognition speed"
         );
-        input.gesture_control.ownership_guard().owner = gesture::Owner::Rift;
+        input.gesture_control.ownership_guard().owner = gesture::Owner::Wm;
         assert!(!input.native_gesture_forward(CGEventType::ScrollWheel, &event(2), None));
     }
 
@@ -2457,7 +2458,7 @@ mod tests {
         assert!(events_rx.try_recv().is_err());
         assert!(wm_rx.try_recv().is_err());
 
-        // Releases and Rift's own posted keys cannot release the wake guard.
+        // Releases and Wm's own posted keys cannot release the wake guard.
         assert!(input.on_event(CGEventType::KeyUp, &event, None));
         CGEvent::set_integer_value_field(
             Some(&event),
@@ -2470,7 +2471,7 @@ mod tests {
     }
 
     #[test]
-    fn hotkeys_suppress_repeats_but_do_not_intercept_rift_synthetic_keys() {
+    fn hotkeys_suppress_repeats_but_do_not_intercept_wm_synthetic_keys() {
         let (input, mut wm_rx, _) = input();
         input.hotkeys_active.set(true);
         input.rebuild_binding_maps();

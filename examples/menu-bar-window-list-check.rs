@@ -1,10 +1,11 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use cgs::menu::{Menu, StatusItem};
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 use objc2_foundation::MainThreadMarker;
-use rift_wm::actor::reactor::{Event as ReactorEvent, Sender as ReactorSender};
-use rift_wm::ui::menu_bar::MenuAction;
-pub use rift_wm::{actor, common, layout_engine, sys, ui};
 use tokio::sync::mpsc::UnboundedSender;
+use wm::actor::reactor::{Event as ReactorEvent, Sender as ReactorSender};
+use wm::ui::menu_bar::MenuAction;
+pub use wm::{actor, common, layout_engine, sys, ui};
 #[allow(dead_code)]
 mod status_mode {
     include!("../src/ui/menu_bar.rs");
@@ -17,7 +18,7 @@ mod status_mode {
             mtm,
             actions,
             reactor,
-            Path::new("/nonexistent-rift-fixture-layouts"),
+            Path::new("/nonexistent-wm-fixture-layouts"),
         );
         let mut settings = MenuBarSettings {
             show_binding_mode: true,
@@ -260,7 +261,7 @@ mod window_list {
         fn capture(button: &NSView, bounds: NSRect, name: &str) -> Retained<NSBitmapImageRep> {
             let image = button.bitmapImageRepForCachingDisplayInRect(bounds).unwrap();
             button.cacheDisplayInRect_toBitmapImageRep(bounds, &image);
-            if let Ok(prefix) = std::env::var("RIFT_MENU_BAR_SNAPSHOT") {
+            if let Ok(prefix) = std::env::var("WM_MENU_BAR_SNAPSHOT") {
                 let data = unsafe {
                     image.representationUsingType_properties(
                         objc2_app_kit::NSBitmapImageFileType::PNG,
@@ -621,7 +622,7 @@ mod window_list {
             NSEventType,
         };
         use objc2_foundation::{NSDictionary, NSRect};
-        use rift_wm::sys::screen::SpaceId;
+        use wm::sys::screen::SpaceId;
 
         use crate::actor::app::WindowId;
         use crate::actor::menu_bar::Workspace;
@@ -854,7 +855,7 @@ mod window_list {
         assert!(
             matches!(action_rx.try_recv().unwrap(), MenuAction::FocusWindow(id) if id == grouped_windows[1].id)
         );
-        if let Ok(path) = std::env::var("RIFT_MENU_BAR_SNAPSHOT") {
+        if let Ok(path) = std::env::var("WM_MENU_BAR_SNAPSHOT") {
             let bounds = NSRect::new(
                 NSPoint::ZERO,
                 NSSize::new(view.width(), parent.bounds().size.height),
@@ -1022,7 +1023,7 @@ mod window_list {
         };
         let displays = vec![
             DisplayWorkspaces {
-                screen_id: rift_wm::sys::screen::ScreenId::new(0),
+                screen_id: wm::sys::screen::ScreenId::new(0),
                 is_builtin: false,
                 display_uuid: "left".into(),
                 space: SpaceId::new(1),
@@ -1031,7 +1032,7 @@ mod window_list {
                 workspaces: vec![workspace("left", true, vec![windows[0].clone()])],
             },
             DisplayWorkspaces {
-                screen_id: rift_wm::sys::screen::ScreenId::new(0),
+                screen_id: wm::sys::screen::ScreenId::new(0),
                 is_builtin: false,
                 display_uuid: "right".into(),
                 space: SpaceId::new(2),
@@ -1116,7 +1117,7 @@ mod window_list {
             right.blueComponent() > right.redComponent(),
             "second app must retain a visible full-height strip"
         );
-        if let Ok(prefix) = std::env::var("RIFT_MENU_BAR_SNAPSHOT") {
+        if let Ok(prefix) = std::env::var("WM_MENU_BAR_SNAPSHOT") {
             let data = unsafe {
                 bitmap.representationUsingType_properties(
                     NSBitmapImageFileType::PNG,
@@ -1511,7 +1512,7 @@ mod window_list {
                     ));
                 }));
                 assert_eq!(view.capsules[0].focus.layer.cornerRadius(), 6.0);
-                if let Ok(prefix) = std::env::var("RIFT_MENU_BAR_SNAPSHOT") {
+                if let Ok(prefix) = std::env::var("WM_MENU_BAR_SNAPSHOT") {
                     for (kind, native) in [
                         ("workspace", view.capsules[0].host()),
                         ("focused", focused as &NSView),
@@ -1641,7 +1642,7 @@ mod window_list {
                 assert!(
                     matches!(action_rx.try_recv().unwrap(), MenuAction::SwitchToWorkspace(index) if index == workspace.index)
                 );
-                if let Ok(prefix) = std::env::var("RIFT_MENU_BAR_SNAPSHOT") {
+                if let Ok(prefix) = std::env::var("WM_MENU_BAR_SNAPSHOT") {
                     let bitmap =
                         native.bitmapImageRepForCachingDisplayInRect(native.bounds()).unwrap();
                     native.cacheDisplayInRect_toBitmapImageRep(native.bounds(), &bitmap);

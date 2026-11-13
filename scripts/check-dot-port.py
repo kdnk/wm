@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 """Reconstruct the dot port from recorded local source revisions."""
 
 import argparse
@@ -11,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DOT_REVISION = "f502e0bdaac397f7ede56e2b4b384c018d8a4126"
 RIFT_REVISION = "6101a78a4958e942853eb21cb67f8012fb293458"
 CGS_REVISION = "bd7cdbc171904e7d6057cac074afbd72ce5c1bf9"
+PORTED_REVISION = "61eb68bb080c0c3c08bbb2c6c465a9b89c289329"
 PATCHES = [
     "external-focus-warp", "screen-zoom-focus", "patched-identity",
     "space-refresh-animation", "menubar-window-list", "menubar-placement",
@@ -76,7 +78,9 @@ def main():
         scratch = Path(directory).resolve()
         rift = scratch / "rift"
         cgs = scratch / "cgs"
+        ported = scratch / "ported"
         archive(ROOT, RIFT_REVISION, rift)
+        archive(ROOT, PORTED_REVISION, ported)
         paths = set()
         for name in PATCHES:
             patch = rift_patch(args.dot, name)
@@ -89,14 +93,14 @@ def main():
                         "--config", "skip_children=true",
                         *[str(rift / path) for path in sorted(paths) if path.suffix == ".rs"]],
                        check=True)
-        rift_count = compare(rift, ROOT, paths)
+        rift_count = compare(rift, ported, paths)
         archive(args.cgs, CGS_REVISION, cgs)
         apply(cgs, source_patch(args.dot, "cgs-exact-capture"))
         cgs_paths = {path.relative_to(cgs) for path in (cgs / "src").rglob("*") if path.is_file()}
         cgs_paths.update([Path("build.rs"), Path("LICENSE"), Path("Cargo.lock"),
                           Path("third-party/ProgressiveBlurHeader.LICENSE")])
-        cgs_count = compare(cgs, ROOT / "cgs", cgs_paths)
-        print(f"PASS: {rift_count} Rift files and {cgs_count} cgs files match the recorded patches")
+        cgs_count = compare(cgs, ported / "cgs", cgs_paths)
+        print(f"PASS: archived port {PORTED_REVISION[:7]} matches {rift_count} Rift files and {cgs_count} cgs files")
 
 
 if __name__ == "__main__":

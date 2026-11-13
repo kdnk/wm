@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::path::Path;
 use std::str::FromStr;
 
@@ -15,7 +16,7 @@ impl Config {
         Self::parse(&buf)
     }
 
-    pub fn default() -> Config { Self::parse(include_str!("../../../rift.default.toml")).unwrap() }
+    pub fn default() -> Config { Self::parse(include_str!("../../../wm.default.toml")).unwrap() }
 
     /// Validates the entire configuration and returns a list of issues found.
     pub fn validate(&self) -> Vec<String> {

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 import argparse
 import ctypes
 import json
@@ -86,7 +87,7 @@ def validate_observation(settings, target, windows, actual, native, displays):
     if target["bundle_id"] == settings["bundle_id"]:
         assert native[1] == target["title"], f"Native focus is {native[1]}, expected {target['title']}"
     selected = next((window for window in windows if window["is_focused"]), None)
-    assert selected is not None and selected["id"] == target["id"], f"Rift focus differs from {target['title']}"
+    assert selected is not None and selected["id"] == target["id"], f"Wm focus differs from {target['title']}"
 
 
 def option_l():
@@ -214,7 +215,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Verify settings windows survive repeated native focus changes.")
     parser.add_argument("--app", choices=PROFILES, default="muse")
     parser.add_argument("--other-bundle", help="Bundle ID of the other managed application to focus.")
-    parser.add_argument("--client", type=Path, default=Path(__file__).resolve().parents[1] / "target/debug/rift-cli")
+    parser.add_argument("--client", type=Path, default=Path(__file__).resolve().parents[1] / "target/debug/wm-cli")
     parser.add_argument("--cycles", type=int, default=3)
     arguments = parser.parse_args()
     if arguments.cycles < 1:

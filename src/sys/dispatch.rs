@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::ffi::{CStr, c_void};
 use std::ops::Deref;
 
@@ -46,12 +47,12 @@ impl Drop for SerialQueue {
 /// Rare partial-lift deadlines, never per-frame recognition. Isolated from child reaping.
 pub fn gesture_deadline_queue() -> &'static Unmanaged {
     static QUEUE: OnceCell<SerialQueue> = OnceCell::new();
-    QUEUE.get_or_init(|| SerialQueue::new(c"rift.gesture-deadlines", 0x21)) // UserInteractive
+    QUEUE.get_or_init(|| SerialQueue::new(c"wm.gesture-deadlines", 0x21)) // UserInteractive
 }
 
 fn reaper_queue() -> &'static Unmanaged {
     static QUEUE: OnceCell<SerialQueue> = OnceCell::new();
-    QUEUE.get_or_init(|| SerialQueue::new(c"rift.child-reaper", 0x11)) // Utility
+    QUEUE.get_or_init(|| SerialQueue::new(c"wm.child-reaper", 0x11)) // Utility
 }
 
 static SOURCES: OnceCell<Mutex<HashMap<pid_t, DSource>>> = OnceCell::new();

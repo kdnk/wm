@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use objc2_core_foundation::CGSize;
 
 use super::testing::*;
@@ -52,7 +53,7 @@ fn menu_column_drop_on_unfocused_display_arranges_only_its_space_without_focus_e
     );
     let ws = &engine.workspaces()[workspace];
     let tree = ws.layout_system.container_tree(ws.active_layout().unwrap());
-    let members = |column: &rift_protocol::ContainerTreeNode| {
+    let members = |column: &wm_protocol::ContainerTreeNode| {
         column
             .children
             .iter()
@@ -234,7 +235,7 @@ fn menu_column_actual_drop_keeps_pointer_and_focused_window() {
     let ws = &engine.workspaces()[workspace];
     let layout = ws.active_layout().unwrap();
     let tree = ws.layout_system.container_tree(layout);
-    let members = |column: &rift_protocol::ContainerTreeNode| {
+    let members = |column: &wm_protocol::ContainerTreeNode| {
         column
             .children
             .iter()

@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use super::matcher::MatchScope;
 use super::snapshot::PersistedLayout;
 use super::*;
@@ -121,7 +122,7 @@ impl PersistedLayout {
                         .ok_or_else(|| anyhow::anyhow!("saved space has no active workspace"))?,
                     // A master file represents the complete workspace catalog. Restoring S must
                     // therefore read S's ordinal from the saved native space, regardless of which
-                    // workspace happened to be active when Rift last quit.
+                    // workspace happened to be active when Wm last quit.
                     RestoreSource::CurrentSpace => {
                         let index =
                             targets.iter().position(|id| *id == target).ok_or_else(|| {

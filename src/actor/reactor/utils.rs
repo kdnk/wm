@@ -1,8 +1,9 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use objc2_app_kit::NSNormalWindowLevel;
 
 use crate::actor::app::WindowId;
 use crate::actor::reactor::managers::LayoutManager;
-use crate::model::RiftState;
+use crate::model::WmState;
 use crate::sys::app::{WindowInfo, is_ax_transient, is_ibkr_desktop_dialog};
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo, window_is_sticky, window_level};
@@ -12,10 +13,7 @@ pub(crate) struct AdmissionTransition {
     pub(crate) is_admitted: bool,
 }
 
-pub(crate) fn refresh_heuristic(
-    state: &mut RiftState,
-    wid: WindowId,
-) -> Option<AdmissionTransition> {
+pub(crate) fn refresh_heuristic(state: &mut WmState, wid: WindowId) -> Option<AdmissionTransition> {
     let window = state.windows.window(wid)?;
     let was_admitted = window.is_admitted();
     let manageable = compute_window_info_manageability(&window.info, |wsid| {
@@ -30,7 +28,7 @@ pub(crate) fn refresh_heuristic(
 }
 
 pub(crate) fn rejection_needs_removal(
-    state: &RiftState,
+    state: &WmState,
     layout: &LayoutManager,
     wid: WindowId,
     space: SpaceId,
@@ -45,7 +43,7 @@ pub(crate) fn rejection_needs_removal(
         || engine.is_window_floating(wid)
 }
 
-pub(crate) fn clear_rule_admission(state: &mut RiftState, wid: WindowId) {
+pub(crate) fn clear_rule_admission(state: &mut WmState, wid: WindowId) {
     if let Some(window) = state.windows.window_mut(wid) {
         window.manage_override = None;
     }

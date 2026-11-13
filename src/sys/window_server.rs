@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 #[cfg(test)]
 use std::cell::RefCell;
 use std::ffi::{CStr, c_int};
@@ -743,7 +744,7 @@ fn find_window_at_point(point: &mut CGPoint, below_window_id: Option<u32>) -> Op
 
 fn is_own_window(cid: i32) -> bool { *G_CONNECTION == cid }
 
-/// Settings is Rift's only document window; its sheets are modal windows.
+/// Settings is Wm's only document window; its sheets are modal windows.
 /// Floating surfaces (menus/popovers) and compositor overlays are not targets.
 fn is_ignored_own_window(wid: u32, cid: i32) -> bool {
     if !is_own_window(cid) {
@@ -779,7 +780,7 @@ pub fn get_window_at_point(mut point: CGPoint) -> Option<WindowServerId> {
 /// Returns `true` if an application window at normal level or above
 /// occludes the given screen point.
 ///
-/// Walks down the window stack at `point`, skipping Rift-owned surfaces except
+/// Walks down the window stack at `point`, skipping Wm-owned surfaces except
 /// Settings and its sheets. Desktop/wallpaper windows sit well below
 /// `NSNormalWindowLevel` and are not considered occluders.
 pub fn is_point_occluded_by_external_window(mut point: CGPoint) -> bool {
@@ -787,7 +788,7 @@ pub fn is_point_occluded_by_external_window(mut point: CGPoint) -> bool {
 
     let mut hit = find_window_at_point(&mut point, None);
 
-    // Skip other Rift surfaces without looking through Settings or its sheets.
+    // Skip other Wm surfaces without looking through Settings or its sheets.
     while let Some((wid, cid)) = hit {
         if !is_ignored_own_window(wid, cid) {
             let level = window_level(wid).unwrap_or(NSWindowLevel::MIN);

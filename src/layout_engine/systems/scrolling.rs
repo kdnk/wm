@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 //! A strip of persistent columns in world coordinates, translated by one camera.
 //! View targets follow niri's fit/center and gesture snap semantics. Ordinary layout
 //! animation remains in the reactor; touchpad release belongs to the camera.
@@ -378,7 +379,7 @@ fn clamp_ratio(ratio: f64, settings: &ScrollingLayoutSettings) -> f64 {
 }
 
 // Adapted from niri's compute_new_view_offset, using an absolute camera.
-// Rift's outer gaps already reserve padding, including at both strip boundaries.
+// Wm's outer gaps already reserve padding, including at both strip boundaries.
 fn fit_offset(current: f64, view: f64, column: ColumnGeometry) -> f64 {
     let left = column.world_x;
     if column.width >= view {
@@ -580,7 +581,7 @@ impl Geometry {
         if column.width >= self.tiling.size.width {
             return column.world_x;
         }
-        // Preserve Rift's anchored first/last-column policy.
+        // Preserve Wm's anchored first/last-column policy.
         if self.columns.len() > 1 {
             if index == 0 {
                 return column.world_x;
@@ -1663,7 +1664,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
             .collect()
     }
 
-    fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
+    fn container_tree(&self, layout: LayoutId) -> wm_protocol::ContainerTreeNode {
         let state = self.layouts.get(layout).expect("unknown scrolling layout");
         let children = state
             .columns
@@ -1673,11 +1674,11 @@ impl LayoutSystem for ScrollingLayoutSystem {
                     .windows
                     .iter()
                     .enumerate()
-                    .map(|(index, &window)| rift_protocol::ContainerTreeNode {
+                    .map(|(index, &window)| wm_protocol::ContainerTreeNode {
                         node_id: (((window.pid as u32 as u64) << 32) | u64::from(window.idx.get()))
                             .rotate_left(1)
                             | 1,
-                        node_type: rift_protocol::ContainerNodeType::Window,
+                        node_type: wm_protocol::ContainerNodeType::Window,
                         weight: Some(column.height_weights.get(index).copied().unwrap_or(1.0)),
                         window_id: Some(window.into()),
                         is_selected: state.selected(&self.inactive) == Some(window),
@@ -1686,9 +1687,9 @@ impl LayoutSystem for ScrollingLayoutSystem {
                         ..Default::default()
                     })
                     .collect();
-                rift_protocol::ContainerTreeNode {
+                wm_protocol::ContainerTreeNode {
                     node_id: column.id.0,
-                    layout_kind: Some(rift_protocol::LayoutKind::Vertical),
+                    layout_kind: Some(wm_protocol::LayoutKind::Vertical),
                     role: Some("column".to_owned()),
                     children: windows,
                     ..Default::default()
@@ -1696,8 +1697,8 @@ impl LayoutSystem for ScrollingLayoutSystem {
             })
             .collect();
 
-        rift_protocol::ContainerTreeNode {
-            layout_kind: Some(rift_protocol::LayoutKind::Horizontal),
+        wm_protocol::ContainerTreeNode {
+            layout_kind: Some(wm_protocol::LayoutKind::Horizontal),
             children,
             ..Default::default()
         }

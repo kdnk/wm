@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::io::Write;
 use std::path::Path;
 
@@ -16,7 +17,7 @@ pub struct ConfigDocument {
 impl Default for ConfigDocument {
     fn default() -> Self {
         Self {
-            document: include_str!("../../../rift.default.toml").parse().unwrap(),
+            document: include_str!("../../../wm.default.toml").parse().unwrap(),
         }
     }
 }

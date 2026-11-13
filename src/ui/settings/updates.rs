@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 //! A user-initiated release check. No timers or background checks.
 pub enum Release {
     Current,
@@ -24,8 +25,8 @@ fn latest() -> Result {
             "--header",
             "Accept: application/vnd.github+json",
             "--user-agent",
-            "Rift-update-check",
-            "https://api.github.com/repos/acsandmann/rift/releases/latest",
+            "Wm-update-check",
+            "https://api.github.com/repos/kdnk/wm/releases/latest",
         ])
         .output()
         .map_err(|_| {

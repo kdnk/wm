@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 //! This actor manages the global notification queue, which tells us when an
 //! application is launched or focused or the screen state changes.
 
@@ -203,7 +204,7 @@ impl NotificationCenterInner {
         } else if unsafe { NSWorkspaceDidActivateApplicationNotification } == name {
             // Do not forward AppGloballyActivated from NSWorkspace here.
             //
-            // Rift intentionally treats workspace app-activation notifications as a
+            // Wm intentionally treats workspace app-activation notifications as a
             // lock/login hint channel only. The authoritative global activation
             // stream comes from the Carbon process actor (`K_EVENT_APP_FRONT_SWITCHED`),
             // which still drives the reactor's activation-time visible-window refresh

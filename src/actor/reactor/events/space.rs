@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use tracing::{debug, trace};
 
 use crate::actor::app::Request;
@@ -7,7 +8,7 @@ use crate::actor::reactor::{LayoutEvent, MissionControlState, SpaceEventKind};
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::wm_controller::WmEvent;
 use crate::common::collections::HashSet;
-use crate::model::RiftState;
+use crate::model::WmState;
 use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
 use crate::sys::app::AppInfo;
 use crate::sys::screen::SpaceId;
@@ -115,7 +116,7 @@ pub struct WindowServerAppearedObservations {
 }
 
 pub fn handle_window_server_destroyed(
-    state: &mut RiftState,
+    state: &mut WmState,
     transactions: &crate::actor::reactor::transaction_manager::TransactionManager,
     drag: &mut DragManager,
     payload: WindowServerLifecyclePayload,
@@ -178,7 +179,7 @@ pub fn handle_window_server_destroyed(
 }
 
 pub fn handle_window_server_appeared(
-    state: &mut RiftState,
+    state: &mut WmState,
     payload: WindowServerLifecyclePayload,
     observations: WindowServerAppearedObservations,
 ) -> anyhow::Result<EventOutcome> {

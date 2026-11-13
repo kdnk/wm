@@ -1,0 +1,16 @@
+wm is an independent fork of Rift.
+Upstream source: [Rift](https://github.com/acsandmann/rift)
+
+Copyright for portions of Rift is held by tmandry, 2025, as part of glide-wm.
+All other original Rift copyright is held by acsandmann, 2025.
+The original copyright statements and Apache License 2.0 are retained in LICENSE.
+
+Modified by kdnk for wm on 2026-11-14.
+The fork integrates the local focus, menu bar, window admission, scrolling,
+and composited resize changes from kdnk/dot, and renames the product, commands,
+configuration, IPC, and service identities to wm.
+
+The vendored cgs library and its exact-capture modifications are licensed under
+GPLv3. Its license and third-party notice remain in cgs/LICENSE and
+cgs/third-party/ProgressiveBlurHeader.LICENSE. Its source revision and changes
+are recorded in cgs/README.fork.md.

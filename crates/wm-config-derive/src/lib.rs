@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{Data, DeriveInput, Fields, LitStr, Type, parse_macro_input};
@@ -382,8 +383,8 @@ pub fn command_catalog(input: TokenStream) -> TokenStream {
                         quote!(#binding == &<#ty>::default())
                     },
                 );
-                arguments.push(quote!(#pattern => Some((::rift_protocol::CommandArgument::#kind(#value.clone()), true #(&& #guards)*))));
-                argument_updates.push(quote!((#pattern, ::rift_protocol::CommandArgument::#kind(value)) => { *#value = value; }));
+                arguments.push(quote!(#pattern => Some((::wm_protocol::CommandArgument::#kind(#value.clone()), true #(&& #guards)*))));
+                argument_updates.push(quote!((#pattern, ::wm_protocol::CommandArgument::#kind(value)) => { *#value = value; }));
             }
             if skip {
                 continue;
@@ -412,10 +413,10 @@ pub fn command_catalog(input: TokenStream) -> TokenStream {
                 pub fn command_fields(&self) -> &'static [(&'static str, &'static str)] {
                     match self { #(#schemas),* }
                 }
-                pub fn command_argument(&self) -> Option<(::rift_protocol::CommandArgument, bool)> {
+                pub fn command_argument(&self) -> Option<(::wm_protocol::CommandArgument, bool)> {
                     match self { #(#arguments,)* _ => None }
                 }
-                pub fn with_command_argument(&self, value: ::rift_protocol::CommandArgument) -> Option<Self> {
+                pub fn with_command_argument(&self, value: ::wm_protocol::CommandArgument) -> Option<Self> {
                     let mut command = self.clone();
                     match (&mut command, value) { #(#argument_updates,)* _ => return None }
                     Some(command)

@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 // ported from https://github.com/koekeishiya/yabai/blob/master/src/misc/service.h
 
 use std::env;
@@ -11,7 +12,7 @@ use clap::Subcommand;
 use nix::unistd::getuid;
 
 const LAUNCHCTL_PATH: &str = "/bin/launchctl";
-const RIFT_PLIST: &str = "git.acsandmann.rift";
+const WM_PLIST: &str = wm_protocol::DEFAULT_SERVICE_NAME;
 
 #[derive(Subcommand)]
 pub enum ServiceCommands {
@@ -51,59 +52,7 @@ fn plist_path() -> io::Result<PathBuf> {
     let home = env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "HOME not set"))?;
-    Ok(home.join("Library").join("LaunchAgents").join(format!("{RIFT_PLIST}.plist")))
-}
-
-fn find_rift_executable_in_path(path_env: &std::ffi::OsStr) -> io::Result<Option<PathBuf>> {
-    let mut current_dir: Option<PathBuf> = None;
-    for dir in env::split_paths(path_env) {
-        let candidate = dir.join("rift-patched");
-        if candidate.is_file() {
-            if candidate.is_absolute() {
-                return Ok(Some(candidate));
-            }
-
-            let base = match current_dir.as_ref() {
-                Some(dir) => dir,
-                None => {
-                    current_dir = Some(env::current_dir()?);
-                    current_dir.as_ref().expect("just set")
-                }
-            };
-            return Ok(Some(base.join(candidate)));
-        }
-    }
-    Ok(None)
-}
-
-fn find_rift_executable() -> io::Result<PathBuf> {
-    let exe_path = env::current_exe().map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            "unable to retrieve path of current executable",
-        )
-    })?;
-    if exe_path.file_name().is_some_and(|name| name == "rift") {
-        return Ok(exe_path);
-    }
-    if let Some(path_env) = env::var_os("PATH") {
-        if let Some(candidate) = find_rift_executable_in_path(&path_env)? {
-            return Ok(candidate);
-        }
-    }
-
-    let sibling = exe_path.with_file_name("rift-patched");
-    if sibling.is_file() {
-        return Ok(sibling);
-    }
-
-    Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        format!(
-            "rift agent executable not found: not present in $PATH and no sibling 'rift-patched' next to current executable ('{}')",
-            exe_path.display()
-        ),
-    ))
+    Ok(home.join("Library").join("LaunchAgents").join(format!("{WM_PLIST}.plist")))
 }
 
 fn xml_text(value: &str) -> String {
@@ -116,14 +65,15 @@ fn plist_contents() -> io::Result<String> {
     let path_env =
         env::var("PATH").map_err(|_| io::Error::new(io::ErrorKind::Other, "env PATH not set"))?;
 
-    let agent_exe = find_rift_executable()?;
+    let agent_exe = env::current_exe()?;
     let exe_str = agent_exe
         .to_str()
         .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "non-UTF8 executable path"))?;
 
-    let install_dir = agent_exe.parent().and_then(Path::to_str).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::Other, "invalid Rift installation directory")
-    })?;
+    let install_dir = agent_exe
+        .parent()
+        .and_then(Path::to_str)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "invalid Wm installation directory"))?;
 
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -140,7 +90,7 @@ fn plist_contents() -> io::Result<String> {
     <dict>
         <key>PATH</key>
         <string>{path_env}</string>
-        <key>RIFT_INSTALL_DIR</key>
+        <key>WM_INSTALL_DIR</key>
         <string>{install_dir}</string>
         <key>RUST_LOG</key>
         <string>error,warn,info</string>
@@ -155,9 +105,9 @@ fn plist_contents() -> io::Result<String> {
         <true/>
     </dict>
     <key>StandardOutPath</key>
-    <string>/tmp/rift_{user}.out.log</string>
+    <string>/tmp/wm_{user}.out.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/rift_{user}.err.log</string>
+    <string>/tmp/wm_{user}.err.log</string>
     <key>ProcessType</key>
     <string>Interactive</string>
     <key>LimitLoadToSessionType</key>
@@ -167,7 +117,7 @@ fn plist_contents() -> io::Result<String> {
 </dict>
 </plist>
 "#,
-        name = RIFT_PLIST,
+        name = WM_PLIST,
         exe = xml_text(exe_str),
         path_env = xml_text(&path_env),
         install_dir = xml_text(install_dir),
@@ -225,7 +175,7 @@ fn spawn_launchctl(args: &[&str]) -> io::Result<()> {
 
 fn service_is_running() -> io::Result<bool> {
     let uid = getuid();
-    let service_target = format!("gui/{}/{}", uid, RIFT_PLIST);
+    let service_target = format!("gui/{}/{}", uid, WM_PLIST);
     match run_launchctl(&["print", &service_target], true) {
         Ok(code) => Ok(code == 0),
         Err(_) => Ok(false),
@@ -276,7 +226,7 @@ pub fn service_uninstall() -> io::Result<()> {
     if service_is_running()? {
         return Err(io::Error::new(
             io::ErrorKind::Other,
-            "service is still running; stop it first with `rift service stop` before uninstalling",
+            "service is still running; stop it first with `wm service stop` before uninstalling",
         ));
     }
     fs::remove_file(plist_path)?;
@@ -299,7 +249,7 @@ pub fn service_start() -> io::Result<()> {
     }
 
     let uid = getuid();
-    let service_target = format!("gui/{}/{}", uid, RIFT_PLIST);
+    let service_target = format!("gui/{}/{}", uid, WM_PLIST);
     let domain_target = format!("gui/{}", uid);
 
     let plist_changed = if env::var_os("USER").is_some() && env::var_os("PATH").is_some() {
@@ -364,7 +314,7 @@ pub fn service_restart() -> io::Result<()> {
     }
 
     let uid = getuid();
-    let service_target = format!("gui/{}/{}", uid, RIFT_PLIST);
+    let service_target = format!("gui/{}/{}", uid, WM_PLIST);
     let code = run_launchctl(&["kickstart", "-k", &service_target], false)?;
     if code == 0 {
         Ok(())
@@ -386,7 +336,7 @@ pub fn service_stop() -> io::Result<()> {
     }
 
     let uid = getuid();
-    let service_target = format!("gui/{}/{}", uid, RIFT_PLIST);
+    let service_target = format!("gui/{}/{}", uid, WM_PLIST);
     let domain_target = format!("gui/{}", uid);
 
     let is_bootstrapped = run_launchctl(&["print", &service_target], true).unwrap_or(1);
@@ -414,36 +364,5 @@ pub fn service_stop() -> io::Result<()> {
                 format!("bootout exit {}, disable exit {}", code1, code2),
             ))
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::os::unix::fs as unix_fs;
-
-    use super::*;
-
-    #[test]
-    fn find_rift_executable_prefers_stable_symlink_path() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path();
-
-        let real = dir.join("rift-patched-real");
-        fs::write(&real, b"#!/bin/sh\nexit 0\n").unwrap();
-        let mut perms = fs::metadata(&real).unwrap().permissions();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            perms.set_mode(0o755);
-            fs::set_permissions(&real, perms).unwrap();
-        }
-
-        let link = dir.join("rift-patched");
-        unix_fs::symlink(&real, &link).unwrap();
-
-        let found = find_rift_executable_in_path(dir.as_os_str())
-            .unwrap()
-            .expect("expected to find rift in PATH");
-        assert_eq!(found, link);
     }
 }

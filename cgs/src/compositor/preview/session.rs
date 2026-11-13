@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 //! Capture ownership for hosts that present IOSurfaces through Core Animation.
 use std::marker::PhantomData;
 use std::rc::Rc;

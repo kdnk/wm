@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Verify content presentation for every window in a simultaneous Rift resize."""
+# Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
+"""Verify content presentation for every window in a simultaneous Wm resize."""
 
 import argparse
 from contextlib import ExitStack
@@ -27,7 +28,7 @@ def module(name, path):
     return loaded
 
 
-live = module("rift_single_resize_verifier", ROOT / "tests/rift-live-resize-live-test.py")
+live = module("wm_single_resize_verifier", ROOT / "tests/rift-live-resize-live-test.py")
 
 
 def traces_since(path, offset, window_ids):
@@ -57,7 +58,7 @@ def validate_participant(name, participant, command_count, axis, returns_to_star
     sizes = participant["native_sizes"]
     assert samples, f"{prefix} has no native samples"
     assert not participant["native_read_errors"], f"{prefix} native sampling was incomplete"
-    assert live.near(participant["final"], participant["target"]), f"{prefix} native frame differs from Rift target"
+    assert live.near(participant["final"], participant["target"]), f"{prefix} native frame differs from Wm target"
     assert len(sizes) - 1 <= command_count, f"{prefix} repeatedly reflowed through native sizes: {sizes}"
     if returns_to_start:
         assert live.near(participant["final"], participant["from"]), f"{prefix} did not return to its initial frame"
@@ -145,7 +146,7 @@ def wait_owned_removed(query, identifiers, timeout=10):
         if set(identifiers).isdisjoint(present):
             return
         time.sleep(0.05)
-    raise RuntimeError("Exited fixture windows remain in Rift's workspace inventory")
+    raise RuntimeError("Exited fixture windows remain in Wm's workspace inventory")
 
 
 class Fixture:
@@ -157,7 +158,7 @@ class Fixture:
             self.process = subprocess.Popen(
                 [str(args.qt_python), "-u", str(Path(__file__).resolve()), "--fixture", label],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.stderr, text=True,
-                env=dict(os.environ, PYTHONPATH=str(args.qt_packages.resolve()), RIFT_FIXTURE_WINDOW_COUNT="1"),
+                env=dict(os.environ, PYTHONPATH=str(args.qt_packages.resolve()), WM_FIXTURE_WINDOW_COUNT="1"),
             )
         except Exception:
             self.stderr.close()
@@ -199,7 +200,7 @@ class Fixture:
 
 
 def run(args):
-    guard = module("rift_multi_focus_guard", ROOT / "tests/rift-settings-focus-live-test.py")
+    guard = module("wm_multi_focus_guard", ROOT / "tests/rift-settings-focus-live-test.py")
     guard.require_unlocked()
     client = str(args.client.resolve())
 
@@ -278,7 +279,7 @@ def run(args):
         original_cursor = cursor.position()
         execute("workspace", "switch", str(empty["index"]))
         wait_workspace(query, empty["index"])
-        label = "rift-multi-" + uuid.uuid4().hex[:8]
+        label = "wm-multi-" + uuid.uuid4().hex[:8]
         for index in range(args.windows):
             fixture = Fixture(args, f"{label}-{index}")
             fixtures.append(fixture)
@@ -291,7 +292,7 @@ def run(args):
                 break
             time.sleep(0.1)
         else:
-            raise RuntimeError("Rift did not admit every disposable fixture window")
+            raise RuntimeError("Wm did not admit every disposable fixture window")
         for fixture in fixtures:
             candidates = [window for window in current if window["id"]["pid"] == fixture.pid]
             assert len(candidates) == 1, "A fixture process must own exactly one managed window"
@@ -515,15 +516,15 @@ def run(args):
 
 def main():
     if len(sys.argv) == 3 and sys.argv[1] == "--fixture":
-        content = module("rift_multi_content_fixture", ROOT / "tests/rift-content-render-live-test.py")
+        content = module("wm_multi_content_fixture", ROOT / "tests/rift-content-render-live-test.py")
         content.fixture(sys.argv[2])
         return
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--client", type=Path, default=ROOT / "target/debug/rift-cli")
+    parser.add_argument("--client", type=Path, default=ROOT / "target/debug/wm-cli")
     parser.add_argument("--windows", type=int, default=2, help="Number of disposable fixture processes, from 2 to 4.")
     parser.add_argument("--run", action="store_true", help="Create disposable windows and run resize scenes. Without this flag, inspect readiness only.")
-    parser.add_argument("--output", type=Path, default=Path("/private/tmp/rift-multi-resize-verification") / time.strftime("%Y%m%d-%H%M%S"))
-    parser.add_argument("--trace-file", type=Path, help="JSONL emitted by the installed daemon via RIFT_LIVE_RESIZE_TRACE.")
+    parser.add_argument("--output", type=Path, default=Path("/private/tmp/wm-multi-resize-verification") / time.strftime("%Y%m%d-%H%M%S"))
+    parser.add_argument("--trace-file", type=Path, help="JSONL emitted by the installed daemon via WM_LIVE_RESIZE_TRACE.")
     parser.add_argument("--video", action="store_true", help="Record the display region containing every window and its overlay.")
     parser.add_argument("--settle", type=float, default=3)
     parser.add_argument("--qt-python", type=Path, default=Path("/Applications/Anki.app/Contents/Frameworks/Python.framework/Versions/3.13/bin/python3.13"))

@@ -1,7 +1,8 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::sync::mpsc::{RecvError, SyncSender, sync_channel};
 
 use objc2_core_foundation::CGRect;
-use rift_protocol::{
+use wm_protocol::{
     ApplicationData, ContainerTreeNode, LayoutStateData, Point, Rect, Size, WindowLayoutPosition,
     WorkspaceLayoutData,
 };

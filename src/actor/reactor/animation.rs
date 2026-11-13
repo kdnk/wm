@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -2953,7 +2954,7 @@ mod tests {
 
     #[test]
     fn display_transfer_resets_scrolling_frames_and_preserves_tiling() {
-        use rift_protocol::DisplaySelector;
+        use wm_protocol::DisplaySelector;
 
         use super::super::testing::*;
         use super::super::{Command, Event, ReactorCommand};
@@ -3016,7 +3017,7 @@ mod tests {
                     selector: if turn % 2 == 0 {
                         DisplaySelector::Uuid(uuid)
                     } else {
-                        DisplaySelector::Direction(rift_protocol::Direction::Down)
+                        DisplaySelector::Direction(wm_protocol::Direction::Down)
                     },
                     window_id: Some(1),
                 },
@@ -3674,7 +3675,7 @@ mod live_resize_tests {
                 "claimed" => reactor.state.windows.insert_claim(
                     panel,
                     ClaimOwner(10),
-                    rift_protocol::WindowClaimFlags::empty(),
+                    wm_protocol::WindowClaimFlags::empty(),
                 ),
                 _ => {}
             }

@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use super::*;
 use crate::common::config::VirtualWorkspaceSettings;
 use crate::layout_engine::{ColumnId, ColumnPlacement, ColumnReorderRequest};
@@ -42,7 +43,7 @@ impl Fixture {
         let tree = ws.layout_system.container_tree(ws.active_layout().unwrap());
         let source = &tree.children[0];
         let target = &tree.children[2];
-        let members = |column: &rift_protocol::ContainerTreeNode| {
+        let members = |column: &wm_protocol::ContainerTreeNode| {
             column
                 .children
                 .iter()

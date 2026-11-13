@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::path::Path;
 use std::time::Duration;
 
@@ -127,7 +128,7 @@ pub struct Menu {
     action_tx: UnboundedSender<MenuAction>,
     action_rx: tokio::sync::mpsc::UnboundedReceiver<MenuAction>,
     icon: Option<MenuIcon>,
-    /// The `rift --settings` process; checked only when Settings is requested.
+    /// The `wm --settings` process; checked only when Settings is requested.
     settings: Option<std::process::Child>,
     mtm: MainThreadMarker,
     config_path: std::path::PathBuf,
@@ -278,7 +279,7 @@ impl Menu {
             let mut command = std::process::Command::new(exe);
             if timing.is_some() {
                 command.env(
-                    "RIFT_SETTINGS_SPAWN_TIME_NS",
+                    "WM_SETTINGS_SPAWN_TIME_NS",
                     crate::ui::settings::timing::spawn_time_ns().to_string(),
                 );
             }
@@ -402,7 +403,7 @@ impl Menu {
                 )));
             }
             MenuAction::OpenGitHub => {
-                Self::open_path_or_url("https://github.com/acsandmann/rift");
+                Self::open_path_or_url("https://github.com/kdnk/wm");
             }
             MenuAction::OpenDocumentation => {
                 Self::open_path_or_url("https://acsandmann.github.io/rift-docs/");
@@ -423,7 +424,7 @@ impl Menu {
                     icon.refresh_layout_library();
                 }
             }
-            MenuAction::QuitRift => {
+            MenuAction::QuitWm => {
                 self.reactor_tx.send(reactor::Event::Command(reactor::Command::Reactor(
                     reactor::ReactorCommand::SaveAndExit,
                 )));

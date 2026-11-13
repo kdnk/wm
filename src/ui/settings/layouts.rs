@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 //! Layout configuration and independent, lazy shared-settings disclosures.
 use std::cell::OnceCell;
 
@@ -507,7 +508,7 @@ fn floating_note(ui: &Ui) -> HStack {
             .push(Label::new(ui, "Windows stay where you put them"))
             .push(Caption::new(
                 ui,
-                "Rift doesn’t arrange windows in floating workspaces, so this layout has no settings of its own.",
+                "Wm doesn’t arrange windows in floating workspaces, so this layout has no settings of its own.",
             )),
     );
     note

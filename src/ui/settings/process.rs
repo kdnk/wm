@@ -1,4 +1,5 @@
-//! `rift --settings`: the Settings window in a short-lived child process.
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
+//! `wm --settings`: the Settings window in a short-lived child process.
 //!
 //! The daemon owns window management and configuration; this process owns only the native UI
 //! and reaches the daemon over its Mach service. Closing the window exits the process, which
@@ -21,10 +22,8 @@ use objc2_app_kit::{
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{NSNotification, NSNotificationCenter, NSProcessInfo, NSString};
-use rift_client::{
-    ApplicationData, ClientError, DisplayData, RiftEvent, RiftMachClient, RiftRequest,
-};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
+use wm_client::{ApplicationData, ClientError, DisplayData, WmEvent, WmMachClient, WmRequest};
 
 use super::{Action, Finish, Request, Settings, updates};
 use crate::actor::config::{SourceEdit, SourceSnapshot};
@@ -119,10 +118,10 @@ pub fn run(config_path: PathBuf) -> ! {
     let lost = messages.clone();
     let daemon = std::os::unix::process::parent_id();
     crate::sys::dispatch::on_proc_exit(daemon as i32, move || {
-        let _ = lost.send(Message::Lost("Rift quit.".into()));
+        let _ = lost.send(Message::Lost("Wm quit.".into()));
     });
     if std::os::unix::process::parent_id() != daemon {
-        let _ = messages.send(Message::Lost("Rift quit.".into()));
+        let _ = messages.send(Message::Lost("Wm quit.".into()));
     }
     let (jobs, queue) = mpsc::channel();
     let worker = messages.clone();
@@ -133,8 +132,8 @@ pub fn run(config_path: PathBuf) -> ! {
 
     // Keep the same executable and signing identity, but distinguish the Settings child
     // in OS process listings. Foundation's processName alone does not rename it in the kernel.
-    NSProcessInfo::processInfo().setProcessName(&NSString::from_str("rift-settings"));
-    let name = c"rift-settings";
+    NSProcessInfo::processInfo().setProcessName(&NSString::from_str("wm-settings"));
+    let name = c"wm-settings";
     // SAFETY: both strings are valid for this call; only the current process is renamed.
     let result = unsafe {
         nix::libc::sysctlbyname(
@@ -209,11 +208,9 @@ async fn open(
         if recording && !NSApplication::sharedApplication(mtm).isActive() {
             return Err("Activate Settings before recording a shortcut".into());
         }
-        RiftMachClient::connect()
+        WmMachClient::connect()
             .and_then(|client| client.set_shortcut_recording(std::process::id() as i32, recording))
-            .map_err(|error| {
-                format!("Cannot safely record keys while Rift is unavailable: {error}")
-            })
+            .map_err(|error| format!("Cannot safely record keys while Wm is unavailable: {error}"))
     });
     super::timing::finish(construction, "Settings::new");
     if let Some(startup) = startup {
@@ -319,12 +316,10 @@ async fn open(
 /// executor's poll, whose run-loop source would otherwise re-enter during the modal loop.
 /// Callers stop handling messages until then.
 fn fail(error: &str) {
-    tracing::error!(%error, "Settings cannot reach Rift");
+    tracing::error!(%error, "Settings cannot reach Wm");
     dispatchr::queue::main().after_f_s(Time::NOW, error.to_owned(), |error| {
         let ui = Ui::new(MainThreadMarker::new().expect("main queue"));
-        Alert::new(&ui, "Rift Settings can’t reach Rift", &error)
-            .button("OK")
-            .run_modal();
+        Alert::new(&ui, "Wm Settings can’t reach Wm", &error).button("OK").run_modal();
         std::process::exit(1)
     });
 }
@@ -528,7 +523,7 @@ impl Session {
 
 /// The IPC worker: one blocking client, used sequentially, plus one event receiver.
 fn serve(jobs: mpsc::Receiver<Job>, messages: UnboundedSender<Message>) {
-    let client = RiftMachClient;
+    let client = WmMachClient;
     let initialization = super::timing::start();
     let (snapshot, subscription) = match client.initialize_settings::<SourceSnapshot>() {
         Ok(session) => session,
@@ -544,7 +539,7 @@ fn serve(jobs: mpsc::Receiver<Job>, messages: UnboundedSender<Message>) {
         .spawn(move || {
             loop {
                 match subscription.recv_event() {
-                    Ok(RiftEvent::ConfigChanged { revision }) => {
+                    Ok(WmEvent::ConfigChanged { revision }) => {
                         if events.send(Message::ConfigChanged(revision)).is_err() {
                             return;
                         }
@@ -575,8 +570,8 @@ fn serve(jobs: mpsc::Receiver<Job>, messages: UnboundedSender<Message>) {
                     Message::Runtime(None)
                 }),
             },
-            Job::Source => source(&client, RiftRequest::GetSettingsSource),
-            Job::Reload => source(&client, RiftRequest::ReloadSettingsSource),
+            Job::Source => source(&client, WmRequest::GetSettingsSource),
+            Job::Reload => source(&client, WmRequest::ReloadSettingsSource),
             Job::Apply(expected_revision, base, edit) => {
                 apply(&client, expected_revision, base, edit)
             }
@@ -590,13 +585,13 @@ fn serve(jobs: mpsc::Receiver<Job>, messages: UnboundedSender<Message>) {
 }
 
 fn call<T: serde::de::DeserializeOwned>(
-    client: &RiftMachClient,
-    request: &RiftRequest,
+    client: &WmMachClient,
+    request: &WmRequest,
 ) -> Result<T, ClientError> {
     client.send_typed_request(request)?.into_result().map_err(ClientError::Server)
 }
 
-fn source(client: &RiftMachClient, request: RiftRequest) -> Message {
+fn source(client: &WmMachClient, request: WmRequest) -> Message {
     match call::<SourceSnapshot>(client, &request) {
         Ok(snapshot) => Message::Source(Ok(snapshot.into())),
         Err(error) => recoverable(error).map_or_else(Message::Lost, |e| Message::Source(Err(e))),
@@ -606,7 +601,7 @@ fn source(client: &RiftMachClient, request: RiftRequest) -> Message {
 /// Clone, compare and serialize off the main thread. A no-op returns the same shared
 /// snapshot, so it needs neither serialization nor a Mach request.
 fn apply(
-    client: &RiftMachClient,
+    client: &WmMachClient,
     revision: u64,
     base: Arc<ConfigSource>,
     edit: SourceEdit,
@@ -619,7 +614,7 @@ fn apply(
         return Message::Source(Ok(Snapshot { revision, source: base }));
     }
     match serde_json::to_value(&candidate) {
-        Ok(candidate) => source(client, RiftRequest::ApplySettingsSource {
+        Ok(candidate) => source(client, WmRequest::ApplySettingsSource {
             expected_revision: revision,
             source: candidate,
         }),
@@ -627,9 +622,9 @@ fn apply(
     }
 }
 
-fn runtime(client: &RiftMachClient) -> Result<Runtime, ClientError> {
-    let displays: Vec<DisplayData> = call(client, &RiftRequest::GetDisplays)?;
-    let applications = call(client, &RiftRequest::GetApplications)?;
+fn runtime(client: &WmMachClient) -> Result<Runtime, ClientError> {
+    let displays: Vec<DisplayData> = call(client, &WmRequest::GetDisplays)?;
+    let applications = call(client, &WmRequest::GetApplications)?;
     Ok((displays.into_iter().map(screen).collect(), applications))
 }
 
@@ -651,7 +646,7 @@ fn recoverable(error: ClientError) -> Result<String, String> {
 }
 
 fn screen(display: DisplayData) -> ScreenInfo {
-    let rift_client::Rect { origin, size } = display.frame;
+    let wm_client::Rect { origin, size } = display.frame;
     ScreenInfo {
         id: ScreenId::new(display.screen_id),
         frame: CGRect::new(

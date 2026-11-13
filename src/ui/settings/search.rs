@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 //! Searchable settings destinations, without constructing hidden page trees.
 use super::Category::*;
 use super::{CATEGORIES, Category};
@@ -109,7 +110,7 @@ fn describe(entry: &Draft) -> String {
         "Workspace swipes" => "Switch workspaces using trackpad gestures.",
         "New window position" => "Choose where newly opened windows appear.",
         "Default layout" => "Choose the layout used by default.",
-        "App rules" => "Choose how Rift handles an application's windows.",
+        "App rules" => "Choose how Wm handles an application's windows.",
         "Workspace rules" => "Assign matching windows to a workspace.",
         "Keyboard shortcuts" => "View, add, and edit keyboard shortcuts.",
         "Display overrides" => "Customize spacing and column widths for one display.",
@@ -288,13 +289,7 @@ const MANUAL: &[(Category, Option<LayoutMode>, &str, &str, &str)] = &[
         "Release Notes",
         "changelog version changes",
     ),
-    (
-        About,
-        None,
-        "About",
-        "Sponsor Rift",
-        "donate support sponsorship",
-    ),
+    (About, None, "About", "Sponsor Wm", "donate support sponsorship"),
 ];
 
 // Schema registration supplies navigation context, not duplicate field lists.

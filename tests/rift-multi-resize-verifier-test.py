@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 from contextlib import redirect_stdout
 import copy
 import importlib.util
@@ -13,7 +14,7 @@ from types import SimpleNamespace
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("rift_multi_verifier", ROOT / "tests/rift-multi-resize-live-test.py")
+spec = importlib.util.spec_from_file_location("wm_multi_verifier", ROOT / "tests/rift-multi-resize-live-test.py")
 verifier = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(verifier)
 
@@ -40,7 +41,7 @@ for changes, expected in [
     ({"proxy_trace": [{"phase": "fallback"}]}, "fell back to native resizing"),
     ({"proxy_trace": participant["proxy_trace"] + [{"phase": "fallback"}]}, "fell back to native resizing"),
     ({"content_event_counts": {"resize": 1, "paint_end": 0}}, "did not paint"),
-    ({"target": [0, 45, 1024, 643]}, "differs from Rift target"),
+    ({"target": [0, 45, 1024, 643]}, "differs from Wm target"),
 ]:
     broken = copy.deepcopy(participant)
     broken.update(changes)
@@ -73,7 +74,7 @@ assert verifier.size_changed(reversal)
 verifier.validate_participant("reversal", reversal, 2, 2, True)
 print("PASS unchanged third windows need no capture, while reversals still require compositor verification")
 
-with tempfile.TemporaryDirectory(prefix="rift-multi-verifier-") as directory:
+with tempfile.TemporaryDirectory(prefix="wm-multi-verifier-") as directory:
     path = Path(directory) / "trace.jsonl"
     first = b'{"window_id":11,"phase":"animating"}\n'
     second = b'{"window_id":12,"phase":"animating"}\n'
@@ -201,8 +202,8 @@ verifier.module = lambda *args: SimpleNamespace(require_unlocked=lambda: None)
 verifier.time = SimpleNamespace(sleep=lambda _: None, monotonic=time.monotonic, monotonic_ns=time.monotonic_ns)
 verifier.subprocess = SimpleNamespace(check_output=query, run=execute, TimeoutExpired=subprocess.TimeoutExpired,
                                      DEVNULL=subprocess.DEVNULL)
-with tempfile.TemporaryDirectory(prefix="rift-multi-cleanup-") as directory:
-    args = SimpleNamespace(client=ROOT / "target/debug/rift-cli", run=False, output=Path(directory) / "result",
+with tempfile.TemporaryDirectory(prefix="wm-multi-cleanup-") as directory:
+    args = SimpleNamespace(client=ROOT / "target/debug/wm-cli", run=False, output=Path(directory) / "result",
                            trace_file=Path(directory) / "trace.jsonl", video=False, settle=0.5, windows=2)
     with redirect_stdout(io.StringIO()):
         verifier.run(args)

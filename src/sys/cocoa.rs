@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::ffi::c_short;
 use std::ptr::NonNull;
 use std::sync::Arc;
@@ -12,10 +13,10 @@ use objc2_foundation::{NSDate, NSDefaultRunLoopMode, NSPoint};
 
 use super::run_loop::WakeLatch;
 
-/// Arbitrary tag used to distinguish Rift's wake event from events owned by
+/// Arbitrary tag used to distinguish Wm's wake event from events owned by
 /// other AppKit clients.
-const RIFT_WAKE_EVENT_SUBTYPE: c_short = 0x7266;
-const RIFT_WAKE_EVENT_DATA: isize = 0x72696674;
+const WM_WAKE_EVENT_SUBTYPE: c_short = 0x7266;
+const WM_WAKE_EVENT_DATA: isize = 0x72696674;
 
 #[cfg(debug_assertions)]
 #[derive(Default)]
@@ -76,19 +77,19 @@ impl EventLoopWaker {
             0.0,
             0,
             None,
-            RIFT_WAKE_EVENT_SUBTYPE,
-            RIFT_WAKE_EVENT_DATA,
+            WM_WAKE_EVENT_SUBTYPE,
+            WM_WAKE_EVENT_DATA,
             0,
         )
-        .expect("unable to create Rift's Cocoa wake event")
+        .expect("unable to create Wm's Cocoa wake event")
     }
 
     fn consume_wake(&self) { self.pending.consume(); }
 
-    fn is_rift_wake(event: &NSEvent) -> bool {
+    fn is_wm_wake(event: &NSEvent) -> bool {
         event.r#type() == NSEventType::ApplicationDefined
-            && event.subtype().0 == RIFT_WAKE_EVENT_SUBTYPE
-            && event.data1() == RIFT_WAKE_EVENT_DATA
+            && event.subtype().0 == WM_WAKE_EVENT_SUBTYPE
+            && event.data1() == WM_WAKE_EVENT_DATA
     }
 }
 
@@ -145,7 +146,7 @@ impl EventLoop {
                     event
                 },
                 |event| {
-                    if !EventLoopWaker::is_rift_wake(event) {
+                    if !EventLoopWaker::is_wm_wake(event) {
                         return false;
                     }
                     #[cfg(debug_assertions)]
@@ -169,7 +170,7 @@ impl EventLoop {
     }
 }
 
-// Only the first retrieval blocks. A Rift marker is a scheduling boundary;
+// Only the first retrieval blocks. A Wm marker is a scheduling boundary;
 // leave later Cocoa events queued for the next batch.
 fn drain_events<E>(
     mut next: impl FnMut(bool) -> Option<E>,
@@ -294,8 +295,8 @@ mod tests {
     }
 
     #[test]
-    fn only_rift_tagged_application_events_are_consumed() {
-        assert!(EventLoopWaker::is_rift_wake(&EventLoopWaker::make_wake_event()));
+    fn only_wm_tagged_application_events_are_consumed() {
+        assert!(EventLoopWaker::is_wm_wake(&EventLoopWaker::make_wake_event()));
         let other =
             NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
                 NSEventType::ApplicationDefined,
@@ -304,12 +305,12 @@ mod tests {
                 0.0,
                 0,
                 None,
-                RIFT_WAKE_EVENT_SUBTYPE,
+                WM_WAKE_EVENT_SUBTYPE,
                 0,
                 0,
             )
             .unwrap();
-        assert!(!EventLoopWaker::is_rift_wake(&other));
+        assert!(!EventLoopWaker::is_wm_wake(&other));
     }
 }
 
@@ -318,7 +319,7 @@ impl Drop for EventLoop {
     fn drop(&mut self) {
         tracing::debug!(
             real_cocoa_events = self.waker.stats.real_events.load(Ordering::Relaxed),
-            synthetic_rift_wakes = self.waker.stats.synthetic_wakes.load(Ordering::Relaxed),
+            synthetic_wm_wakes = self.waker.stats.synthetic_wakes.load(Ordering::Relaxed),
             coalesced_wake_requests = self.waker.stats.coalesced_wakes.load(Ordering::Relaxed),
             wake_requests = self.waker.stats.wake_calls.load(Ordering::Relaxed),
             empty_returns = self.waker.stats.empty_returns.load(Ordering::Relaxed),

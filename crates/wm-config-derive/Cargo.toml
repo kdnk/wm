@@ -1,5 +1,6 @@
+# Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 [package]
-name = "rift-config-derive"
+name = "wm-config-derive"
 version = "0.1.0"
 edition = "2024"
 

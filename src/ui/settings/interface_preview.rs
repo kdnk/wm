@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 //! Embed the shipping cgs tab component; only the example window chrome is drawn here.
 use cgs::image::Image;
 use cgs::tabs::{TabBar, TabBarAction, TabBarEdge, TabBarItem};
@@ -30,7 +31,7 @@ struct StackState {
 define_class!(
     #[unsafe(super(NSView))]
     #[thread_kind = MainThreadOnly]
-    #[name = "RiftSettingsStackPreview"]
+    #[name = "WmSettingsStackPreview"]
     #[ivars = StackState]
     struct StackPreviewView;
     impl StackPreviewView {

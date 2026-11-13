@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -326,7 +327,7 @@ impl Ticket {
 
     #[track_caller]
     pub(crate) fn revoke(&self) {
-        if self.is_current() && std::env::var_os("RIFT_LIVE_RESIZE_TRACE").is_some() {
+        if self.is_current() && std::env::var_os("WM_LIVE_RESIZE_TRACE").is_some() {
             tracing::info!(window_id = self.plan().window_id, generation = self.generation(), caller = %std::panic::Location::caller(), "Live resize revoked");
         }
         let _ = self.0.permit.compare_exchange(

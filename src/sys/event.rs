@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::convert::TryFrom;
 
 use objc2_core_foundation::CGPoint;
@@ -23,7 +24,7 @@ pub enum MouseState {
     Down = 2,
 }
 
-const RIFT_SYNTHETIC_EVENT_MARKER: i64 = 0x5249_4654;
+const WM_SYNTHETIC_EVENT_MARKER: i64 = 0x5249_4654;
 const KEYCODE_W: u16 = 0x0d;
 
 impl From<MouseState> for u8 {
@@ -97,14 +98,14 @@ pub fn post_command_w(pid: crate::sys::app::pid_t) -> bool {
         CGEvent::set_integer_value_field(
             Some(event),
             CGEventField::EventSourceUserData,
-            RIFT_SYNTHETIC_EVENT_MARKER,
+            WM_SYNTHETIC_EVENT_MARKER,
         );
         CGEvent::post_to_pid(pid, Some(event));
     }
     true
 }
 
-pub fn is_rift_synthetic_event(event: &CGEvent) -> bool {
+pub fn is_wm_synthetic_event(event: &CGEvent) -> bool {
     CGEvent::integer_value_field(Some(event), CGEventField::EventSourceUserData)
-        == RIFT_SYNTHETIC_EVENT_MARKER
+        == WM_SYNTHETIC_EVENT_MARKER
 }

@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
@@ -5,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use objc2_core_foundation::{CGRect, CGSize};
-pub use rift_protocol::{RestoreScope, RestoreSource};
 use serde::{Deserialize, Serialize};
+pub use wm_protocol::{RestoreScope, RestoreSource};
 
 use super::{FloatingManager, LayoutEngine};
 use crate::actor::app::{WindowId, pid_t};

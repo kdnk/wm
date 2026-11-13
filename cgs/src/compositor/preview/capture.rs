@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::collections::HashMap;
 use std::cell::OnceCell;
 use std::rc::Rc;

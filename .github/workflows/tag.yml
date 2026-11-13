@@ -1,4 +1,5 @@
-name: Tag Rift version
+# Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
+name: Tag Wm version
 
 on:
   push:
@@ -9,7 +10,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: tag-rift-version
+  group: tag-wm-version
   cancel-in-progress: false
 
 jobs:
@@ -21,7 +22,7 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.sha }}
       - name: Verify default config is present
-        run: test -s rift.default.toml
+        run: test -s wm.default.toml
       - name: Tag changed root package version
         env:
           BEFORE: ${{ github.event.before }}

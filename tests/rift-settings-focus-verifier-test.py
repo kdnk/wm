@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 import copy
 import importlib.util
 from pathlib import Path
@@ -8,7 +9,7 @@ from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 source = Path(__file__).with_name("rift-settings-focus-live-test.py")
-spec = importlib.util.spec_from_file_location("rift_settings_focus", source)
+spec = importlib.util.spec_from_file_location("wm_settings_focus", source)
 verifier = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(verifier)
 
@@ -46,9 +47,9 @@ class SettingsFocusVerifierTest(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "Native frontmost"):
             self.verify()
 
-    def test_native_focus_without_rift_focus_fails(self):
+    def test_native_focus_without_wm_focus_fails(self):
         self.windows[0]["is_focused"] = False
-        with self.assertRaisesRegex(AssertionError, "Rift focus differs"):
+        with self.assertRaisesRegex(AssertionError, "Wm focus differs"):
             self.verify()
 
     def test_matching_offscreen_frames_do_not_prove_visibility(self):

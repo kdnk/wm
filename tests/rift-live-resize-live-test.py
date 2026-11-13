@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Exercise the installed Rift presenter and retain content evidence for review."""
+# Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
+"""Exercise the installed Wm presenter and retain content evidence for review."""
 
 import argparse
 import ctypes as C
@@ -273,7 +274,7 @@ def layout_signature(node):
 
 
 def run(args):
-    guard = module("rift_focus_guard", ROOT / "tests/rift-settings-focus-live-test.py")
+    guard = module("wm_focus_guard", ROOT / "tests/rift-settings-focus-live-test.py")
     guard.require_unlocked()
     client = str(args.client.resolve())
 
@@ -306,7 +307,7 @@ def run(args):
     active = next(workspace for workspace in query("workspaces") if workspace["is_focused"])
     borrowed = next((window for window in before if window["window_server_id"] == args.window_id), None) if args.window_id else None
     if args.window_id and borrowed is None:
-        raise RuntimeError(f"Requested borrowed window {args.window_id} is not managed in the current Rift window query")
+        raise RuntimeError(f"Requested borrowed window {args.window_id} is not managed in the current Wm window query")
     if borrowed and (borrowed["bundle_id"] != "com.google.Chrome" or borrowed["is_floating"] or borrowed["layout_position"] is None):
         raise RuntimeError("The borrowed window must be a normal managed Chrome window")
     if borrowed and not any(window["window_server_id"] == args.window_id for window in active["windows"]):
@@ -331,7 +332,7 @@ def run(args):
         return
 
     args.output.mkdir(parents=True, exist_ok=False)
-    label = "rift-live-resize-" + uuid.uuid4().hex[:8]
+    label = "wm-live-resize-" + uuid.uuid4().hex[:8]
     report = {**readiness, "label": label, "before_windows": before,
               "original_workspace": active, "scenes": [], "failures": []}
     if borrowed:
@@ -388,9 +389,9 @@ def run(args):
                     break
                 time.sleep(0.1)
             if not created:
-                raise RuntimeError("Rift did not manage the disposable test window")
+                raise RuntimeError("Wm did not manage the disposable test window")
         if created["is_floating"] or created["layout_position"] is None:
-            raise RuntimeError("The test window must use normal Rift tiling; a floating fixture cannot prove this path")
+            raise RuntimeError("The test window must use normal Wm tiling; a floating fixture cannot prove this path")
         focus(created)
         current = next(workspace for workspace in query("workspaces") if workspace["is_focused"])
         if current["index"] != empty["index"]:
@@ -407,7 +408,7 @@ def run(args):
             window = next((window for window in current["windows"]
                            if window["window_server_id"] == created["window_server_id"]), None)
             if window is None:
-                raise RuntimeError(f"{stage}: target {created['window_server_id']} is absent from the active Rift workspace")
+                raise RuntimeError(f"{stage}: target {created['window_server_id']} is absent from the active Wm workspace")
             if frontmost_pid() != created["id"]["pid"] or native.focused_window_id() != created["window_server_id"]:
                 raise RuntimeError(f"{stage}: native focus left the verification target")
             return window
@@ -494,7 +495,7 @@ def run(args):
                 record["content_event_counts"] = paint_counts(app_trace, created["title"])
             report["scenes"].append(record)
             (args.output / (name + ".json")).write_text(json.dumps(record, indent=2) + "\n")
-            assert near(final, rect(current["frame"])), f"{name}: native frame differs from Rift target"
+            assert near(final, rect(current["frame"])), f"{name}: native frame differs from Wm target"
             assert not current["is_floating"], f"{name}: target unexpectedly became floating"
             assert record["native_frontmost_pid_after"] == created["id"]["pid"], f"{name}: native focus was not preserved"
             assert record["native_focused_window_after"] == created["window_server_id"], f"{name}: native window focus was not preserved"
@@ -652,17 +653,17 @@ def run(args):
 
 def main():
     if len(sys.argv) == 3 and sys.argv[1] == "--fixture":
-        content = module("rift_content_fixture", ROOT / "tests/rift-content-render-live-test.py")
+        content = module("wm_content_fixture", ROOT / "tests/rift-content-render-live-test.py")
         content.fixture(sys.argv[2])
         return
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--client", type=Path, default=ROOT / "target/debug/rift-cli")
+    parser.add_argument("--client", type=Path, default=ROOT / "target/debug/wm-cli")
     parser.add_argument("--mode", choices=["fixture", "chrome"], default="fixture")
-    parser.add_argument("--window-id", type=int, help="Borrow an existing managed Chrome window and restore its saved Rift layout afterward.")
+    parser.add_argument("--window-id", type=int, help="Borrow an existing managed Chrome window and restore its saved Wm layout afterward.")
     parser.add_argument("--run", action="store_true", help="Run resize scenes on a disposable or borrowed window. Without this flag, inspect readiness only.")
-    parser.add_argument("--output", type=Path, default=Path("/private/tmp/rift-live-resize-verification") / time.strftime("%Y%m%d-%H%M%S"))
-    parser.add_argument("--trace-file", type=Path, help="JSONL emitted by the installed daemon via RIFT_LIVE_RESIZE_TRACE.")
-    parser.add_argument("--video", action="store_true", help="Record the display region, including Rift's separate overlay.")
+    parser.add_argument("--output", type=Path, default=Path("/private/tmp/wm-live-resize-verification") / time.strftime("%Y%m%d-%H%M%S"))
+    parser.add_argument("--trace-file", type=Path, help="JSONL emitted by the installed daemon via WM_LIVE_RESIZE_TRACE.")
+    parser.add_argument("--video", action="store_true", help="Record the display region, including Wm's separate overlay.")
     parser.add_argument("--settle", type=float, default=3, help="Seconds to wait after the last command.")
     parser.add_argument("--fixture-bin", type=Path, help="Optional normal-level managed AppKit probe supporting the --hold JSON stdin protocol.")
     parser.add_argument("--qt-python", type=Path, default=Path("/Applications/Anki.app/Contents/Frameworks/Python.framework/Versions/3.13/bin/python3.13"))

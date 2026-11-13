@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 //! Settings destinations and navigation behavior.
 use cgs::Ui;
 use cgs::settings::{SettingsBadge, SettingsDestination, SettingsNavigation};
@@ -35,7 +36,7 @@ impl SettingsSidebar {
             })
             .collect();
         let navigation = SettingsNavigation::new(ui, destinations, select);
-        navigation.identifier("rift.settings.navigation");
+        navigation.identifier("wm.settings.navigation");
         navigation.accessibility_label("Settings categories");
         Self { navigation }
     }

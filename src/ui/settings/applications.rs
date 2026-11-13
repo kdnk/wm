@@ -1,7 +1,8 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
-use rift_protocol::ApplicationData;
+use wm_protocol::ApplicationData;
 
 /// A rule's application matcher: bundle identifier, or name for apps without one.
 pub(super) type AppMatch = (Option<String>, Option<String>);

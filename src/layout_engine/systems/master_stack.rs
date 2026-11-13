@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use nix::libc::pid_t;
 use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
@@ -587,7 +588,7 @@ impl LayoutSystem for MasterStackLayoutSystem {
         self.inner.draw_tree_with_labels(layout, &labels)
     }
 
-    fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
+    fn container_tree(&self, layout: LayoutId) -> wm_protocol::ContainerTreeNode {
         let root = self.inner.root(layout);
         let children: Vec<_> = root.children(self.inner.map()).collect();
         let mut roles = HashMap::default();

@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 //! Lazy main-thread Settings composition. ConfigActor owns all mutations and persistence.
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -20,8 +21,8 @@ use cgs::window::{Sheet, WindowRef};
 use cgs::{CGSize, Insets, Ui};
 use objc2::rc::Retained;
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSEventModifierFlags, NSMenu};
-use rift_protocol::ApplicationData;
 use tokio::sync::mpsc::UnboundedSender;
+use wm_protocol::ApplicationData;
 
 use crate::actor::config::SourceEdit;
 use crate::common::config::{ConfigSchema, ConfigSource};
@@ -465,7 +466,7 @@ impl Settings {
             previous: RefCell::new(None),
         });
         let close_activation = activation.clone();
-        let window = SettingsWindow::with_size(&ui, "Rift Settings", CGSize::new(880.0, 660.0));
+        let window = SettingsWindow::with_size(&ui, "Wm Settings", CGSize::new(880.0, 660.0));
         timing::finish(chrome_timing, "native window creation");
         let attachment_timing = timing::start();
         let window = window.page_title(&ui, router.title.clone()).on_close(move || {
@@ -497,7 +498,7 @@ impl Settings {
                     }
                 }),
         );
-        activation.menu.add(MenuItem::new(&ui, "Rift").submenu(app_menu));
+        activation.menu.add(MenuItem::new(&ui, "Wm").submenu(app_menu));
         *router.toolbar.borrow_mut() = Rc::downgrade(window.toolbar());
         let back = Rc::downgrade(&router);
         let forward = Rc::downgrade(&router);

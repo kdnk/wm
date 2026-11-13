@@ -1,22 +1,23 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE. -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleExecutable</key>
-	<string>rift-patched</string>
+	<string>wm</string>
 	<key>CFBundleIdentifier</key>
-	<string>git.acsandmann.rift-patched</string>
+	<string>git.kdnk.wm</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>0.1.0</string>
 	<key>CFBundleName</key>
-	<string>rift-patched</string>
+	<string>wm</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2025 acsandmann. All rights reserved.</string>
     <key>NSScreenCaptureUsageDescription</key>
-    <string>Rift optionally captures window previews while Overview is open.</string>
+    <string>Wm optionally captures window previews while Overview is open.</string>
 </dict>
 </plist>

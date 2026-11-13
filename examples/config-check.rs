@@ -1,7 +1,8 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::path::Path;
 
 use anyhow::{Context, ensure};
-use rift_wm::common::config::Config;
+use wm::common::config::Config;
 
 fn main() -> anyhow::Result<()> {
     let mut arguments = std::env::args_os().skip(1);
@@ -11,9 +12,9 @@ fn main() -> anyhow::Result<()> {
     let issues = config.validate();
     ensure!(
         issues.is_empty(),
-        "Invalid Rift configuration:\n{}",
+        "Invalid Wm configuration:\n{}",
         issues.join("\n")
     );
-    println!("PASS: complete Rift configuration is valid");
+    println!("PASS: complete Wm configuration is valid");
     Ok(())
 }

@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::ptr::NonNull;
@@ -126,7 +127,7 @@ impl ResizeActor {
     pub fn new(mtm: MainThreadMarker) -> (Self, Client) {
         let (tx, rx) = actor::channel();
         let client = Client::new(tx.clone());
-        let trace = std::env::var_os("RIFT_LIVE_RESIZE_TRACE")
+        let trace = std::env::var_os("WM_LIVE_RESIZE_TRACE")
             .and_then(|path| OpenOptions::new().append(true).create(true).open(path).ok());
         let mut actor = Self {
             mtm,
@@ -219,7 +220,7 @@ impl ResizeActor {
                 item[key] = value.clone();
             }
         }
-        tracing::debug!(target:"rift::live_resize", event = %item);
+        tracing::debug!(target:"wm::live_resize", event = %item);
         if let Some(file) = &mut self.trace {
             let _ = writeln!(file, "{item}");
         }
@@ -770,7 +771,7 @@ impl ResizeActor {
         unsafe {
             window.setReleasedWhenClosed(false);
         }
-        window.setTitle(&NSString::from_str("Rift live resize"));
+        window.setTitle(&NSString::from_str("Wm live resize"));
         window.setAnimationBehavior(NSWindowAnimationBehavior::None);
         window.setLevel(0);
         window.setIgnoresMouseEvents(false);
@@ -1249,7 +1250,7 @@ mod live_resize_tests {
     }
 
     #[test]
-    fn live_resize_deadline_wakes_on_rift_executor_without_tokio_runtime() {
+    fn live_resize_deadline_wakes_on_wm_executor_without_tokio_runtime() {
         let (sender, mut receiver) = actor::channel();
         crate::sys::executor::Executor::run(async move {
             let _sender = sender;

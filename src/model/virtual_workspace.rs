@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use objc2_core_foundation::CGSize;
 use serde::{Deserialize, Serialize};
 use slotmap::{SlotMap, new_key_type};
@@ -1073,7 +1074,7 @@ impl WorkspaceStore {
         }
         window_store.remap_space(old_space, new_space);
 
-        // The window server puts windows on a desktop before rift is told it replaced
+        // The window server puts windows on a desktop before wm is told it replaced
         // another, so some are already assigned to the workspaces just deleted. Dropping
         // those assignments leaves the window on no workspace, which also loses which
         // workspace of the desktop it was on. Each moves to the migrated workspace in the

@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 pub mod app_rules;
 pub mod floating_position_store;
 pub mod hidden_window_placement;
@@ -20,4 +21,4 @@ pub mod broadcast;
 pub mod drag;
 pub mod reactor;
 pub mod space_activation;
-pub use reactor::RiftState;
+pub use reactor::WmState;

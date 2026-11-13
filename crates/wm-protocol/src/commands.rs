@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::path::PathBuf;
 
 use serde::de::Error as DeError;
@@ -46,7 +47,7 @@ pub struct ToggleWindowFloatingOptions {
     pub size: Option<FloatingWindowSize>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, rift_config_derive::CommandCatalog)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, wm_config_derive::CommandCatalog)]
 #[serde(rename_all = "snake_case")]
 #[command(
     group = 0,
@@ -168,9 +169,7 @@ pub enum LayoutCommand {
     SwapMasterStack,
 }
 
-#[derive(
-    Clone, Debug, Eq, PartialEq, Serialize, Deserialize, rift_config_derive::CommandCatalog,
-)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, wm_config_derive::CommandCatalog)]
 #[serde(rename_all = "snake_case")]
 #[command(defaults(
     Direction = "Direction::Left",
@@ -239,7 +238,7 @@ pub enum ReactorCommand {
     },
     /// Move the active workspace to another display.
     ///
-    /// Rift workspaces are display-local, so windows move into the destination
+    /// Wm workspaces are display-local, so windows move into the destination
     /// display's workspace at the same ordinal and that workspace becomes active.
     #[command(group = 3, order = 37)]
     MoveWorkspaceToDisplay {
@@ -289,15 +288,7 @@ pub enum ConfigCommand {
 }
 
 #[derive(
-    Clone,
-    Copy,
-    Debug,
-    Default,
-    Eq,
-    PartialEq,
-    Serialize,
-    Deserialize,
-    rift_config_derive::ConfigEnum,
+    Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, wm_config_derive::ConfigEnum,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum AnimationEasing {
@@ -329,7 +320,7 @@ pub enum AnimationEasing {
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RiftCommand {
+pub enum WmCommand {
     Layout(LayoutCommand),
     Metrics(MetricsCommand),
     Reactor(ReactorCommand),
@@ -338,7 +329,7 @@ pub enum RiftCommand {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum TypedRiftCommand {
+enum TypedWmCommand {
     Layout(LayoutCommand),
     Metrics(MetricsCommand),
     Reactor(ReactorCommand),
@@ -361,24 +352,24 @@ enum LegacyReactorCommand {
     Reactor(ReactorCommand),
 }
 
-impl From<TypedRiftCommand> for RiftCommand {
-    fn from(command: TypedRiftCommand) -> Self {
+impl From<TypedWmCommand> for WmCommand {
+    fn from(command: TypedWmCommand) -> Self {
         match command {
-            TypedRiftCommand::Layout(command) => Self::Layout(command),
-            TypedRiftCommand::Metrics(command) => Self::Metrics(command),
-            TypedRiftCommand::Reactor(command) => Self::Reactor(command),
-            TypedRiftCommand::Config(command) => Self::Config(command),
+            TypedWmCommand::Layout(command) => Self::Layout(command),
+            TypedWmCommand::Metrics(command) => Self::Metrics(command),
+            TypedWmCommand::Reactor(command) => Self::Reactor(command),
+            TypedWmCommand::Config(command) => Self::Config(command),
         }
     }
 }
 
-impl<'de> Deserialize<'de> for RiftCommand {
+impl<'de> Deserialize<'de> for WmCommand {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where D: Deserializer<'de> {
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum CommandInput {
-            Typed(TypedRiftCommand),
+            Typed(TypedWmCommand),
             LegacyJson(String),
         }
 
@@ -389,20 +380,20 @@ impl<'de> Deserialize<'de> for RiftCommand {
     }
 }
 
-fn decode_legacy_command<E>(command: &str) -> Result<RiftCommand, E>
+fn decode_legacy_command<E>(command: &str) -> Result<WmCommand, E>
 where E: DeError {
     match serde_json::from_str::<LegacyCommand>(command)
         .map_err(|error| E::custom(format!("invalid legacy command JSON: {error}")))?
     {
-        LegacyCommand::Config(command) => Ok(RiftCommand::Config(command)),
+        LegacyCommand::Config(command) => Ok(WmCommand::Config(command)),
         LegacyCommand::Reactor(LegacyReactorCommand::Layout(command)) => {
-            Ok(RiftCommand::Layout(command))
+            Ok(WmCommand::Layout(command))
         }
         LegacyCommand::Reactor(LegacyReactorCommand::Metrics(command)) => {
-            Ok(RiftCommand::Metrics(command))
+            Ok(WmCommand::Metrics(command))
         }
         LegacyCommand::Reactor(LegacyReactorCommand::Reactor(command)) => {
-            Ok(RiftCommand::Reactor(command))
+            Ok(WmCommand::Reactor(command))
         }
     }
 }

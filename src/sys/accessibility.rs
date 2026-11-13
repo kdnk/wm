@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::ffi::c_void;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -82,7 +83,7 @@ pub fn ensure_accessibility_permission() {
     }
 
     println!(
-        "Rift still does not have accessibility permission. Enable it in System Settings > Privacy & Security > Accessibility, then restart Rift."
+        "Wm still does not have accessibility permission. Enable it in System Settings > Privacy & Security > Accessibility, then restart Wm."
     );
 
     std::process::exit(1);

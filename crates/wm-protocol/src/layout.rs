@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -126,15 +127,7 @@ impl LayoutKind {
 }
 
 #[derive(
-    Clone,
-    Copy,
-    Debug,
-    Default,
-    Eq,
-    PartialEq,
-    Serialize,
-    Deserialize,
-    rift_config_derive::ConfigEnum,
+    Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, wm_config_derive::ConfigEnum,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum LayoutMode {

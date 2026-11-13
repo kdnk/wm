@@ -1327,18 +1327,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a96887878f22d7bad8a3b6dc5b7440e0ada9a245242924394987b21cf2210a4c"
 
 [[package]]
-name = "rift-client"
+name = "wm-client"
 version = "0.1.0"
 dependencies = [
  "ctrlc",
- "rift-protocol",
+ "wm-protocol",
  "serde",
  "serde_json",
  "thiserror",
 ]
 
 [[package]]
-name = "rift-config-derive"
+name = "wm-config-derive"
 version = "0.1.0"
 dependencies = [
  "proc-macro2",
@@ -1347,16 +1347,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "rift-protocol"
+name = "wm-protocol"
 version = "0.1.0"
 dependencies = [
- "rift-config-derive",
+ "wm-config-derive",
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "rift-wm"
+name = "wm"
 version = "0.8.1"
 dependencies = [
  "anyhow",
@@ -1388,9 +1388,9 @@ dependencies = [
  "parking_lot",
  "pretty_assertions",
  "regex",
- "rift-client",
- "rift-config-derive",
- "rift-protocol",
+ "wm-client",
+ "wm-config-derive",
+ "wm-protocol",
  "ron",
  "rustc-hash",
  "serde",
