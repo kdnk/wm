@@ -2,7 +2,6 @@
 pub mod app_rules;
 pub mod floating_position_store;
 pub mod hidden_window_placement;
-pub mod live_resize;
 pub mod selection;
 pub mod server;
 pub mod tree;

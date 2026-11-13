@@ -14,10 +14,10 @@ The patches used Rift 0.8.1 at `b5cf5c7f7b9ffe7364377808df1ab1a4ecd24637`. This 
 | Settings windows | Explicit management rules can admit attached standard windows and positively identified nonmodal dialogs. |
 | Configuration | The `config-check` example validates the complete configuration with the native parser. |
 | Scrolling layout | Stacked-row resizing, selection of participating neighboring columns, and bounded weighted size allocation. |
-| Motion | Bounded native geometry writes and composited content during single and simultaneous window resizes. |
+| Motion | Continuous native position and size animation with bounded geometry writes and velocity preserved through target changes. |
 | Distribution | LaunchAgent XML escaping preserves installation paths and environment values. The fork uses the `git.kdnk.wm` identity. |
 
-Live resizing uses the exact-capture extension in the vendored [cgs sources](../cgs/README.fork.md). The root Cargo dependency uses the relative `cgs/` path. dispatchr remains fixed by `Cargo.lock` at `5b4054c472d1108ab6ac690db6ae6eb5b0f94e62`.
+The composited resize presentation imported from dot has been removed. Size changes use the native animation path from `macos-window-motion.patch`, including intermediate native sizes and velocity-preserving target changes. The exact-capture extension remains in the vendored [cgs sources](../cgs/README.fork.md) for source provenance. The root Cargo dependency uses the relative `cgs/` path. dispatchr remains fixed by `Cargo.lock` at `5b4054c472d1108ab6ac690db6ae6eb5b0f94e62`.
 
 Personal app rules, keyboard shortcuts, signing setup, installation wrappers, and the Swift close-window helper remain in dot. The native binary builds as `target/debug/wm`, and the client builds as `target/debug/wm-cli`. Service installation registers the current native executable. Configuration, state, IPC, and environment variables use the wm namespace. Existing dot installation wrappers still target the older patched Rift distribution and require a separate migration before they can install wm.
 
@@ -49,7 +49,7 @@ The comparison reconstructs the recorded source revisions and compares them with
 
 ## Verify on the desktop
 
-The live checks require a matching running daemon, Accessibility access, and a disposable scrolling workspace. Composited resize checks also require Screen Recording access for the daemon. The imported `tests/rift-*-test.py` filenames retain their historical names, while their commands and environment variables use wm. They default to `target/debug/wm-cli`; pass `--client` to use a different build or installation.
+The live checks require a matching running daemon, Accessibility access, and a disposable scrolling workspace. The imported `tests/rift-*-test.py` filenames retain their historical names, while their commands and environment variables use wm. They default to `target/debug/wm-cli`; pass `--client` to use a different build or installation.
 
 Run only the checks relevant to the change:
 
@@ -59,10 +59,10 @@ python3 tests/rift-settings-focus-live-test.py --app anki
 python3 tests/rift-window-lifecycle-live-test.py
 python3 tests/rift-motion-live-test.py --output /private/tmp/rift-motion.json
 python3 tests/rift-content-render-live-test.py --output /private/tmp/rift-content.json --video-dir /private/tmp/rift-content-video
-python3 tests/rift-live-resize-live-test.py --run --video --trace-file /private/tmp/rift-live-resize.jsonl
-python3 tests/rift-multi-resize-live-test.py --windows 2 --run --video --trace-file /private/tmp/rift-live-resize.jsonl
 ```
 
-The Qt fixtures default to Anki's bundled Python and PyQt6. Pass `--qt-python` and `--qt-packages` for another runtime. Start the daemon with `WM_LIVE_RESIZE_TRACE` pointing to the same JSONL file before compositor checks. Inspect the display recording and traces for every participant. Smooth native bounds alone do not establish smooth rendered content.
+The Qt fixtures default to Anki's bundled Python and PyQt6. Pass `--qt-python` and `--qt-packages` for another runtime. Inspect the retained content video as well as native geometry. Smooth native bounds alone do not establish smooth rendered content.
+
+The retained `rift-live-resize-live-test.py` and `rift-multi-resize-live-test.py` scripts describe the historical compositor implementation. They require compositor traces and do not validate the current native animation path. `WM_LIVE_RESIZE_TRACE` is no longer emitted by wm.
 
 For menu-bar changes, check native icon order, offscreen click-to-focus, workspace switching, overflow, and the wm controls menu. For Screen Zoom, cross a visible window boundary in both directions with Control released and stop immediately after crossing.

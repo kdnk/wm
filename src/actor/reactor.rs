@@ -545,7 +545,6 @@ impl Reactor {
         window_notify: Option<(crate::actor::window_notify::Sender, WindowTxStore)>,
         one_space: bool,
         native_motion_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
-        resize: crate::model::live_resize::Client,
     ) -> (ReactorHandle, oneshot::Receiver<()>) {
         let (events_tx, events) = actor::channel();
         let (ready_tx, ready_rx) = oneshot::channel();
@@ -568,7 +567,7 @@ impl Reactor {
         thread::Builder::new()
             .name("reactor".to_string())
             .spawn(move || {
-                Executor::run(Reactor::run(reactor, events, events_tx_clone, Some(resize)));
+                Executor::run(Reactor::run(reactor, events, events_tx_clone));
             })
             .unwrap();
         (ReactorHandle::new(events_tx, query_handle), ready_rx)
@@ -1108,15 +1107,9 @@ impl Reactor {
         )
     }
 
-    async fn run(
-        reactor: Reactor,
-        events: Receiver,
-        events_tx: Sender,
-        resize: Option<crate::model::live_resize::Client>,
-    ) {
+    async fn run(reactor: Reactor, events: Receiver, events_tx: Sender) {
         let (raise_manager_tx, raise_manager_rx) = actor::channel();
         let (animation_tx, animation_rx) = AnimationSender::channel();
-        animation_tx.set_resize_client(resize);
         let reactor = Rc::new(RefCell::new(reactor));
         let input_tx = {
             let mut reactor = reactor.borrow_mut();

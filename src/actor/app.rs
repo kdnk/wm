@@ -507,8 +507,6 @@ impl AppThreadHandle {
         let mut req = req;
         match &mut req {
             Request::SetWindowFrames(_, _, _, _, authority)
-            | Request::CommitResize(_, authority)
-            | Request::InspectResize(_, authority)
             | Request::BeginWindowAnimation(_, authority)
             | Request::EndWindowAnimation(_, authority) => {
                 *authority = self.frame_authority.clone()
@@ -627,10 +625,6 @@ pub enum Request {
     #[doc(hidden)]
     InteractiveFramesPending(InteractiveFrameQueue),
 
-    #[doc(hidden)]
-    CommitResize(crate::model::live_resize::Ticket, FrameAuthority),
-    #[doc(hidden)]
-    InspectResize(crate::model::live_resize::Ticket, FrameAuthority),
     BeginWindowAnimation(WindowId, FrameAuthority),
     EndWindowAnimation(WindowId, FrameAuthority),
     CancelWindowAnimation(WindowId, u64, FrameAuthority),
@@ -654,8 +648,6 @@ impl Request {
     pub(crate) fn authorized(self) -> Option<(Self, FrameAuthority)> {
         let authority = match &self {
             Self::SetWindowFrames(_, _, _, _, authority)
-            | Self::CommitResize(_, authority)
-            | Self::InspectResize(_, authority)
             | Self::BeginWindowAnimation(_, authority)
             | Self::EndWindowAnimation(_, authority)
             | Self::CancelWindowAnimation(_, _, authority) => authority.clone(),
@@ -834,7 +826,6 @@ impl FrameTarget for AXUIElement {
 struct AuthorizedFrameTarget<'a, T> {
     target: &'a T,
     authority: &'a FrameAuthority,
-    resize: Option<&'a crate::model::live_resize::Ticket>,
 }
 
 impl<T: FrameTarget> FrameTarget for AuthorizedFrameTarget<'_, T> {
@@ -843,7 +834,7 @@ impl<T: FrameTarget> FrameTarget for AuthorizedFrameTarget<'_, T> {
     fn frame(&self) -> Result<CGRect, AxError> { self.target.frame() }
 
     fn set_position(&self, origin: CGPoint) -> Result<(), AxError> {
-        if self.authority.is_current() && self.resize.is_none_or(|ticket| ticket.is_current()) {
+        if self.authority.is_current() {
             self.target.set_position(origin)
         } else {
             Ok(())
@@ -851,7 +842,7 @@ impl<T: FrameTarget> FrameTarget for AuthorizedFrameTarget<'_, T> {
     }
 
     fn set_size(&self, size: CGSize) -> Result<(), AxError> {
-        if self.authority.is_current() && self.resize.is_none_or(|ticket| ticket.is_current()) {
+        if self.authority.is_current() {
             self.target.set_size(size)
         } else {
             Ok(())
@@ -1338,7 +1329,6 @@ impl State {
             &AuthorizedFrameTarget {
                 target: &window.elem,
                 authority: &authority,
-                resize: None,
             },
             &mut window.last_known_frame,
             frame,
@@ -1560,7 +1550,6 @@ impl State {
                             &AuthorizedFrameTarget {
                                 target: &elem,
                                 authority: &authority,
-                                resize: None,
                             },
                             hint,
                             desired,
@@ -1583,65 +1572,6 @@ impl State {
                         Requested(true),
                         None,
                     ));
-                }
-            }
-            Request::InspectResize(ticket, _) => {
-                if !ticket.is_current() {
-                    return Ok(false);
-                }
-                pending_frames.remove(&ticket.plan().wid);
-                match self.window_mut(ticket.plan().wid).and_then(|window| window.elem.frame()) {
-                    Ok(frame) => {
-                        ticket.observed(frame);
-                        ticket.state().inspected = true;
-                        ticket.wake();
-                    }
-                    Err(_) => ticket.fallback(),
-                }
-            }
-            Request::CommitResize(ticket, _) => {
-                let plan = ticket.plan();
-                let wid = plan.wid;
-                if !ticket.is_current() {
-                    return Ok(false);
-                }
-                pending_frames.remove(&wid);
-                let (elem, hint) = match self.window_mut(wid) {
-                    Ok(window) => {
-                        window.last_seen_txid = plan.txid;
-                        (window.elem.clone(), window.last_known_frame)
-                    }
-                    Err(_) => {
-                        ticket.fallback();
-                        return Ok(false);
-                    }
-                };
-                let result = reconcile_frame(
-                    &AuthorizedFrameTarget {
-                        target: &elem,
-                        authority: &authority,
-                        resize: Some(&ticket),
-                    },
-                    hint,
-                    plan.to,
-                    FrameMode::Full,
-                    || {},
-                );
-                // AX can mutate geometry even when a setter reports failure.
-                let observed = elem.frame().ok().or_else(|| result.ok());
-                if let Some(frame) = observed {
-                    ticket.observed(frame);
-                    if let Ok(window) = self.window_mut(wid) {
-                        window.last_known_frame = frame;
-                        if ticket.is_current() {
-                            window.last_animation_frame = Some((frame, authority.clone()));
-                        }
-                    }
-                    if ticket.is_current() {
-                        ticket.accepted(frame);
-                    }
-                } else {
-                    ticket.fallback();
                 }
             }
             Request::BeginWindowAnimation(wid, _) => {
@@ -1754,7 +1684,6 @@ impl State {
                             &AuthorizedFrameTarget {
                                 target: &elem,
                                 authority: &authority,
-                                resize: None,
                             },
                             frame,
                             target,
@@ -3073,7 +3002,7 @@ mod frame_tests {
     }
 
     #[test]
-    fn live_resize_equal_frame_commit_acknowledges_without_geometry_setters() {
+    fn equal_frame_reconciliation_skips_geometry_setters() {
         let target = rect(10., 20., 1024., 800.);
         let window = FakeWindow {
             frame: Cell::new(target),
@@ -3088,56 +3017,6 @@ mod frame_tests {
         assert!(window.placements.borrow().is_empty());
     }
 
-    #[test]
-    fn live_resize_permit_fences_actual_frame_setters_after_retarget() {
-        use crate::model::live_resize::{Client, Plan};
-        let (tx, _rx) = actor::channel();
-        let client = Client::new(tx);
-        let (handle, _requests) = AppThreadHandle::channel();
-        let wid = WindowId::new(1, 1);
-        let from = rect(10., 20., 500., 600.);
-        let to = rect(10., 20., 900., 600.);
-        let plan = Plan {
-            wid,
-            window_id: 42,
-            display: 1,
-            handle,
-            txid: Default::default(),
-            from,
-            to,
-            duration: Duration::from_millis(300),
-        };
-        let old = client.prepare(plan.clone());
-        let next = client.prepare(Plan { to: from, ..plan });
-        let window = FakeWindow {
-            frame: Cell::new(from),
-            ..Default::default()
-        };
-        let authority = FrameAuthority::default();
-        let target = AuthorizedFrameTarget {
-            target: &window,
-            authority: &authority,
-            resize: Some(&old),
-        };
-        reconcile_frame(&target, from, to, FrameMode::Full, || {}).unwrap();
-        assert_eq!(window.frame.get(), from);
-        assert!(window.calls.borrow().iter().all(|call| *call == "frame"));
-        let target = AuthorizedFrameTarget {
-            target: &window,
-            authority: &authority,
-            resize: Some(&next),
-        };
-        target.set_size(to.size).unwrap();
-        assert_eq!(window.frame.get().size, to.size);
-        next.revoke();
-        target.set_position(CGPoint::new(700., 20.)).unwrap();
-        target.set_size(from.size).unwrap();
-        assert_eq!(
-            window.frame.get(),
-            to,
-            "revoked generation cannot make a subsequent AX write"
-        );
-    }
 
     #[test]
     fn stepped_sizes_keep_display_intersection_without_animation_reads() {
@@ -3152,7 +3031,6 @@ mod frame_tests {
             let target = AuthorizedFrameTarget {
                 target: &window,
                 authority: &authority,
-                resize: None,
             };
             let requested = rect(x, 1726., 997., 800.);
             let mut accepted =
@@ -3194,7 +3072,6 @@ mod frame_tests {
             let target = AuthorizedFrameTarget {
                 target: &window,
                 authority: &authority,
-                resize: None,
             };
             let mut accepted = window.frame.get();
             for width in [997., 1103., 733., 499., 900.] {
@@ -3235,11 +3112,7 @@ mod frame_tests {
             ..Default::default()
         };
         let authority = FrameAuthority(None, ScrollingDisplayBounds::for_screen(screen, &[]));
-        let target = AuthorizedFrameTarget {
-            target: &window,
-            authority: &authority,
-            resize: None,
-        };
+        let target = AuthorizedFrameTarget { target: &window, authority: &authority };
         let mut accepted = from;
         write_interactive_frame(&target, &mut accepted, to, true, FrameSource::Viewport);
         assert_eq!(accepted, to);
@@ -3261,11 +3134,7 @@ mod frame_tests {
             ..Default::default()
         };
         let authority = FrameAuthority(None, ScrollingDisplayBounds::for_screen(screen, &[]));
-        let target = AuthorizedFrameTarget {
-            target: &window,
-            authority: &authority,
-            resize: None,
-        };
+        let target = AuthorizedFrameTarget { target: &window, authority: &authority };
         let mut accepted = from;
         write_interactive_frame(&target, &mut accepted, to, true, FrameSource::Viewport);
         assert_eq!(accepted, to);
@@ -3297,7 +3166,6 @@ mod frame_tests {
         let target = AuthorizedFrameTarget {
             target: &window,
             authority: &authority,
-            resize: None,
         };
         let mut accepted = from;
         write_interactive_frame(
@@ -3349,7 +3217,6 @@ mod frame_tests {
         let fenced = AuthorizedFrameTarget {
             target: &window,
             authority: &authority,
-            resize: None,
         };
         write_interactive_frame(
             &fenced,

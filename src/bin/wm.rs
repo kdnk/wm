@@ -231,7 +231,6 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Wm."
     let (stack_line_tx, stack_line_rx) = wm::actor::channel();
     let (wnd_tx, wnd_rx) = wm::actor::channel();
     let window_tx_store = WindowTxStore::new();
-    let (resize_actor, resize_client) = wm::ui::live_resize::ResizeActor::new(mtm);
     let native_motion_active: std::sync::Arc<std::sync::atomic::AtomicBool> = Default::default();
     let (reactor, startup_ready) = Reactor::spawn(
         config.clone(),
@@ -244,7 +243,6 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Wm."
         Some((wnd_tx.clone(), window_tx_store.clone())),
         opt.one,
         native_motion_active.clone(),
-        resize_client,
     );
     let events_tx = reactor.sender();
 
@@ -421,7 +419,6 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Wm."
             supervise("menu", menu.run()),
             supervise("stack_line", stack_line.run()),
             supervise("window_notify", wn_actor.run()),
-            supervise("live_resize", resize_actor.run()),
             supervise("mc_native", mission_control_native.run()),
             async move {
                 if let Some(actor) = mission_control {

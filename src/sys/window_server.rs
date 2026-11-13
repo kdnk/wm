@@ -594,26 +594,6 @@ pub fn get_window(id: WindowServerId) -> Option<WindowServerInfo> {
     get_window_with_transient(id).map(|(info, _)| info)
 }
 
-pub(crate) fn window_ids_above(source: WindowServerId) -> Option<Vec<WindowServerId>> {
-    let list = CGWindowListCopyWindowInfo(
-        CGWindowListOption::OptionOnScreenAboveWindow
-            | CGWindowListOption::OptionIncludingWindow
-            | CGWindowListOption::ExcludeDesktopElements,
-        source.as_u32(),
-    )?;
-    let list: CFRetained<CFArray<CFDictionary<CFString, CFType>>> =
-        unsafe { CFRetained::cast_unchecked(list) };
-    let mut ids: Vec<_> = list
-        .iter()
-        .filter_map(|entry| get_num(&entry, unsafe { objc2_core_graphics::kCGWindowNumber }))
-        .filter_map(|id| u32::try_from(id).ok())
-        .map(WindowServerId::new)
-        .collect();
-    let source_index = ids.iter().position(|id| *id == source)?;
-    ids.truncate(source_index);
-    Some(ids)
-}
-
 fn get_num(dict: &CFDictionary<CFString, CFType>, key: &'static CFString) -> Option<i64> {
     dict.get(key)?.downcast::<CFNumber>().ok()?.as_i64()
 }

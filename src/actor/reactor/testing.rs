@@ -663,21 +663,6 @@ impl Apps {
                         }
                     });
                 }
-                Request::InspectResize(ticket, _) => {
-                    if ticket.is_current() {
-                        ticket.observed(self.windows.entry(ticket.plan().wid).or_default().frame);
-                        ticket.state().inspected = true;
-                    }
-                }
-                Request::CommitResize(ticket, _) => {
-                    if ticket.is_current() {
-                        let plan = ticket.plan();
-                        let window = self.windows.entry(plan.wid).or_default();
-                        window.last_seen_txid = plan.txid;
-                        window.frame = plan.to;
-                        ticket.accepted(window.frame);
-                    }
-                }
                 Request::BeginWindowAnimation(wid, _) => {
                     self.windows.entry(wid).or_default().animating = true;
                 }
