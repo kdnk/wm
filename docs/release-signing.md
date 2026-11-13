@@ -45,11 +45,18 @@ Tag creation and publication belong to the same workflow run. This avoids relyin
 
 Self-signing does not make the developer identity trusted by Apple. Users may need to approve the initial launch and must grant the Accessibility permission used by wm. Keeping the same certificate and identifiers avoids changing the signing identity during ordinary updates; permission behavior still needs to be checked on supported macOS versions.
 
+## Install a signed release
+
+Run `python3 scripts/install-release.py` from this checkout to download the latest release through GitHub CLI. Use `--version TAG` for a selected release or pass a local release archive. The installer compares the bundled certificate with `assets/release-signing.pem` and requires both binary identifiers and signatures to match the pinned certificate. It verifies every architecture before replacing installed files.
+
+The default prefix is `~/.local`. Executables go in `bin`, and the default configuration, public certificate, and licenses go in `share/wm/release`. The installer preserves user configuration and `share/wm/release-signing`. Failed replacements roll back to the previous files. If rollback also fails, the installer reports the retained backup directory. It does not change certificate trust, sign binaries, or operate the service. Stop wm before updating, then start wm with the installed executable.
+
 ## Test changes
 
 ```sh
 python3 tests/release-signing-setup-test.py
 python3 tests/release-workflow-test.py
+python3 tests/install-release-test.py
 ```
 
-The signing fixtures use real OpenSSL operations and a fake GitHub CLI. The release fixtures exercise planning, immutable tag creation, draft recovery, and publication with fake GitHub responses. They do not create real tags or releases, register secrets, change keychains or trust settings, or operate the wm service.
+The signing fixtures use real OpenSSL operations and a fake GitHub CLI. The release fixtures exercise planning, immutable tag creation, draft recovery, and publication with fake GitHub responses. Installer fixtures use isolated prefixes and fake download and signature commands, plus a real macOS rejection check for an unrelated binary. They do not create real tags or releases, register secrets, change keychains or trust settings, or operate the wm service.
