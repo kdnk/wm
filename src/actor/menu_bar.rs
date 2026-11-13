@@ -661,31 +661,37 @@ mod tests {
 
     #[test]
     fn menu_bar_publishes_latest_update_during_continuous_title_changes() {
+        use std::future::poll_fn;
+
         use crate::sys::executor::Executor;
         Executor::run(async {
             let mut pending = None;
             let mut timer = Timer::manual();
-            let mut changes =
-                Timer::repeating(Duration::from_millis(100), Duration::from_millis(100));
-            let mut timeout = Timer::sleep(Duration::from_millis(450));
             let mut generation = 0;
-            let last = update(vec![workspace("initial")]);
-            assert!(queue_update(Some(&last), &mut pending, &timer, last.clone()).is_none());
-            loop {
-                tokio::select! {
-                    _ = timer.next() => {
-                        assert!(generation >= 1);
-                        let shown = pending.take().unwrap();
-                        assert_eq!(shown.context_workspaces()[0].name, generation.to_string());
-                        break;
-                    }
-                    _ = changes.next() => {
-                        generation += 1;
-                        let mut changed = workspace("scrolling");
-                        changed.name = generation.to_string();
-                        assert!(queue_update(Some(&last), &mut pending, &timer, update(vec![changed])).is_none());
-                    }
-                    _ = &mut timeout => panic!("continuous updates starved menu publication"),
+            let mut last = update(vec![workspace("scrolling")]);
+            last.displays[0].workspaces[0].window_list.push(MenuWindow {
+                id: WindowId::new(1, 1),
+                app_name: "Editor".into(),
+                bundle_id: None,
+                title: "initial".into(),
+                focused: true,
+                layout_position: None,
+            });
+            tokio::select! {
+                biased;
+                _ = poll_fn(|cx| {
+                    generation += 1;
+                    let mut changed = last.clone();
+                    changed.displays[0].workspaces[0].window_list[0].title = generation.to_string();
+                    assert!(queue_update(Some(&last), &mut pending, &timer, changed).is_none());
+                    std::pin::pin!(timer.next()).poll(cx)
+                }) => {
+                    assert!(generation >= 2);
+                    let shown = pending.take().unwrap();
+                    assert_eq!(shown.context_workspaces()[0].window_list[0].title, generation.to_string());
+                }
+                _ = async { Timer::sleep(Duration::from_millis(450)).await } => {
+                    panic!("continuous updates starved menu publication")
                 }
             }
         });
