@@ -140,11 +140,21 @@ jobs:
           p12-file-base64: ${{ secrets.WM_SIGNING_P12 }}
           p12-password: ${{ secrets.WM_SIGNING_PASSWORD }}
 
+      - name: Verify pinned signing certificate
+        run: |
+          set -euo pipefail
+          openssl x509 -in assets/release-signing.pem -checkend 0 -noout
+          security find-certificate -c "wm Release Signing" -p signing_temp.keychain \
+            > "$RUNNER_TEMP/wm.crt"
+          expected=$(openssl x509 -in assets/release-signing.pem -noout -fingerprint -sha256)
+          actual=$(openssl x509 -in "$RUNNER_TEMP/wm.crt" -noout -fingerprint -sha256)
+          if [[ "$actual" != "$expected" ]]; then
+            echo "The imported signing identity differs from assets/release-signing.pem." >&2
+            exit 1
+          fi
+
       - name: Trust signing certificate
         run: |
-          security find-certificate -p signing_temp.keychain \
-            > "$RUNNER_TEMP/wm.crt"
-
           sudo security add-trusted-cert \
             -d -r trustRoot -p codeSign \
             -k /Library/Keychains/System.keychain \
@@ -162,11 +172,13 @@ jobs:
             signing_temp.keychain | grep -F "$SIGNER"
 
           codesign --force --timestamp=none \
+            --keychain signing_temp.keychain \
             --sign "$SIGNER" \
             --identifier git.kdnk.wm \
             dist/wm
 
           codesign --force --timestamp=none \
+            --keychain signing_temp.keychain \
             --sign "$SIGNER" \
             --identifier git.kdnk.wm.cli \
             dist/wm-cli
@@ -184,12 +196,13 @@ jobs:
           ASSET="${ASSET_BASENAME}-${VERSION}.tar.gz"
           test -s wm.default.toml
           cp wm.default.toml dist/wm.default.toml
+          cp assets/release-signing.pem dist/release-signing.pem
           mkdir -p dist/licenses/cgs
           cp LICENSE dist/licenses/wm-LICENSE
           cp NOTICE dist/licenses/wm-NOTICE
           cp cgs/LICENSE dist/licenses/cgs/LICENSE
           cp cgs/third-party/ProgressiveBlurHeader.LICENSE dist/licenses/cgs/ProgressiveBlurHeader.LICENSE
-          tar -C dist -czf "$ASSET" wm wm-cli wm.default.toml licenses
+          tar -C dist -czf "$ASSET" wm wm-cli wm.default.toml release-signing.pem licenses
           sha256=$(shasum -a 256 "$ASSET" | awk '{print $1}')
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "asset=${ASSET}" >> "$GITHUB_OUTPUT"

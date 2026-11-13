@@ -7,3 +7,5 @@
 - Desktop tests under `tests/rift-*-live-test.py` require a running matching daemon and macOS permissions. Native geometry tests alone do not prove composited content rendering; retain display video and daemon traces for live resize verification.
 - The fork's commands are `wm` and `wm-cli`. Keep Rift names in upstream attribution, archived import references, and historical verifier filenames.
 - Create dependent branches with `but branch new NAME --above BASE` so their changes can reference commits on the base branch.
+- Release signing uses the fixed identity prepared by `scripts/setup-release-signing.py` and pinned in `assets/release-signing.pem`. Restore the protected backup if local signing material is missing; do not generate a replacement for an established identity.
+- Run `python3 tests/release-signing-setup-test.py` after changing signing setup. Fixtures must not register live Secrets or change keychains or certificate trust.
