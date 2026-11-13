@@ -60,6 +60,14 @@ wm service start
 wm-cli query windows
 ```
 
+## Close a window
+
+```sh
+wm close-window
+```
+
+The command presses the focused window's native close button, including all its tabs. With the wm daemon running, it selects the next tiled neighbor after the window disappears, or the previous neighbor at the end. It also works without the daemon. `wm-cli execute window close` retains Command-W behavior for closing a tab.
+
 ## Verify changes
 
 ```sh

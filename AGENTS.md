@@ -12,3 +12,5 @@
 - Run `python3 tests/release-signing-setup-test.py` after changing signing setup. Fixtures must not register live Secrets or change keychains or certificate trust.
 - Run `python3 tests/release-workflow-test.py` after changing release automation. Keep verification, tag creation, and Release publication connected in one workflow; events generated with `GITHUB_TOKEN` do not start other ordinary workflows.
 - Reusable CI invoked by a release must use its pinned `source_sha` for checkout and concurrency so another version's verification cannot cancel it.
+- Run `python3 tests/install-release-test.py` after changing release installation. Keep archive/signature failures from replacing installed binaries; fixtures must not alter the real installation, service, signing material, keychains, or certificate trust.
+- `wm close-window` presses the native close button; `wm-cli execute window close` retains Command-W behavior. Run the `sys::close_window` and wm-client tests after changing close behavior, and use `tests/close-window-live-test.py` with its PID-and-title-checked fixture for native verification.

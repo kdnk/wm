@@ -19,7 +19,11 @@ The patches used Rift 0.8.1 at `b5cf5c7f7b9ffe7364377808df1ab1a4ecd24637`. This 
 
 The composited resize presentation imported from dot has been removed. Size changes use the native animation path from `macos-window-motion.patch`, including intermediate native sizes and velocity-preserving target changes. The exact-capture extension remains in the vendored [cgs sources](../cgs/README.fork.md) for source provenance. The root Cargo dependency uses the relative `cgs/` path. dispatchr remains fixed by `Cargo.lock` at `5b4054c472d1108ab6ac690db6ae6eb5b0f94e62`.
 
-Personal app rules, keyboard shortcuts, signing setup, installation wrappers, and the Swift close-window helper remain in dot. The native binary builds as `target/debug/wm`, and the client builds as `target/debug/wm-cli`. Service installation registers the current native executable. Configuration, state, IPC, and environment variables use the wm namespace. Existing dot installation wrappers still target the older patched Rift distribution and require a separate migration before they can install wm.
+Personal app rules and keyboard shortcuts live in dot under `config/wm`. The native binary builds as `target/debug/wm`, and the client builds as `target/debug/wm-cli`. Service installation registers the current native executable. Configuration, state, IPC, and environment variables use the wm namespace.
+
+`wm close-window` replaces dot's Swift close helper. It presses the native close button and optionally restores focus to a tiled neighbor after confirmed removal. The command also works without the wm daemon. `wm-cli execute window close` retains its Command-W behavior.
+
+`scripts/install-release.py` installs signed GitHub Actions releases in `~/.local/bin` and verifies both executables against the pinned release certificate. It replaces dot's build/sign/install entrypoint without local compilation, re-signing, certificate-trust changes, or service operations. Dot's four Rift bin commands are removed. Legacy patch sources and verifier fixtures remain in dot as historical material. See the [release installation instructions](../README.md#install-a-release).
 
 ## Build and verify
 
@@ -51,7 +55,7 @@ The comparison reconstructs the recorded source revisions and compares them with
 
 The live checks require a matching running daemon, Accessibility access, and a disposable scrolling workspace. The imported `tests/rift-*-test.py` filenames retain their historical names, while their commands and environment variables use wm. They default to `target/debug/wm-cli`; pass `--client` to use a different build or installation.
 
-Run only the checks relevant to the change:
+Run only the checks relevant to the change. For whole-window closing, build `cargo build --locked --example close-window-check` and run `python3 tests/close-window-live-test.py`. The verifier targets only its disposable two-tab fixture by PID and unique title.
 
 ```sh
 python3 tests/rift-settings-focus-live-test.py --app muse
