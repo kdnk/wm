@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 
 use super::*;
@@ -72,23 +73,15 @@ fn populate(system: &mut LayoutSystemKind) -> LayoutId {
 
 #[test]
 fn previews_match_committed_frames_for_every_layout_and_action() {
-    for mut system in [
-        LayoutSystemKind::Scrolling(ScrollingLayoutSystem::default()),
-    ] {
+    for mut system in [LayoutSystemKind::Scrolling(ScrollingLayoutSystem::default())] {
         let layout = populate(&mut system);
         verify_actions(&system, layout, w(4), w(2));
     }
 }
 
-
-
-
-
 #[test]
 fn move_drop_matches_keyboard_move_without_mutating_preview_source() {
-    for mut system in [
-        LayoutSystemKind::Scrolling(ScrollingLayoutSystem::default()),
-    ] {
+    for mut system in [LayoutSystemKind::Scrolling(ScrollingLayoutSystem::default())] {
         let layout = populate(&mut system);
         let before = format!("{system:?}");
         let mut preview = system.preview_clone().unwrap();
@@ -101,12 +94,6 @@ fn move_drop_matches_keyboard_move_without_mutating_preview_source() {
         assert_eq!(format!("{system:?}"), before);
     }
 }
-
-
-
-
-
-
 
 #[test]
 fn same_slot_edges_use_the_configured_center_action() {

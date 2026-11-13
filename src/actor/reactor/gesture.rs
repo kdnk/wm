@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 //! Paced consumption of cumulative physical motion; no layout preparation here.
 use std::time::{Duration, Instant};
 
@@ -97,10 +98,7 @@ impl Reactor {
                     return;
                 };
                 let LayoutSystemKind::Scrolling(system) =
-                    &mut engine.workspaces_mut()[workspace].layout_system
-                else {
-                    return;
-                };
+                    &mut engine.workspaces_mut()[workspace].layout_system;
                 if !system.begin_viewport_gesture(layout, Instant::now()) {
                     return;
                 }
@@ -157,10 +155,7 @@ impl Reactor {
         s.timestamp = sample.timestamp;
         s.applied = sample.total_x;
         let LayoutSystemKind::Scrolling(system) =
-            &mut self.layout_manager.layout_engine.workspaces_mut()[s.workspace].layout_system
-        else {
-            return;
-        };
+            &mut self.layout_manager.layout_engine.workspaces_mut()[s.workspace].layout_system;
         system.update_viewport_gesture_normalized(s.layout, delta, sample.timestamp);
     }
 
@@ -192,11 +187,10 @@ impl Reactor {
         if s.released {
             if cancelled {
                 let (workspace, layout) = (s.workspace, s.layout);
-                if let LayoutSystemKind::Scrolling(system) =
-                    &mut self.layout_manager.layout_engine.workspaces_mut()[workspace].layout_system
-                {
-                    system.cancel_viewport_gesture(layout);
-                }
+                let LayoutSystemKind::Scrolling(system) =
+                    &mut self.layout_manager.layout_engine.workspaces_mut()[workspace]
+                        .layout_system;
+                system.cancel_viewport_gesture(layout);
                 if s.visible(self) {
                     self.apply_viewport_frames();
                 }
@@ -221,7 +215,6 @@ impl Reactor {
         let excess =
             match &self.layout_manager.layout_engine.workspaces()[s.workspace].layout_system {
                 LayoutSystemKind::Scrolling(system) => system.gesture_overscroll(s.layout),
-                _ => 0.0,
             };
         // Samples are already inverted, so the overscroll is in strip space and
         // the workspace switch follows the strip's direction.
@@ -247,10 +240,7 @@ impl Reactor {
                 .layout_specific_animate_settings(s.context.space))
             .unwrap_or(self.config.settings.animate);
         let LayoutSystemKind::Scrolling(system) =
-            &mut self.layout_manager.layout_engine.workspaces_mut()[s.workspace].layout_system
-        else {
-            return;
-        };
+            &mut self.layout_manager.layout_engine.workspaces_mut()[s.workspace].layout_system;
         let release = if cancelled {
             system.cancel_viewport_gesture(s.layout);
             None
@@ -411,10 +401,7 @@ mod tests {
             .active_layout_for_space(space)
             .unwrap();
         let LayoutSystemKind::Scrolling(system) =
-            &mut r.layout_manager.layout_engine.workspaces_mut()[ws].layout_system
-        else {
-            panic!("scrolling layout");
-        };
+            &mut r.layout_manager.layout_engine.workspaces_mut()[ws].layout_system;
         system.select_window(layout, crate::actor::app::WindowId::new(1, 1));
         system.prepare_layout(
             layout,
@@ -441,10 +428,7 @@ mod tests {
             1,
             0,
             space,
-            (
-                true,
-                config.settings.layout.scrolling.gestures.fingers,
-            ),
+            (true, config.settings.layout.scrolling.gestures.fingers),
             settings,
             Duration::ZERO,
         )
@@ -557,18 +541,12 @@ mod tests {
         let (workspace, layout) = (session.workspace, session.layout);
         let offset = |r: &Reactor| {
             let LayoutSystemKind::Scrolling(s) =
-                &r.layout_manager.layout_engine.workspaces()[workspace].layout_system
-            else {
-                panic!("scrolling");
-            };
+                &r.layout_manager.layout_engine.workspaces()[workspace].layout_system;
             s.presentation(layout).unwrap().0.offset()
         };
         r.add_test_app(1);
         let LayoutSystemKind::Scrolling(system) =
-            &r.layout_manager.layout_engine.workspaces()[workspace].layout_system
-        else {
-            panic!("scrolling");
-        };
+            &r.layout_manager.layout_engine.workspaces()[workspace].layout_system;
         let frames: Vec<_> =
             crate::layout_engine::systems::scrolling::tests::presented_frames(system, layout)
                 .collect();
@@ -836,10 +814,7 @@ mod tests {
             let (workspace, layout) = (session.workspace, session.layout);
             let frames = |r: &Reactor| {
                 let LayoutSystemKind::Scrolling(system) =
-                    &r.layout_manager.layout_engine.workspaces()[workspace].layout_system
-                else {
-                    panic!("scrolling layout");
-                };
+                    &r.layout_manager.layout_engine.workspaces()[workspace].layout_system;
                 crate::layout_engine::systems::scrolling::tests::presented_frames(system, layout)
                     .collect::<Vec<_>>()
             };
@@ -870,7 +845,8 @@ mod tests {
         r.communication_manager.input_tx = Some(tx);
         r.notification_manager.last_scrolling_by_space.clear();
         r.update_event_tap_scrolling_availability();
-        let crate::actor::input::Request::ScrollingAvailabilityChanged(modes) = rx.try_recv().unwrap().1
+        let crate::actor::input::Request::ScrollingAvailabilityChanged(modes) =
+            rx.try_recv().unwrap().1
         else {
             panic!("gesture routing");
         };
@@ -893,10 +869,7 @@ mod tests {
                 (s.workspace, s.layout)
             };
             let LayoutSystemKind::Scrolling(system) =
-                &r.layout_manager.layout_engine.workspaces()[workspace].layout_system
-            else {
-                panic!("scrolling")
-            };
+                &r.layout_manager.layout_engine.workspaces()[workspace].layout_system;
             let initial: Vec<_> =
                 crate::layout_engine::systems::scrolling::tests::presented_frames(system, layout)
                     .collect();
@@ -991,10 +964,7 @@ mod tests {
                 (s.workspace, s.layout)
             };
             let LayoutSystemKind::Scrolling(system) =
-                &r.layout_manager.layout_engine.workspaces()[workspace].layout_system
-            else {
-                panic!("scrolling")
-            };
+                &r.layout_manager.layout_engine.workspaces()[workspace].layout_system;
             let initial: Vec<_> =
                 crate::layout_engine::systems::scrolling::tests::presented_frames(system, layout)
                     .collect();
@@ -1027,10 +997,7 @@ mod tests {
             });
             motion.publish(sample(1, 900.0, 120));
             let LayoutSystemKind::Scrolling(system) =
-                &mut r.layout_manager.layout_engine.workspaces_mut()[workspace].layout_system
-            else {
-                panic!("scrolling")
-            };
+                &mut r.layout_manager.layout_engine.workspaces_mut()[workspace].layout_system;
             if invalidate {
                 system.remove_layout(layout);
                 // Drain the preceding gesture wake before checking for stale release writes.

@@ -40,8 +40,6 @@ fn scrolling_display_widths_merge_and_validate() {
     );
 }
 
-
-
 #[test]
 fn virtual_workspace_prevent_wrapping_defaults_to_false_and_accepts_suggested_alias() {
     let defaults: VirtualWorkspaceSettings = toml::from_str("").unwrap();

@@ -9,7 +9,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use wm::actor::app::WindowId as InternalWindowId;
 use wm::actor::reactor::{self, DisplaySelector};
-use wm::common::config::{LayoutMode, WorkspaceSelector};
+use wm::common::config::WorkspaceSelector;
 use wm::ipc::WmMachClient;
 use wm::layout_engine as layout;
 use wm::sys::window_server::WindowServerId;
@@ -878,8 +878,6 @@ fn parse_event_kind(input: &str) -> Result<EventKind, String> {
         )),
     }
 }
-
-
 
 fn map_workspace_command(cmd: WorkspaceCommands) -> Result<CliCommand, String> {
     use layout::LayoutCommand as LC;

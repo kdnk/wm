@@ -15,10 +15,12 @@ use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
 impl Reactor {
-    pub fn new_for_test(layout: LayoutEngine) -> Reactor {
+    pub fn new_for_test(mut layout: LayoutEngine) -> Reactor {
         let mut config = Config::default();
         config.settings.default_disable = false;
         config.settings.animate = false;
+        config.settings.layout.scrolling.animate = Some(false);
+        layout.set_layout_settings(&config.settings.layout);
         let record = Record::new_for_test(tempfile::NamedTempFile::new().unwrap());
         let (broadcast_tx, _) = actor::channel();
         Reactor::new(config, layout, record, broadcast_tx, None, false)
@@ -637,7 +639,7 @@ impl Apps {
                                 window.frame,
                                 Some(txid),
                                 Requested(true),
-                                None,
+                                Some(super::MouseState::Up),
                             ));
                         }
                     }
@@ -658,7 +660,7 @@ impl Apps {
                                 window.frame,
                                 Some(txid),
                                 Requested(true),
-                                None,
+                                Some(super::MouseState::Up),
                             ));
                         }
                     });
@@ -677,7 +679,7 @@ impl Apps {
                         window.frame,
                         Some(window.last_seen_txid),
                         Requested(true),
-                        None,
+                        Some(super::MouseState::Up),
                     ));
                 }
                 Request::Raise(..) => todo!(),

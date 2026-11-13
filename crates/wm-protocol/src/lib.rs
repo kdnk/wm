@@ -17,8 +17,7 @@ mod selectors;
 mod transport;
 
 pub use commands::{
-    AnimationEasing, ConfigCommand, LayoutCommand,
-    MetricsCommand, ReactorCommand, WmCommand,
+    AnimationEasing, ConfigCommand, LayoutCommand, MetricsCommand, ReactorCommand, WmCommand,
 };
 pub use events::{EventKind, StackInfo, WmEvent, WorkspaceId};
 pub use layout::{

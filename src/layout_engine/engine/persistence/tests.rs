@@ -230,9 +230,7 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
     let settings = LayoutSettings::default();
 
     // Format: every layout system keeps its exact structure, in files of every age.
-    for (mode, tag) in [
-        (LayoutMode::Scrolling, "scrolling"),
-    ] {
+    for (mode, tag) in [(LayoutMode::Scrolling, "scrolling")] {
         let (mut engine, mut store) = fresh(&per_display, &[(a, "x")]);
         let id = ws(&engine, a, 0);
         [w1, w2, w3].iter().for_each(|w| open(&mut engine, &mut store, id, *w));
@@ -311,11 +309,12 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
         (vec![], vec![(first, w3, frame)]),
         (vec![w3], vec![(first, w3, frame)]),
     ] {
-        assert_rejected(&with_floating(engine.serialize_to_string(&store), &marked, &positions),
-            "floating window snapshots are no longer supported");
+        assert_rejected(
+            &with_floating(engine.serialize_to_string(&store), &marked, &positions),
+            "floating window snapshots are no longer supported",
+        );
     }
-    let file = engine.serialize_to_string(&store)
-    .replacen(
+    let file = engine.serialize_to_string(&store).replacen(
         r#""persisted_windows":{"#,
         &format!(r#""persisted_windows":{{{orphan},"#),
         1,

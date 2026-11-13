@@ -83,9 +83,9 @@ impl Settings {
         self.scroll.into_iter().chain(self.workspace).any(|a| a.fingers == fingers)
     }
 
-    fn action_for(self, mode: bool, fingers: usize) -> Option<ActionConfig> {
+    fn action_for(self, scrolling_available: bool, fingers: usize) -> Option<ActionConfig> {
         self.scroll
-            .filter(|a| mode && a.fingers == fingers)
+            .filter(|a| scrolling_available && a.fingers == fingers)
             .or_else(|| self.workspace.filter(|a| a.fingers == fingers))
     }
 }
@@ -245,9 +245,10 @@ impl Control {
             return None;
         }
         // CGEvent locations and ScreenInfo frames both use Quartz coordinates.
-        let &(_, space, mode) = r.screens.iter().find(|(frame, _, _)| frame.contains(point))?;
+        let &(_, space, scrolling_available) =
+            r.screens.iter().find(|(frame, _, _)| frame.contains(point))?;
         let settings = r.settings;
-        let action = settings.action_for(mode, fingers)?;
+        let action = settings.action_for(scrolling_available, fingers)?;
         r.next_session += 1;
         r.ui_session = r.next_session;
         Some(DeviceSession::new(
@@ -262,7 +263,7 @@ impl Control {
                 started: time,
             },
             settings,
-            mode,
+            scrolling_available,
         ))
     }
 
@@ -310,7 +311,7 @@ struct DeviceSession {
     lifting: Option<Duration>,
 }
 impl DeviceSession {
-    fn new(context: Context, settings: Settings, mode: bool) -> Self {
+    fn new(context: Context, settings: Settings, scrolling_available: bool) -> Self {
         let max_fingers = settings
             .scroll
             .map_or(0, |a| a.fingers)
@@ -318,7 +319,7 @@ impl DeviceSession {
         let alternate = if context.action.scrolling {
             settings.workspace
         } else {
-            settings.scroll.filter(|_| mode)
+            settings.scroll.filter(|_| scrolling_available)
         }
         .filter(|a| a.fingers != context.action.fingers);
         Self {
@@ -934,19 +935,27 @@ mod tests {
         config.settings.layout.scrolling.gestures.fingers = 3;
         let settings = Settings::new(&config);
         let control = Control::new(&config);
-        let mode = scrolling;
+        let scrolling_available = scrolling;
         control.configure(settings, true, Vec::new());
         let c = Context::new(
             1,
             0,
             SpaceId::new(10),
-            (mode, if scrolling { 3 } else { workspace_fingers }),
+            (
+                scrolling_available,
+                if scrolling { 3 } else { workspace_fingers },
+            ),
             settings,
             Duration::ZERO,
         )
         .unwrap();
         let (tx, rx) = crate::actor::channel();
-        (DeviceSession::new(c, settings, mode), control, tx, rx)
+        (
+            DeviceSession::new(c, settings, scrolling_available),
+            control,
+            tx,
+            rx,
+        )
     }
     #[test]
     fn continuous_motion_commits_once_and_topology_requires_full_lift() {

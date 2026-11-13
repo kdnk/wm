@@ -23,8 +23,8 @@ use super::window_list::{
 };
 use super::{
     BuiltStatusMenu, MenuActionHandler, MenuShortcuts, add_action_item, build_static_menu,
-    layout_library_files_in, rebuild_restore_menu, set_menu_item_checked,
-    set_menu_item_hotkey, workspace_menu_title,
+    layout_library_files_in, rebuild_restore_menu, set_menu_item_checked, set_menu_item_hotkey,
+    workspace_menu_title,
 };
 use crate::actor::menu_bar::DisplayWorkspaces;
 use crate::actor::wm_controller::WmCommand;

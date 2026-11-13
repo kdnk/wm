@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use objc2_core_foundation::{CGPoint, CGRect};
 use regex::{Regex, RegexBuilder};
 use tracing::warn;

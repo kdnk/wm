@@ -321,7 +321,8 @@ fn migrate_legacy_resize_command(command: &mut toml::Value) -> bool {
 }
 
 fn migrate_disabled_floating_rules(document: &mut toml::Value) {
-    if let Some(rules) = document.get_mut("virtual_workspaces")
+    if let Some(rules) = document
+        .get_mut("virtual_workspaces")
         .and_then(|value| value.get_mut("app_rules"))
         .and_then(toml::Value::as_array_mut)
     {

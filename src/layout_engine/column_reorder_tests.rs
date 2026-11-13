@@ -1,7 +1,9 @@
 // Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use super::*;
 use crate::common::config::VirtualWorkspaceSettings;
-use crate::layout_engine::{ColumnId, ColumnPlacement, ColumnReorderRequest};
+use crate::layout_engine::{
+    ColumnId, ColumnPlacement, ColumnReorderRequest, ScrollingLayoutSystem,
+};
 
 struct Fixture {
     engine: LayoutEngine,
@@ -105,10 +107,13 @@ fn reorder_rejects_deleted_column_and_reused_ids_with_different_members() {
         .engine
         .handle_event(&mut f.store, LayoutEvent::WindowRemoved(WindowId::new(1, 1)));
     assert!(!f.engine.reorder_column(request.clone()));
-    let layout = f.engine.workspaces_mut().workspaces[f.workspace].replace_layout_mode(LayoutMode::Scrolling, &LayoutSettings::default());
+    let mut system = ScrollingLayoutSystem::default();
+    let layout = system.create_layout();
+    assert_eq!(f.engine.workspaces[f.workspace].active_layout(), Some(layout));
     for index in 1..=3 {
-        f.engine.workspaces_mut().workspaces[f.workspace].layout_system.add_window_after_selection(layout, WindowId::new(2, index));
+        system.add_window_after_selection(layout, WindowId::new(2, index));
     }
+    f.engine.workspaces[f.workspace].layout_system = LayoutSystemKind::Scrolling(system);
     let current = f.request();
     assert_eq!(
         current.source, request.source,

@@ -6418,8 +6418,7 @@ impl Reactor {
         };
 
         let last_modes = &self.notification_manager.last_scrolling_by_space;
-        let mut modes: Vec<(SpaceId, bool)> =
-            Vec::with_capacity(self.space_state.screens.len());
+        let mut modes: Vec<(SpaceId, bool)> = Vec::with_capacity(self.space_state.screens.len());
         let mut changed = false;
 
         for screen in &self.space_state.screens {
@@ -6439,10 +6438,12 @@ impl Reactor {
             }
 
             let engine = &self.layout_manager.layout_engine;
-            let mode = engine.workspaces().active_layout_for_space(space).is_some_and(|(ws, layout)| {
-                let crate::layout_engine::LayoutSystemKind::Scrolling(system) = &engine.workspaces()[ws].layout_system;
-                system.viewport_gesture_available(layout)
-            });
+            let mode =
+                engine.workspaces().active_layout_for_space(space).is_some_and(|(ws, layout)| {
+                    let crate::layout_engine::LayoutSystemKind::Scrolling(system) =
+                        &engine.workspaces()[ws].layout_system;
+                    system.viewport_gesture_available(layout)
+                });
             if last_modes.get(&space).copied() != Some(mode) {
                 changed = true;
             }

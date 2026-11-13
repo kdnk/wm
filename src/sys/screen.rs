@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::cmp::Ordering;
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
@@ -14,13 +15,15 @@ use objc2_foundation::{MainThreadMarker, NSArray, NSNumber, ns_string};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
+#[cfg(not(test))]
+use super::skylight::SLSGetSpaceManagementMode;
 use super::skylight::{
     CFRelease, CFUUIDCreateFromString, CFUUIDCreateString, CGDisplayCreateUUIDFromDisplayID,
     CGDisplayGetDisplayIDFromUUID, CGSCopyBestManagedDisplayForRect, CGSCopyManagedDisplaySpaces,
     CGSCopyManagedDisplays, CGSCopySpaces, CGSGetActiveSpace, CGSManagedDisplayGetCurrentSpace,
     CGSSpaceMask, CoreDockGetAutoHideEnabled, CoreDockGetOrientationAndPinning,
     SLSCopyActiveMenuBarDisplayIdentifier, SLSGetDisplayMenubarHeight, SLSGetDockRectWithReason,
-    SLSGetMenuBarAutohideEnabled, SLSGetSpaceManagementMode,
+    SLSGetMenuBarAutohideEnabled,
 };
 use crate::common::collections::HashMap;
 use crate::sys::geometry::CGRectDef;
@@ -708,6 +711,10 @@ pub fn current_space_for_display_uuid(display_uuid: &str) -> Option<SpaceId> {
     }
 }
 
+#[cfg(test)]
+pub fn displays_have_separate_spaces() -> bool { true }
+
+#[cfg(not(test))]
 pub fn displays_have_separate_spaces() -> bool {
     unsafe { SLSGetSpaceManagementMode(main_connection()) == 1 }
 }

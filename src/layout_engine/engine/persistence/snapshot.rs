@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::collections::btree_map::Entry as BTreeEntry;
 use std::collections::hash_map::Entry;
 

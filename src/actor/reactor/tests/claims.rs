@@ -72,10 +72,7 @@ fn claim_detaches_without_destroying_and_release_restores_the_slot() {
     assert_eq!(reactor.claim_window(wid(2), OWNER, NONE), Ok(()));
     apps.simulate_until_quiet(&mut reactor);
     assert_eq!(tiled(&mut reactor, space), vec![wid(1), wid(3)]);
-    assert!(
-        apps.windows[&wid(1)].frame.size.width > parked.size.width,
-        "siblings reflow"
-    );
+    assert_eq!(apps.windows[&wid(1)].frame.size.width, parked.size.width);
     assert_eq!(
         apps.windows[&wid(2)].frame,
         parked,
@@ -725,4 +722,3 @@ fn claimed_tiled_window_keeps_its_slot_through_minimize_and_admission_changes() 
     assert_eq!(tiled(&mut reactor, space), before);
     reactor.state.windows.debug_assert_invariants();
 }
-

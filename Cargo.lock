@@ -83,12 +83,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f0e0fee31ef5ed1ba1316088939cea399010ed7731dba877ed44aeb407a75ea"
 
 [[package]]
-name = "ascii_tree"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca6c635b3aa665c649ad1415f1573c85957dfa47690ec27aebe7ec17efe3c643"
-
-[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1327,84 +1321,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a96887878f22d7bad8a3b6dc5b7440e0ada9a245242924394987b21cf2210a4c"
 
 [[package]]
-name = "wm-client"
-version = "0.1.0"
-dependencies = [
- "ctrlc",
- "wm-protocol",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "wm-protocol"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "wm"
-version = "0.8.1"
-dependencies = [
- "anyhow",
- "ascii_tree",
- "bitflags 2.11.0",
- "block2",
- "cgs",
- "clap",
- "crossbeam-channel",
- "dashmap",
- "dirs",
- "dispatchr",
- "embed_plist",
- "enum_dispatch",
- "multitouch",
- "nix 0.30.1",
- "notify",
- "num_enum",
- "objc2",
- "objc2-app-kit",
- "objc2-application-services",
- "objc2-core-foundation",
- "objc2-core-graphics",
- "objc2-core-text",
- "objc2-foundation",
- "objc2-quartz-core",
- "once_cell",
- "parking_lot",
- "pretty_assertions",
- "regex",
- "wm-client",
- "wm-protocol",
- "ron",
- "rustc-hash",
- "serde",
- "serde_json",
- "serde_with",
- "sigpipe",
- "slotmap",
- "static_assertions",
- "strum",
- "strum_macros",
- "tempfile",
- "test-log",
- "test_bin",
- "thiserror",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "toml",
- "toml_edit",
- "tracing",
- "tracing-subscriber",
- "tracing-timing",
- "tracing-tree",
-]
-
-[[package]]
 name = "ron"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2224,6 +2140,83 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a5364e9d77fcdeeaa6062ced926ee3381faa2ee02d3eb83a5c27a8825540829"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "wm"
+version = "0.8.1"
+dependencies = [
+ "anyhow",
+ "bitflags 2.11.0",
+ "block2",
+ "cgs",
+ "clap",
+ "crossbeam-channel",
+ "dashmap",
+ "dirs",
+ "dispatchr",
+ "embed_plist",
+ "enum_dispatch",
+ "multitouch",
+ "nix 0.30.1",
+ "notify",
+ "num_enum",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-application-services",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-core-text",
+ "objc2-foundation",
+ "objc2-quartz-core",
+ "once_cell",
+ "parking_lot",
+ "pretty_assertions",
+ "regex",
+ "ron",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "sigpipe",
+ "slotmap",
+ "static_assertions",
+ "strum",
+ "strum_macros",
+ "tempfile",
+ "test-log",
+ "test_bin",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "toml",
+ "toml_edit",
+ "tracing",
+ "tracing-subscriber",
+ "tracing-timing",
+ "tracing-tree",
+ "wm-client",
+ "wm-protocol",
+]
+
+[[package]]
+name = "wm-client"
+version = "0.1.0"
+dependencies = [
+ "ctrlc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "wm-protocol",
+]
+
+[[package]]
+name = "wm-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

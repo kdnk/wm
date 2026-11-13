@@ -1,14 +1,9 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use serde::{Deserialize, Serialize};
 
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::{BTreeExt, BTreeSet, HashMap, HashSet};
 use crate::sys::screen::SpaceId;
-
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FloatingFullscreenKind {
-    Full,
-    WithinGaps,
-}
 
 #[derive(Serialize, Deserialize, Default)]
 pub(crate) struct FloatingManager {
@@ -16,8 +11,6 @@ pub(crate) struct FloatingManager {
     #[serde(skip)]
     active_floating_windows: HashMap<SpaceId, HashMap<pid_t, HashSet<WindowId>>>,
     last_floating_focus: Option<WindowId>,
-    #[serde(skip)]
-    fullscreen_windows: HashMap<WindowId, FloatingFullscreenKind>,
 }
 
 impl FloatingManager {
@@ -51,30 +44,10 @@ impl FloatingManager {
 
     pub(crate) fn remove_floating(&mut self, window_id: WindowId) {
         self.floating_windows.remove(&window_id);
-        self.fullscreen_windows.remove(&window_id);
         self.remove_active_entries(window_id);
         if self.last_floating_focus == Some(window_id) {
             self.last_floating_focus = None;
         }
-    }
-
-    pub(crate) fn set_fullscreen(
-        &mut self,
-        window_id: WindowId,
-        kind: Option<FloatingFullscreenKind>,
-    ) {
-        match kind {
-            Some(k) => {
-                self.fullscreen_windows.insert(window_id, k);
-            }
-            None => {
-                self.fullscreen_windows.remove(&window_id);
-            }
-        }
-    }
-
-    pub(crate) fn fullscreen_kind(&self, window_id: WindowId) -> Option<FloatingFullscreenKind> {
-        self.fullscreen_windows.get(&window_id).copied()
     }
 
     pub(crate) fn add_active(&mut self, space: SpaceId, pid: pid_t, wid: WindowId) {
@@ -84,17 +57,6 @@ impl FloatingManager {
             .entry(pid)
             .or_default()
             .insert(wid);
-    }
-
-    pub(crate) fn remove_active(&mut self, space: SpaceId, pid: pid_t, wid: WindowId) {
-        if let Some(space_map) = self.active_floating_windows.get_mut(&space) {
-            if let Some(app_set) = space_map.get_mut(&pid) {
-                app_set.remove(&wid);
-                if app_set.is_empty() {
-                    space_map.remove(&pid);
-                }
-            }
-        }
     }
 
     pub(crate) fn remove_active_for_window(&mut self, window_id: WindowId) {
@@ -107,18 +69,12 @@ impl FloatingManager {
         }
 
         // Identity transfer is replacement, not union. `to` may already have provisional live
-        // state while `from` carries restored state. Keeping both lets stale floating/fullscreen
+        // state while `from` carries restored state. Keeping both lets stale floating
         // flags survive reconciliation and disagree with the restored workspace tree.
         let was_floating = self.floating_windows.remove(&from);
         self.floating_windows.remove(&to);
         if was_floating {
             self.floating_windows.insert(to);
-        }
-
-        let fullscreen = self.fullscreen_windows.remove(&from);
-        self.fullscreen_windows.remove(&to);
-        if let Some(k) = fullscreen {
-            self.fullscreen_windows.insert(to, k);
         }
 
         let active_spaces: Vec<_> = self
@@ -156,8 +112,6 @@ impl FloatingManager {
 
     pub(crate) fn remove_all_for_pid(&mut self, pid: pid_t) {
         let _ = self.floating_windows.remove_all_for_pid(pid);
-
-        self.fullscreen_windows.retain(|w, _| w.pid != pid);
 
         for space_map in self.active_floating_windows.values_mut() {
             space_map.remove(&pid);
@@ -225,13 +179,11 @@ mod tests {
         let space = SpaceId::new(3);
 
         floating.add_floating(provisional_live);
-        floating.set_fullscreen(provisional_live, Some(FloatingFullscreenKind::Full));
         floating.add_active(space, provisional_live.pid, provisional_live);
 
         floating.transfer_window_identity(restored_tiled, provisional_live);
 
         assert!(!floating.is_floating(provisional_live));
-        assert_eq!(floating.fullscreen_kind(provisional_live), None);
         assert!(!floating.active_flat(space).contains(&provisional_live));
     }
 }

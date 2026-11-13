@@ -15,7 +15,7 @@ use crate::common::config::{
 use crate::common::log::trace_misc;
 use crate::layout_engine::systems::LayoutSystemKind;
 use crate::layout_engine::workspaces::WorkspaceLayoutState;
-use crate::layout_engine::{Direction, LayoutId, LayoutSystem};
+use crate::layout_engine::{Direction, LayoutId};
 use crate::model::WindowStore;
 use crate::model::app_rules::{AppRuleDecision, AppRuleEffects, AppRuleRejection, AppRuleResult};
 use crate::sys::screen::SpaceId;
@@ -202,18 +202,6 @@ impl VirtualWorkspace {
 
     pub(crate) fn ensure_layout_for_size(&mut self, size: CGSize) {
         self.layout_state.ensure_active(size, &mut self.layout_system);
-    }
-
-    pub(crate) fn replace_layout_mode(
-        &mut self,
-        mode: LayoutMode,
-        settings: &LayoutSettings,
-    ) -> LayoutId {
-        self.layout_mode = mode;
-        self.layout_system = Self::create_layout_system(mode, settings);
-        let layout = self.layout_system.create_layout();
-        self.layout_state.replace(layout);
-        layout
     }
 
     pub fn layout_mode(&self) -> LayoutMode { self.layout_mode }
@@ -2106,7 +2094,6 @@ mod tests {
             transient_ws
         ));
 
-        manager[migrated_ws].replace_layout_mode(LayoutMode::Scrolling, &LayoutSettings::default());
         manager[migrated_ws].ensure_layout_for_size(CGSize::new(1200.0, 800.0));
         let first = manager[migrated_ws].active_layout();
         manager[migrated_ws].ensure_layout_for_size(CGSize::new(1600.0, 1000.0));
@@ -2565,7 +2552,6 @@ mod tests {
 
         let mut manager = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
 
-        // 1. Floating persistence via app_id (case-insensitive)
         let w_float = WindowId::new(10, 1);
         let assignment = assign(
             &mut manager,
@@ -2578,11 +2564,10 @@ mod tests {
             None,
             None,
         );
-        assert!(assignment.floating);
+        assert!(!assignment.floating);
 
         manager.remove_window(&mut window_store, w_float);
 
-        // After removal, reassign should still float.
         let assignment_again = assign(
             &mut manager,
             &mut window_store,
@@ -2594,7 +2579,7 @@ mod tests {
             None,
             None,
         );
-        assert!(assignment_again.floating);
+        assert!(!assignment_again.floating);
 
         // 2. Match by app_name
         let w_name = WindowId::new(20, 2);
@@ -2659,7 +2644,7 @@ mod tests {
             Some("AXWindow"),
             Some("AXDialog"),
         );
-        assert!(ax_assignment.floating);
+        assert!(!ax_assignment.floating);
 
         // 5. Workspace name resolution
         let w_named = WindowId::new(50, 6);
@@ -2708,7 +2693,7 @@ mod tests {
         let expected_updated = manager.list_workspaces(space2).get(3).unwrap().0;
         assert_eq!(bw2_initial_assignment.workspace_id, expected_initial);
         assert_eq!(bw2_updated_assignment.workspace_id, expected_updated);
-        assert!(bw2_updated_assignment.floating);
+        assert!(!bw2_updated_assignment.floating);
     }
 
     #[test]

@@ -335,9 +335,7 @@ impl VirtualWorkspaceSettings {
             }
 
             if rule.manage == Some(false)
-                && (rule.workspace.is_some()
-                    || rule.size.is_some()
-                    || rule.focus)
+                && (rule.workspace.is_some() || rule.size.is_some() || rule.focus)
             {
                 issues.push(format!(
                     "App rule {} sets manage = false, so its workspace, size, and focus effects are ignored",
@@ -918,8 +916,6 @@ fn default_drop_zone_fraction() -> f64 { 0.25 }
 
 fn default_mouse_action_none() -> MouseAction { MouseAction::None }
 
-
-
 fn default_scrolling_column_width_ratio() -> f64 { 0.7 }
 fn default_scrolling_preset_column_widths() -> Vec<f64> { vec![1.0 / 3.0, 0.5, 2.0 / 3.0] }
 
@@ -1167,10 +1163,6 @@ pub struct GapOverride {
     pub inner: Option<InnerGaps>,
 }
 
-
-
-
-
 impl Settings {
     pub fn validate(&self) -> Vec<String> {
         let mut issues = Vec::new();
@@ -1232,8 +1224,6 @@ impl LayoutSettings {
 
     pub fn validate(&self) -> Vec<String> {
         let mut issues = Vec::new();
-
-
 
         issues.extend(self.gaps.validate());
 
@@ -1318,10 +1308,6 @@ impl ScrollingLayoutSettings {
     }
 }
 
-
-
-
-
 impl GapSettings {
     pub fn validate(&self) -> Vec<String> {
         let mut issues = Vec::new();
@@ -1393,12 +1379,9 @@ impl InnerGaps {
 
 fn yes() -> bool { true }
 
-
 pub fn default_stack_orientation() -> StackDefaultOrientation {
     StackDefaultOrientation::Perpendicular
 }
-
-
 
 fn default_animation_duration() -> f64 { 0.3 }
 

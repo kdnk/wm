@@ -338,9 +338,7 @@ pub use scrolling::{ScrollingLayoutSystem, ViewportRelease};
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        LayoutSystem, ScrollingLayoutSystem, WindowLayoutConstraints,
-    };
+    use super::{LayoutSystem, ScrollingLayoutSystem, WindowLayoutConstraints};
     use crate::actor::app::WindowId;
     use crate::common::config::{ScrollingLayoutSettings, WindowInsertionPoint};
 
@@ -518,22 +516,14 @@ mod participation_tests {
 
     #[test]
     fn suspended_members_preserve_slots_and_geometry_in_every_backend() {
-        let mut systems = [
-            LayoutSystemKind::Scrolling(Default::default()),
-        ];
+        let mut systems = [LayoutSystemKind::Scrolling(Default::default())];
         let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1200.0, 800.0));
         let constraints = HashMap::default();
         let mut gaps = crate::common::config::GapSettings::default();
         gaps.inner.horizontal = 16.0;
         gaps.inner.vertical = 12.0;
-        for (system, mode) in systems.iter_mut().zip([
-            "traditional",
-            "bsp",
-            "stack",
-            "master_stack",
-            "scrolling",
-            "floating",
-        ]) {
+        for system in &mut systems {
+            let mode = "scrolling";
             let layout = system.create_layout();
             let frames = |system: &mut LayoutSystemKind| {
                 system.prepare_layout(layout, screen, &constraints, &gaps);
@@ -567,13 +557,6 @@ mod participation_tests {
                 vec![windows[0]],
                 "{mode}"
             );
-            if mode != "scrolling" && mode != "floating" {
-                assert_eq!(
-                    projected[0].1,
-                    crate::layout_engine::utils::compute_tiling_area(screen, &gaps),
-                    "{mode}: an inactive subtree cannot reserve geometry"
-                );
-            }
             for index in [2, 1, 3] {
                 system.set_window_participation(windows[index], true);
             }

@@ -117,7 +117,7 @@ fn menu_layout_command_uses_origin_display_and_rejects_hidden_native_space() {
     assert_eq!(outcome.arrange.passes, 0);
 }
 
-fn active_menu_windows(mode: LayoutMode, animated: bool) -> (Apps, Reactor, SpaceId) {
+fn active_menu_windows(_mode: LayoutMode, animated: bool) -> (Apps, Reactor, SpaceId) {
     let (mut apps, mut reactor) = test_context();
     let space = SpaceId::new(1);
     reactor.config.settings.layout.scrolling.column_width_ratio = 1.0;
@@ -134,7 +134,7 @@ fn active_menu_windows(mode: LayoutMode, animated: bool) -> (Apps, Reactor, Spac
     let focused = WindowId::new(1, 2);
     reactor.handle_events(apps.make_app_with_opts(1, make_windows(3), Some(focused), true, true));
     reactor.handle_event(Event::ApplicationGloballyActivated(1));
-    reactor.send_layout_event(layout::LayoutEvent::WindowFocused(space, focused));
+    reactor.handle_event(Event::WindowServerFocusChanged(focused, space));
     apps.simulate_until_quiet(&mut reactor);
     (apps, reactor, space)
 }

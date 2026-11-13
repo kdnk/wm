@@ -13,8 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{
-    GapSettings, ScrollingAlignment, ScrollingLayoutSettings,
-    WindowInsertionPoint,
+    GapSettings, ScrollingAlignment, ScrollingLayoutSettings, WindowInsertionPoint,
 };
 use crate::layout_engine::systems::constraints::{AxisConstraints, solve_axis_lengths};
 use crate::layout_engine::systems::{
@@ -542,7 +541,7 @@ impl Geometry {
         self.columns.iter().find(|c| c.id == id).copied()
     }
 
-    fn snap_points(&self, settings: &ScrollingLayoutSettings) -> Vec<SnapPoint> {
+    fn snap_points(&self, _settings: &ScrollingLayoutSettings) -> Vec<SnapPoint> {
         let Some(first) = self.columns.first() else {
             return Vec::new();
         };
@@ -942,7 +941,7 @@ impl LayoutState {
         true
     }
 
-    fn reveal(&mut self, settings: &ScrollingLayoutSettings) {
+    fn reveal(&mut self, _settings: &ScrollingLayoutSettings) {
         let Some(g) = &self.geometry else {
             return;
         };
@@ -1404,13 +1403,15 @@ impl ScrollingLayoutSystem {
         layout: LayoutId,
         projected: f64,
         velocity: f64,
-        gesture_release: bool,
+        _gesture_release: bool,
     ) -> Option<ViewportRelease> {
         let state = self.layouts.get_mut(layout)?;
         let g = state.geometry.as_ref()?;
         let from_offset = state.viewport.offset();
         let snap = g.snaps.iter().min_by(|a, b| {
-            (a.offset - projected).abs().total_cmp(&(b.offset - projected).abs())
+            (a.offset - projected)
+                .abs()
+                .total_cmp(&(b.offset - projected).abs())
                 .then_with(|| a.offset.total_cmp(&b.offset))
         })?;
         let mut index = snap.column;
@@ -3300,8 +3301,6 @@ pub(crate) mod tests {
         }
     }
 
-
-
     #[test]
     fn gesture_changes_focus_only_once_after_lift() {
         for (start, travel, target, window) in [
@@ -3370,9 +3369,7 @@ pub(crate) mod tests {
 
     #[test]
     fn release_respects_navigation_style_and_preserves_flick_momentum() {
-        for style in [
-            ScrollingFocusNavigationStyle::Niri,
-        ] {
+        for style in [ScrollingFocusNavigationStyle::Niri] {
             for ((distance, speed), target) in [
                 (240.0, 75.0),
                 (300.0, 75.0),

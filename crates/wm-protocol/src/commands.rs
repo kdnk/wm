@@ -6,8 +6,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 use crate::{
-    Direction, DisplaySelector, LayoutMode, ResizeOrientation, RestoreScope, RestoreSource,
-    WindowId, WorkspaceSelector,
+    Direction, DisplaySelector, ResizeOrientation, RestoreScope, RestoreSource, WindowId,
+    WorkspaceSelector,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

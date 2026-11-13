@@ -69,9 +69,7 @@ pub(crate) struct WindowDropRequest {
     pub action: WindowDropAction,
 }
 pub(crate) use systems::LayoutId;
-pub use systems::{
-    LayoutSystem, LayoutSystemKind, ScrollingLayoutSystem,
-};
+pub use systems::{LayoutSystem, LayoutSystemKind, ScrollingLayoutSystem};
 
 pub use crate::model::virtual_workspace::{VirtualWorkspaceId, WorkspaceStore};
 

@@ -555,8 +555,8 @@ impl Reactor {
                 .workspaces_mut()
                 .workspaces
                 .get_mut(identity.workspace)
-                && let LayoutSystemKind::Scrolling(system) = &mut ws.layout_system
             {
+                let LayoutSystemKind::Scrolling(system) = &mut ws.layout_system;
                 system.commit_presented_viewport(identity.layout, &state.viewport);
             }
             for &wid in &camera.windows {
@@ -658,10 +658,7 @@ impl Reactor {
         let (workspace, layout) =
             self.layout_manager.layout_engine.workspaces().active_layout_for_space(space)?;
         let LayoutSystemKind::Scrolling(system) =
-            &self.layout_manager.layout_engine.workspaces()[workspace].layout_system
-        else {
-            return None;
-        };
+            &self.layout_manager.layout_engine.workspaces()[workspace].layout_system;
         let (mut presentation, frames) = system.presentation(layout)?;
         let previous = self.presentations.remove(&space).and_then(|p| p.headless);
         let gesture = gesture.or_else(|| {
@@ -764,11 +761,6 @@ fn scrolling_bounds(
     reactor: &Reactor,
     space: SpaceId,
 ) -> Option<super::managers::ScrollingDisplayBounds> {
-    if reactor.layout_manager.layout_engine.active_layout_mode_at(space)
-        != crate::common::config::LayoutMode::Scrolling
-    {
-        return None;
-    }
     let screen = reactor.space_state.screen_by_space(space)?;
     let screens: Vec<_> = reactor.space_state.screens.iter().map(|s| s.frame).collect();
     super::managers::ScrollingDisplayBounds::for_screen(screen.frame, &screens)
@@ -2682,7 +2674,6 @@ mod tests {
 
         use super::super::testing::*;
         use super::super::{Command, Event, ReactorCommand};
-        use crate::layout_engine::LayoutCommand;
 
         let (mut apps, mut reactor) = test_context();
         let spaces = [SpaceId::new(1), SpaceId::new(2)];

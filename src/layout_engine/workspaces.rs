@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use objc2_core_foundation::CGSize;
 use serde::{Deserialize, Serialize};
 
@@ -94,14 +95,6 @@ impl WorkspaceLayoutState {
         }
         self.layout.get_or_insert_with(|| tree.create_layout());
         self.active_size = size.into();
-    }
-
-    pub(crate) fn replace(&mut self, layout: LayoutId) {
-        if self.layout.is_none() {
-            self.active_size = Size::from(CGSize::new(1000.0, 1000.0));
-        }
-        self.layout = Some(layout);
-        self.obsolete.clear();
     }
 
     pub(crate) fn validate(&self, tree: &impl LayoutSystem) -> Result<(), String> {

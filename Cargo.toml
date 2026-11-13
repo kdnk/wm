@@ -67,7 +67,6 @@ disable-axuielement-destroyed = []
 [dependencies]
 cgs = { version = "0.5.2", path = "cgs" }
 anyhow = { version = "1.0.83", default-features = false }
-ascii_tree = "0.1.1"
 thiserror = { version = "2.0.17", default-features = false }
 bitflags = "2.4.1"
 block2 = { version = "0.6.2", default-features = false, features = ["alloc"] }

@@ -48,9 +48,7 @@ pub fn handle_command_layout(
     let is_selection_command = matches!(cmd, LayoutCommand::Ascend | LayoutCommand::Descend);
     let is_focus_command = matches!(
         cmd,
-        LayoutCommand::NextWindow
-            | LayoutCommand::PrevWindow
-            | LayoutCommand::MoveFocus(_)
+        LayoutCommand::NextWindow | LayoutCommand::PrevWindow | LayoutCommand::MoveFocus(_)
     );
     let (is_virtual_workspace_command, is_workspace_switch, requires_workspace_space) = match cmd {
         LayoutCommand::NextWorkspace(_)
@@ -58,9 +56,7 @@ pub fn handle_command_layout(
         | LayoutCommand::SwitchToWorkspace(_)
         | LayoutCommand::SwitchToLastWorkspace => (true, true, true),
         LayoutCommand::MoveWindowToWorkspace { follow, .. } => (true, follow, follow),
-        LayoutCommand::CreateWorkspace => {
-            (true, false, true)
-        }
+        LayoutCommand::CreateWorkspace => (true, false, true),
         _ => (false, false, false),
     };
     let workspace_space = if requires_workspace_space {

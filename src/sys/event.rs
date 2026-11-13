@@ -4,9 +4,10 @@ use std::convert::TryFrom;
 use objc2_core_foundation::CGPoint;
 use objc2_core_graphics::{
     CGAssociateMouseAndMouseCursorPosition, CGDisplayHideCursor, CGDisplayShowCursor, CGError,
-    CGEvent, CGEventField, CGEventFlags, CGEventSource, CGEventSourceStateID, CGMouseButton,
-    kCGNullDirectDisplay,
+    CGEvent, CGEventField, CGEventFlags, CGEventSourceStateID, kCGNullDirectDisplay,
 };
+#[cfg(not(test))]
+use objc2_core_graphics::{CGEventSource, CGMouseButton};
 use serde::{Deserialize, Serialize};
 
 pub use super::window_server::current_cursor_location;
@@ -43,6 +44,10 @@ impl TryFrom<u8> for MouseState {
     }
 }
 
+#[cfg(test)]
+pub fn get_mouse_state() -> Option<MouseState> { Some(MouseState::Up) }
+
+#[cfg(not(test))]
 pub fn get_mouse_state() -> Option<MouseState> {
     let down =
         CGEventSource::button_state(CGEventSourceStateID::HIDSystemState, CGMouseButton::Left)

@@ -594,10 +594,6 @@ fn as_any_object<T: Message>(obj: &T) -> &AnyObject {
     unsafe { &*(obj as *const T as *const AnyObject) }
 }
 
-
-
-
-
 type MenuCallback = fn(&MenuActionHandler, Option<&NSMenuItem>);
 
 fn make_menu(mtm: MainThreadMarker, title: &str) -> Rc<Menu> {
@@ -1026,7 +1022,6 @@ impl MenuActionHandler {
 
     fn emit(&self, action: MenuAction) {
         let action = match (self.space, action) {
-
             (Some(space), MenuAction::NextWorkspace) => MenuAction::ScopedLayout {
                 space,
                 command: LayoutCommand::NextWorkspace(None),
@@ -1130,18 +1125,6 @@ impl MenuActionHandler {
 }
 
 impl MenuActionHandler {
-
-
-
-
-
-
-
-
-
-
-
-
     fn on_toggle_space_activation(&self, _sender: Option<&NSMenuItem>) {
         self.emit(MenuAction::ToggleSpaceActivated);
     }
