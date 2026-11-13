@@ -196,30 +196,10 @@ impl IpcRequestHandler {
 
         let response = match request {
             request @ (WmRequest::GetConfig
-            | WmRequest::GetSettingsSource
-            | WmRequest::ApplySettingsSource { .. }
-            | WmRequest::ReloadSettingsSource
             | WmRequest::ExecuteCommand {
                 command: wm_protocol::WmCommand::Config(_),
             }) => {
                 self.dispatch_config_request(request, header);
-                return;
-            }
-            WmRequest::SetShortcutRecording { pid, recording } => {
-                crate::actor::input::set_shortcut_recording(pid, recording);
-                encode_success(())
-            }
-            WmRequest::InitializeSettings => {
-                // Register first: every change after this point is either represented
-                // by the actor's snapshot or queued on the client's subscription port.
-                if !self.server_state.subscribe_client(
-                    client_port,
-                    wm_protocol::EventKind::ConfigChanged.to_string(),
-                ) {
-                    send_error_response(header, "Failed to monitor subscription port");
-                    return;
-                }
-                self.dispatch_config_request(WmRequest::GetSettingsSource, header);
                 return;
             }
             WmRequest::Subscribe { event } => {
@@ -390,16 +370,9 @@ fn encode_reactor_response(reactor: &mut reactor::Reactor, request: WmRequest) -
         }
 
         WmRequest::GetBindingMode => encode_success(&reactor.binding_mode),
-        WmRequest::SetShortcutRecording { .. } => {
-            unreachable!("recording leases bypass the reactor")
-        }
-
         WmRequest::GetMetrics => encode_success(reactor.query_metrics()),
 
-        WmRequest::GetConfig
-        | WmRequest::GetSettingsSource
-        | WmRequest::ApplySettingsSource { .. }
-        | WmRequest::ReloadSettingsSource => {
+        WmRequest::GetConfig => {
             unreachable!("config requests run on config workers")
         }
 
@@ -452,13 +425,6 @@ struct ConfigRequestHandler {
 }
 
 impl ConfigRequestHandler {
-    fn snapshot(result: Result<Result<config_actor::SourceSnapshot, String>, String>) -> Vec<u8> {
-        match result.and_then(|snapshot| snapshot) {
-            Ok(snapshot) => encode_success(snapshot),
-            Err(message) => encode_error(serde_json::json!({ "message": message })),
-        }
-    }
-
     fn perform<T>(
         &self,
         make_event: impl FnOnce(SyncSender<T>) -> config_actor::Event,
@@ -499,26 +465,6 @@ impl ConfigRequestHandler {
                     "message": format!("Failed to apply config: {error}"),
                 })),
             },
-            WmRequest::GetSettingsSource => {
-                Self::snapshot(self.perform(config_actor::Event::QuerySource))
-            }
-            WmRequest::ReloadSettingsSource => {
-                Self::snapshot(self.perform(config_actor::Event::ReloadSource))
-            }
-            WmRequest::ApplySettingsSource { expected_revision, source } => {
-                match serde_json::from_value(source) {
-                    Ok(source) => {
-                        Self::snapshot(self.perform(|response| config_actor::Event::ApplySource {
-                            expected_revision,
-                            source,
-                            response,
-                        }))
-                    }
-                    Err(error) => encode_error(serde_json::json!({
-                        "message": format!("Invalid configuration: {error}"),
-                    })),
-                }
-            }
             _ => unreachable!("only config requests are queued to config workers"),
         }
     }

@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::collections::HashSet;
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
@@ -148,7 +149,7 @@ impl ConfigWatcher {
         if self.last_text.as_ref() == Some(&text) {
             return;
         }
-        // Query the actor's authoritative setting, including changes made through Settings.
+        // Runtime commands can change hot_reload before the file is saved.
         let Ok(current) = self.query_config() else { return };
         let text = self.last_text.insert(text);
         if !current.settings.hot_reload {

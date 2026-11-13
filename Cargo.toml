@@ -6,7 +6,7 @@ edition = "2024"
 build = "build.rs"
 
 [workspace]
-members = [".", "crates/wm-client", "crates/wm-protocol", "crates/wm-config-derive"]
+members = [".", "crates/wm-client", "crates/wm-protocol"]
 resolver = "3"
 exclude = ["cgs"]
 
@@ -65,7 +65,6 @@ custom-event-loop = ["objc2-foundation/NSDate", "objc2-foundation/NSRunLoop"]
 disable-axuielement-destroyed = []
 
 [dependencies]
-wm-config-derive = { path = "crates/wm-config-derive" }
 cgs = { version = "0.5.2", path = "cgs" }
 anyhow = { version = "1.0.83", default-features = false }
 ascii_tree = "0.1.1"
@@ -221,7 +220,3 @@ pretty_assertions = "1.4.0"
 tokio = { version = "1.35.1", features = ["sync", "tokio-macros"] }
 test-log = { version = "0.2.16", default-features = false }
 test_bin = "0.5.0"
-
-[[test]]
-name = "settings_native"
-harness = false

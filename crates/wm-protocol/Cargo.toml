@@ -7,6 +7,5 @@ description = "Shared wire protocol types for Wm"
 license = "Apache-2.0"
 
 [dependencies]
-wm-config-derive = { path = "../wm-config-derive" }
 serde = { version = "1.0.201", features = ["derive"] }
 serde_json = "1.0.145"

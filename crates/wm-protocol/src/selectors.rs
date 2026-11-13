@@ -10,9 +10,7 @@ pub enum WorkspaceSelector {
     Name(String),
 }
 
-#[derive(
-    Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, wm_config_derive::ConfigEnum,
-)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RestoreScope {
     Workspace,
@@ -21,9 +19,7 @@ pub enum RestoreScope {
     Displays,
 }
 
-#[derive(
-    Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, wm_config_derive::ConfigEnum,
-)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RestoreSource {
     #[default]

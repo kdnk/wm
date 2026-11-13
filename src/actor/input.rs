@@ -5,10 +5,10 @@ use std::cell::{Cell, RefCell};
 use std::panic::AssertUnwindSafe;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use objc2_app_kit::{NSEvent, NSEventType, NSWorkspace};
+use objc2_app_kit::{NSEvent, NSEventType};
 use objc2_core_foundation::{CGPoint, CGRect};
 use objc2_core_graphics::{
     CGDisplayBounds, CGEvent, CGEventField, CGEventFlags, CGEventMask, CGEventSource,
@@ -55,31 +55,10 @@ pub enum Request {
     KeyboardLayoutChanged,
     ConfigUpdated(Config),
     /// Complete gesture routes for visible spaces with Wm management enabled.
-    LayoutModesChanged(Vec<(SpaceId, crate::common::config::LayoutMode)>),
+    ScrollingAvailabilityChanged(Vec<(SpaceId, bool)>),
     SetLowPowerMode(bool),
     SetMissionControlActive(bool, Vec<CGRect>),
     ReleaseMissionControl,
-}
-
-// The IPC acknowledgement is sent only after this store. The input tap therefore
-// sees the lease before Settings starts accepting a recorded key. Only foreground
-// keys bypass bindings; a crashed or background recorder cannot disable hotkeys.
-static SHORTCUT_RECORDER: AtomicI32 = AtomicI32::new(0);
-
-pub(crate) fn set_shortcut_recording(pid: i32, recording: bool) {
-    if recording && pid > 0 {
-        SHORTCUT_RECORDER.store(pid, Ordering::Release);
-    } else {
-        let _ = SHORTCUT_RECORDER.compare_exchange(pid, 0, Ordering::AcqRel, Ordering::Acquire);
-    }
-}
-
-fn shortcut_recorder_is_frontmost() -> bool {
-    let pid = SHORTCUT_RECORDER.load(Ordering::Acquire);
-    pid > 0
-        && NSWorkspace::sharedWorkspace()
-            .frontmostApplication()
-            .is_some_and(|app| app.processIdentifier() == pid)
 }
 
 #[derive(Clone, Copy)]
@@ -142,7 +121,7 @@ struct State {
     pressed_keys: HashSet<KeyCode>,
     current_flags: CGEventFlags,
     screen_spaces: Vec<(CGRect, SpaceId)>,
-    layout_mode_by_space: HashMap<SpaceId, crate::common::config::LayoutMode>,
+    scrolling_by_space: HashMap<SpaceId, bool>,
     mouse_features_enabled: bool,
     mouse_settings: DragDropSettings,
     captured_button: Option<crate::actor::drag::MouseButton>,
@@ -165,7 +144,7 @@ impl Default for State {
             pressed_keys: HashSet::with_capacity_and_hasher(256, Default::default()),
             current_flags: CGEventFlags::empty(),
             screen_spaces: Vec::new(),
-            layout_mode_by_space: HashMap::default(),
+            scrolling_by_space: HashMap::default(),
             mouse_features_enabled: false,
             mouse_settings: DragDropSettings::default(),
             captured_button: None,
@@ -461,12 +440,12 @@ impl Input {
                 .iter()
                 .filter_map(|s| s.space.map(|space| (s.frame, space)))
                 .eq(self.state.borrow().screen_spaces.iter().copied()),
-            Request::LayoutModesChanged(modes) => {
+            Request::ScrollingAvailabilityChanged(modes) => {
                 let state = self.state.borrow();
-                modes.len() != state.layout_mode_by_space.len()
+                modes.len() != state.scrolling_by_space.len()
                     || modes
                         .iter()
-                        .any(|(space, mode)| state.layout_mode_by_space.get(space) != Some(mode))
+                        .any(|(space, mode)| state.scrolling_by_space.get(space) != Some(mode))
             }
             Request::SetEventProcessing(enabled) => {
                 *enabled != self.state.borrow().event_processing_enabled
@@ -656,14 +635,14 @@ impl Input {
                 }
                 should_rebuild_mask = true;
             }
-            Request::LayoutModesChanged(modes) => {
-                state.layout_mode_by_space.clear();
+            Request::ScrollingAvailabilityChanged(modes) => {
+                state.scrolling_by_space.clear();
                 for (space, mode) in modes {
-                    state.layout_mode_by_space.insert(space, mode);
+                    state.scrolling_by_space.insert(space, mode);
                 }
                 debug!(
                     "Updated layout modes for {} spaces",
-                    state.layout_mode_by_space.len()
+                    state.scrolling_by_space.len()
                 );
             }
             Request::SetLowPowerMode(enabled) => {
@@ -685,7 +664,7 @@ impl Input {
                     .filter_map(|&(frame, space)| {
                         // Missing routes are disabled or not ready, rather than
                         // candidates for the configured default layout.
-                        let mode = state.layout_mode_by_space.get(&space).copied()?;
+                        let mode = state.scrolling_by_space.get(&space).copied()?;
                         Some((frame, space, mode))
                     })
                     .collect(),
@@ -823,12 +802,6 @@ impl Input {
                 }
                 if event_type == CGEventType::KeyDown {
                     self.events_tx.send(Event::KeyboardInput);
-                }
-                if shortcut_recorder_is_frontmost() {
-                    self.state
-                        .borrow_mut()
-                        .reconcile_after_event_tap_reenabled(CGEvent::flags(Some(event)));
-                    return true;
                 }
                 if matches!(event_type, CGEventType::KeyDown | CGEventType::FlagsChanged) {
                     let state = self.state.borrow();

@@ -23,7 +23,7 @@ use super::window_list::{
 };
 use super::{
     BuiltStatusMenu, MenuActionHandler, MenuShortcuts, add_action_item, build_static_menu,
-    layout_library_files_in, parse_layout_mode, rebuild_restore_menu, set_menu_item_checked,
+    layout_library_files_in, rebuild_restore_menu, set_menu_item_checked,
     set_menu_item_hotkey, workspace_menu_title,
 };
 use crate::actor::menu_bar::DisplayWorkspaces;
@@ -74,14 +74,6 @@ impl Controls {
         }
         built.workspace_item.setEnabled(!display.workspaces.is_empty());
         set_menu_item_checked(&built.tiling_item, display.space_is_activated);
-        let active = display
-            .workspaces
-            .iter()
-            .find(|workspace| workspace.is_active)
-            .and_then(|workspace| parse_layout_mode(&workspace.layout_mode));
-        for (mode, item) in &built.layout_items {
-            set_menu_item_checked(item, active == Some(*mode));
-        }
         let files = layout_library_files_in(folder);
         handler.set_layout_files(files.iter().map(|(_, path)| path.clone()).collect());
         rebuild_restore_menu(

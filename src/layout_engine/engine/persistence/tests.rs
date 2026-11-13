@@ -231,15 +231,10 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
 
     // Format: every layout system keeps its exact structure, in files of every age.
     for (mode, tag) in [
-        (LayoutMode::Traditional, "traditional"),
-        (LayoutMode::Bsp, "bsp"),
-        (LayoutMode::Stack, "stack"),
-        (LayoutMode::MasterStack, "master_stack"),
         (LayoutMode::Scrolling, "scrolling"),
     ] {
         let (mut engine, mut store) = fresh(&per_display, &[(a, "x")]);
         let id = ws(&engine, a, 0);
-        let _ = engine.switch_workspace_layout_mode(&store, a, id, mode);
         [w1, w2, w3].iter().for_each(|w| open(&mut engine, &mut store, id, *w));
         let saved = engine.serialize_to_string(&store);
         let loaded = LayoutEngine::deserialize_from_str(&saved).unwrap();
@@ -259,45 +254,7 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
         &empty.replacen("\"schema_version\":5", "\"schema_version\":6", 1),
         "newer than supported",
     );
-    for version in [None, Some(1), Some(2)] {
-        let header = version.map(|v| format!("\"schema_version\":{v},")).unwrap_or_default();
-        let old = LEGACY_V2.replacen("\"schema_version\":2,", &header, 1);
-        let mut loaded = LayoutEngine::deserialize_from_str(&old).unwrap();
-        let id = loaded.workspaces.active_workspace(SpaceId::new(901)).unwrap();
-        assert_eq!(loaded.workspaces[id].layout_mode, LayoutMode::Stack);
-        assert_eq!(loaded.workspaces[id].layout_state.all_layouts().count(), 2);
-        assert_eq!(loaded.workspaces[id].last_focused(), Some(win(9, 2)));
-        loaded.workspaces[id].ensure_layout_for_size(CGSize::new(1600.0, 1000.0));
-        assert_eq!(loaded.workspaces[id].layout_state.all_layouts().count(), 1);
-        let canonical = loaded.serialize_to_string(&WindowStore::default());
-        assert!(!canonical.contains("\"workspace_layouts\":"));
-        let reloaded = LayoutEngine::deserialize_from_str(&canonical).unwrap();
-        assert_eq!(reloaded.persistence.pending[&win(9, 3)].workspace, id);
-        assert_eq!(
-            reloaded.persistence.pending[&win(9, 3)].frame,
-            Some(CGRect::new(CGPoint::new(12.0, 34.0), CGSize::new(400.0, 300.0))),
-        );
-    }
-    let (mut engine, _) = fresh(&shared, &[(a, "x"), (b, "y")]);
-    let moved = engine.workspaces.active_workspace(a).unwrap();
-    engine
-        .workspaces
-        .transfer_workspace(moved, b, None, WorkspaceTransferReason::DisplayDeparture);
-    let replacement = engine.workspaces.active_workspace(a);
-    let current = ron::ser::to_string(&engine.workspaces.active_workspace_per_space).unwrap();
-    let old = ron::ser::to_string(&HashMap::from_iter([
-        (a, (None::<VirtualWorkspaceId>, moved)),
-        (b, (None, engine.workspaces.active_workspace(b).unwrap())),
-    ]))
-    .unwrap();
-    let file = engine.serialize_to_string(&WindowStore::default()).replacen(&current, &old, 1);
-    let loaded = LayoutEngine::deserialize_from_str(&file).unwrap();
-    assert_eq!(loaded.workspaces.active_workspace(a), replacement);
-    assert_eq!(
-        loaded.workspaces.active_workspace_per_space[&a].remembered,
-        Some(moved)
-    );
-
+    assert!(LayoutEngine::deserialize_from_str(LEGACY_V2).is_err());
     // Validation: a bad file fails whole and leaves the live engine exactly as it was.
     let good = session(&per_display, &[(a, "x", &[w1])]);
     let id = LayoutEngine::deserialize_from_str(&good).unwrap().workspaces.workspace_ids(a)[0];
@@ -820,7 +777,7 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
     ]);
     let untouched = ws(&engine, a, 0);
     let before = ron::ser::to_string(&engine.workspaces[untouched]).unwrap();
-    let cached = VirtualWorkspace::create_layout_system(LayoutMode::Traditional, &settings);
+    let cached = VirtualWorkspace::create_layout_system(LayoutMode::Scrolling, &settings);
     engine.native_layouts.insert(untouched, (cached, Default::default()));
     let target = ws(&engine, b, 0);
     open(&mut engine, &mut store, target, w1);

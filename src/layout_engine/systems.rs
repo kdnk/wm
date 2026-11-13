@@ -332,128 +332,14 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     fn toggle_tile_orientation(&mut self, _layout: LayoutId) {}
 }
 
-pub(super) fn node_slot(
-    mut node: crate::model::tree::NodeId,
-    root: crate::model::tree::NodeId,
-    map: &crate::model::tree::NodeMap,
-) -> Option<Vec<usize>> {
-    let mut path = Vec::new();
-    while node != root {
-        let parent = node.parent(map)?;
-        path.push(parent.children(map).position(|child| child == node)?);
-        node = parent;
-    }
-    path.reverse();
-    Some(path)
-}
-
-/// Forward representation-level operations shared by tree-backed layout policies.
-/// Policy implementations still spell out every operation that can change their invariants.
-macro_rules! delegate_traditional_layout_system {
-    (@tree) => {
-        fn window_participates(&self, window: WindowId) -> bool {
-            self.inner.window_participates(window)
-        }
-        fn set_window_participation(&mut self, window: WindowId, participates: bool) -> bool {
-            self.inner.set_window_participation(window, participates)
-        }
-        fn contains_layout(&self, layout: LayoutId) -> bool { self.inner.contains_layout(layout) }
-        fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
-            self.inner.selected_window(layout)
-        }
-        fn selection_contains_window(&self, layout: LayoutId, window: WindowId) -> bool {
-            self.inner.selection_contains_window(layout, window)
-        }
-        fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
-            self.inner.visible_windows_in_layout(layout)
-        }
-        fn stack_members(&self, layout: LayoutId, window: WindowId) -> Vec<WindowId> {
-            self.inner.stack_members(layout, window)
-        }
-        fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId> {
-            self.inner.visible_windows_under_selection(layout)
-        }
-        fn ascend_selection(&mut self, layout: LayoutId) -> bool {
-            self.inner.ascend_selection(layout)
-        }
-        fn descend_selection(&mut self, layout: LayoutId) -> bool {
-            self.inner.descend_selection(layout)
-        }
-        fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool {
-            self.inner.contains_window(layout, wid)
-        }
-        fn select_window(&mut self, layout: LayoutId, wid: WindowId) -> bool {
-            self.inner.select_window(layout, wid)
-        }
-        fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
-            self.inner.swap_windows(layout, a, b)
-        }
-        fn move_stack_tab(&mut self, layout: LayoutId, window: WindowId, target: WindowId) -> bool {
-            self.inner.move_stack_tab(layout, window, target)
-        }
-        fn toggle_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
-            self.inner.toggle_fullscreen_of_selection(layout)
-        }
-        fn toggle_fullscreen_within_gaps_of_selection(
-            &mut self,
-            layout: LayoutId,
-        ) -> Vec<WindowId> {
-            self.inner.toggle_fullscreen_within_gaps_of_selection(layout)
-        }
-        fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
-            self.inner.has_any_fullscreen_node(layout)
-        }
-    };
-    () => {
-        delegate_traditional_layout_system!(@tree);
-        fn remove_layout(&mut self, layout: LayoutId) { self.inner.remove_layout(layout); }
-
-
-        fn move_focus(
-            &mut self,
-            layout: LayoutId,
-            direction: Direction,
-        ) -> (Option<WindowId>, Vec<WindowId>) {
-            self.inner.move_focus(layout, direction)
-        }
-        fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
-            self.inner.window_in_direction(layout, direction)
-        }
-        fn replace_window(&mut self, from: WindowId, to: WindowId) {
-            self.inner.replace_window(from, to);
-        }
-
-        fn on_window_resized(
-            &mut self,
-            layout: LayoutId,
-            wid: WindowId,
-            old_frame: CGRect,
-            new_frame: CGRect,
-            screen: CGRect,
-            gaps: &crate::common::config::GapSettings,
-        ) {
-            self.inner.on_window_resized(layout, wid, old_frame, new_frame, screen, gaps);
-        }
-
-
-    };
-}
-
-mod traditional;
-pub use traditional::TraditionalLayoutSystem;
-mod bsp;
 pub(crate) mod constraints;
-pub use bsp::BspLayoutSystem;
-mod master_stack;
-pub use master_stack::MasterStackLayoutSystem;
 pub(crate) mod scrolling;
 pub use scrolling::{ScrollingLayoutSystem, ViewportRelease};
 
 #[cfg(test)]
 mod tests {
     use super::{
-        BspLayoutSystem, LayoutSystem, MasterStackLayoutSystem, ScrollingLayoutSystem,
-        TraditionalLayoutSystem, WindowLayoutConstraints,
+        LayoutSystem, ScrollingLayoutSystem, WindowLayoutConstraints,
     };
     use crate::actor::app::WindowId;
     use crate::common::config::{ScrollingLayoutSettings, WindowInsertionPoint};
@@ -469,19 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn common_insertion_point_controls_tree_and_linear_layouts() {
-        let mut traditional = TraditionalLayoutSystem::new(WindowInsertionPoint::EndOfTree, false);
-        let traditional_layout = traditional.create_layout();
-        traditional.add_window_after_selection(traditional_layout, w(1));
-        traditional.add_window_after_selection(traditional_layout, w(2));
-        traditional.select_window(traditional_layout, w(1));
-        traditional.add_window_after_selection(traditional_layout, w(3));
-        assert_eq!(traditional.all_windows_in_layout(traditional_layout), vec![
-            w(1),
-            w(2),
-            w(3)
-        ]);
-
+    fn insertion_point_controls_scrolling_columns() {
         let mut scrolling_settings = ScrollingLayoutSettings::default();
         scrolling_settings.base.window_insertion_point = Some(WindowInsertionPoint::EndOfTree);
         let mut scrolling = ScrollingLayoutSystem::new(&scrolling_settings);
@@ -609,40 +483,6 @@ mod tests {
 
     #[test]
     fn normalized_container_trees_expose_layout_topology() {
-        let mut traditional = TraditionalLayoutSystem::default();
-        let layout = traditional.create_layout();
-        traditional.add_window_after_selection(layout, w(1));
-        traditional.add_window_after_selection(layout, w(2));
-        let tree = traditional.container_tree(layout);
-        assert_eq!(tree.node_type, wm_protocol::ContainerNodeType::Container);
-        assert_eq!(window_nodes(&tree).len(), 2);
-        assert_eq!(
-            window_nodes(&tree).iter().filter(|node| node.is_selected).count(),
-            1
-        );
-        traditional.select_window(layout, w(1));
-        assert_stable_unique_ids(&tree, &traditional.container_tree(layout));
-
-        let mut bsp = BspLayoutSystem::default();
-        let layout = bsp.create_layout();
-        bsp.add_window_after_selection(layout, w(1));
-        bsp.add_window_after_selection(layout, w(2));
-        let tree = bsp.container_tree(layout);
-        assert_eq!(tree.children.len(), 2);
-        let total_weight: f64 = tree.children.iter().filter_map(|node| node.weight).sum();
-        assert!((total_weight - 1.0).abs() < f64::EPSILON);
-        bsp.select_window(layout, w(1));
-        assert_stable_unique_ids(&tree, &bsp.container_tree(layout));
-
-        let mut master_stack = MasterStackLayoutSystem::default();
-        let layout = master_stack.create_layout();
-        master_stack.add_window_after_selection(layout, w(1));
-        master_stack.add_window_after_selection(layout, w(2));
-        let tree = master_stack.container_tree(layout);
-        let roles: Vec<_> = tree.children.iter().filter_map(|node| node.role.as_deref()).collect();
-        assert!(roles.contains(&"master"), "{tree:#?}");
-        assert!(roles.contains(&"stack"), "{tree:#?}");
-
         let mut scrolling = ScrollingLayoutSystem::default();
         let layout = scrolling.create_layout();
         scrolling.add_window_after_selection(layout, w(1));
@@ -654,33 +494,18 @@ mod tests {
         assert_stable_unique_ids(&tree, &scrolling.container_tree(layout));
     }
 }
-mod floating;
-pub use floating::FloatingLayoutSystem;
-mod stack;
-pub use stack::StackLayoutSystem;
-
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Debug)]
 #[enum_dispatch(LayoutSystem)]
 pub enum LayoutSystemKind {
-    Traditional(TraditionalLayoutSystem),
-    Bsp(BspLayoutSystem),
-    MasterStack(MasterStackLayoutSystem),
     Scrolling(ScrollingLayoutSystem),
-    Stack(StackLayoutSystem),
-    Floating(FloatingLayoutSystem),
 }
 
 impl LayoutSystemKind {
     pub(crate) fn preview_clone(&self) -> Option<Self> {
         match self {
-            Self::Traditional(system) => Some(Self::Traditional(system.clone())),
-            Self::Bsp(system) => Some(Self::Bsp(system.clone())),
-            Self::MasterStack(system) => Some(Self::MasterStack(system.clone())),
             Self::Scrolling(system) => Some(Self::Scrolling(system.clone())),
-            Self::Stack(system) => Some(Self::Stack(system.clone())),
-            Self::Floating(_) => None,
         }
     }
 }
@@ -694,12 +519,7 @@ mod participation_tests {
     #[test]
     fn suspended_members_preserve_slots_and_geometry_in_every_backend() {
         let mut systems = [
-            LayoutSystemKind::Traditional(Default::default()),
-            LayoutSystemKind::Bsp(Default::default()),
-            LayoutSystemKind::Stack(Default::default()),
-            LayoutSystemKind::MasterStack(Default::default()),
             LayoutSystemKind::Scrolling(Default::default()),
-            LayoutSystemKind::Floating(Default::default()),
         ];
         let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1200.0, 800.0));
         let constraints = HashMap::default();

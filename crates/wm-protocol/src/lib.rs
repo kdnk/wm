@@ -17,8 +17,8 @@ mod selectors;
 mod transport;
 
 pub use commands::{
-    AnimationEasing, CommandArgument, ConfigCommand, FloatingWindowSize, FloatingWindowSizePreset,
-    LayoutCommand, MetricsCommand, ReactorCommand, ToggleWindowFloatingOptions, WmCommand,
+    AnimationEasing, ConfigCommand, LayoutCommand,
+    MetricsCommand, ReactorCommand, WmCommand,
 };
 pub use events::{EventKind, StackInfo, WmEvent, WorkspaceId};
 pub use layout::{

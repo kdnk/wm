@@ -31,8 +31,6 @@ enum CliCommand {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Open Wm’s native Settings window
-    Settings,
     /// Query information from wm
     Query {
         #[command(subcommand)]
@@ -205,8 +203,6 @@ enum WindowCommands {
         #[arg(long, requires = "window_id")]
         window_server_id: Option<String>,
     },
-    /// Toggle window floating state
-    ToggleFloat,
     /// Toggle fullscreen mode (fills the whole screen, ignores outer gaps)
     ToggleFullscreen,
     /// Toggle fullscreen within configured outer gaps (respects outer gaps / fills tiling area)
@@ -307,14 +303,6 @@ enum WorkspaceCommands {
     Create,
     /// Switch to the last workspace
     Last,
-    /// Set layout mode for a workspace (or active workspace when omitted)
-    SetLayout {
-        /// Workspace index (0-based). Defaults to active workspace if omitted.
-        #[arg(long)]
-        workspace_id: Option<usize>,
-        /// Layout mode: traditional, bsp, stack, master_stack, scrolling, floating
-        mode: String,
-    },
 }
 
 #[derive(Subcommand)]
@@ -331,22 +319,8 @@ enum LayoutCommands {
     ConsumeOrExpelWindow { direction: String },
     /// Toggle stacked state for the selected container
     ToggleStack,
-    /// Global orientation toggle that works consistently across layout modes (and between splits/stacks)
-    ToggleOrientation,
-    /// Even out split sizes along each axis (bsp and traditional layouts only)
-    Balance,
     /// Unjoin previously joined windows
     Unjoin,
-    /// Toggle floating on the focused selection (tree focus)
-    ToggleFocusFloat,
-    /// Adjust master ratio by a delta (master/stack layout only)
-    AdjustMasterRatio { delta: f64 },
-    /// Adjust master count by a delta (master/stack layout only)
-    AdjustMasterCount { delta: i32 },
-    /// Promote the selected window into the master area (master/stack layout only)
-    PromoteToMaster,
-    /// Swap the first master with the first stack window (master/stack layout only)
-    SwapMasterStack,
     /// Swap two windows by window id (`WindowId { pid: ..., idx: ... }`)
     SwapWindows { a: String, b: String },
     /// Scroll the strip by a normalized delta (scrolling layout only)
@@ -390,11 +364,6 @@ enum ConfigCommands {
         value: bool,
     },
 
-    /// Update layout settings
-    SetStackOffset { value: f64 },
-    /// Set the default stack orientation behavior. Value should be one of:
-    /// "perpendicular", "same", "horizontal", or "vertical"
-    SetStackDefaultOrientation { value: String },
     /// Set the outer gap on each screen edge
     SetOuterGaps {
         top: f64,
@@ -615,9 +584,6 @@ fn main() {
 
 fn build_request(command: Commands) -> Result<WmRequest, String> {
     match command {
-        Commands::Settings => Ok(WmRequest::ExecuteCommand {
-            command: wm_protocol::WmCommand::Reactor(reactor::ReactorCommand::OpenSettings),
-        }),
         Commands::Query { query } => build_query_request(query),
         Commands::Execute { command } => build_execute_request(command),
         Commands::Subscribe { subscribe } => build_subscribe_request(subscribe),
@@ -833,9 +799,6 @@ fn map_window_command(cmd: WindowCommands) -> Result<CliCommand, String> {
                 Err("window focus accepts either a direction or --window-id, not both".to_string())
             }
         },
-        WindowCommands::ToggleFloat => Ok(CliCommand::Reactor(reactor::Command::Layout(
-            LC::ToggleWindowFloating,
-        ))),
         WindowCommands::ToggleFullscreen => Ok(CliCommand::Reactor(reactor::Command::Layout(
             LC::ToggleFullscreen,
         ))),
@@ -916,20 +879,7 @@ fn parse_event_kind(input: &str) -> Result<EventKind, String> {
     }
 }
 
-fn parse_layout_mode(value: &str) -> Result<LayoutMode, String> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "traditional" => Ok(LayoutMode::Traditional),
-        "bsp" => Ok(LayoutMode::Bsp),
-        "floating" => Ok(LayoutMode::Floating),
-        "stack" => Ok(LayoutMode::Stack),
-        "master_stack" => Ok(LayoutMode::MasterStack),
-        "scrolling" => Ok(LayoutMode::Scrolling),
-        other => Err(format!(
-            "Invalid layout mode '{}'; must be traditional, bsp, stack, master_stack, scrolling, or floating",
-            other
-        )),
-    }
-}
+
 
 fn map_workspace_command(cmd: WorkspaceCommands) -> Result<CliCommand, String> {
     use layout::LayoutCommand as LC;
@@ -960,12 +910,6 @@ fn map_workspace_command(cmd: WorkspaceCommands) -> Result<CliCommand, String> {
         WorkspaceCommands::Last => Ok(CliCommand::Reactor(reactor::Command::Layout(
             LC::SwitchToLastWorkspace,
         ))),
-        WorkspaceCommands::SetLayout { workspace_id, mode } => {
-            let mode = parse_layout_mode(&mode)?;
-            Ok(CliCommand::Reactor(reactor::Command::Layout(
-                LC::SetWorkspaceLayout { workspace: workspace_id, mode },
-            )))
-        }
     }
 }
 
@@ -986,28 +930,9 @@ fn map_layout_command(cmd: LayoutCommands) -> Result<CliCommand, String> {
         LayoutCommands::ToggleStack => {
             Ok(CliCommand::Reactor(reactor::Command::Layout(LC::ToggleStack)))
         }
-        LayoutCommands::ToggleOrientation => Ok(CliCommand::Reactor(reactor::Command::Layout(
-            LC::ToggleOrientation,
-        ))),
-        LayoutCommands::Balance => Ok(CliCommand::Reactor(reactor::Command::Layout(LC::Balance))),
         LayoutCommands::Unjoin => {
             Ok(CliCommand::Reactor(reactor::Command::Layout(LC::UnjoinWindows)))
         }
-        LayoutCommands::ToggleFocusFloat => Ok(CliCommand::Reactor(reactor::Command::Layout(
-            LC::ToggleFocusFloating,
-        ))),
-        LayoutCommands::AdjustMasterRatio { delta } => Ok(CliCommand::Reactor(
-            reactor::Command::Layout(LC::AdjustMasterRatio(delta)),
-        )),
-        LayoutCommands::AdjustMasterCount { delta } => Ok(CliCommand::Reactor(
-            reactor::Command::Layout(LC::AdjustMasterCount { delta }),
-        )),
-        LayoutCommands::PromoteToMaster => Ok(CliCommand::Reactor(reactor::Command::Layout(
-            LC::PromoteToMaster,
-        ))),
-        LayoutCommands::SwapMasterStack => Ok(CliCommand::Reactor(reactor::Command::Layout(
-            LC::SwapMasterStack,
-        ))),
         LayoutCommands::SwapWindows { a, b } => Ok(CliCommand::Reactor(reactor::Command::Layout(
             LC::SwapWindows(parse_window_id(&a)?.into(), parse_window_id(&b)?.into()),
         ))),
@@ -1081,14 +1006,6 @@ fn map_config_command(cmd: ConfigCommands) -> Result<CliCommand, String> {
         }
         ConfigCommands::SetFocusFollowsMouse { value } => {
             ConfigCommand::SetFocusFollowsMouse(value)
-        }
-        ConfigCommands::SetStackOffset { value } => ConfigCommand::SetStackOffset(value),
-        ConfigCommands::SetStackDefaultOrientation { value } => {
-            let parsed_value: serde_json::Value = serde_json::Value::String(value.clone());
-            ConfigCommand::Set {
-                key: "settings.layout.stack.default_orientation".to_string(),
-                value: parsed_value,
-            }
         }
         ConfigCommands::SetOuterGaps { top, left, bottom, right } => {
             ConfigCommand::SetOuterGaps { top, left, bottom, right }

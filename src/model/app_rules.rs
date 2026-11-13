@@ -265,8 +265,6 @@ impl CompiledRule {
         let AppWorkspaceRule {
             app_id,
             workspace,
-            floating,
-            position,
             size,
             focus,
             manage,
@@ -310,8 +308,8 @@ impl CompiledRule {
             action: AppRuleDecision {
                 manage,
                 workspace,
-                floating,
-                position,
+                floating: false,
+                position: None,
                 size,
                 focus,
             },
@@ -368,8 +366,6 @@ mod tests {
         let rule = AppWorkspaceRule {
             app_id: Some("com.example.Editor".into()),
             workspace: None,
-            floating: true,
-            position: Some(AppRulePosition { x: 0.4, y: 0.7 }),
             size: Some(AppRuleSize { w: Some(640.0), h: Some(480.0) }),
             focus: true,
             manage: Some(true),
@@ -386,8 +382,8 @@ mod tests {
             Some(AppRuleDecision {
                 manage: Some(true),
                 workspace: None,
-                floating: true,
-                position: Some(AppRulePosition { x: 0.4, y: 0.7 }),
+                floating: false,
+                position: None,
                 size: Some(AppRuleSize { w: Some(640.0), h: Some(480.0) }),
                 focus: true,
             })

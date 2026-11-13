@@ -633,7 +633,7 @@ impl Reactor {
             },
             notification_manager: managers::NotificationManager {
                 last_sls_notification_ids: Vec::new(),
-                last_layout_modes_by_space: HashMap::default(),
+                last_scrolling_by_space: HashMap::default(),
                 _window_notify_tx: window_notify_tx,
             },
             transaction_manager: transaction_manager::TransactionManager::new(window_tx_store),
@@ -2760,11 +2760,6 @@ impl Reactor {
             Event::Command(Command::Metrics(cmd)) => {
                 return command_workflow::handle_command_metrics(cmd);
             }
-            Event::Command(Command::Reactor(ReactorCommand::OpenSettings)) => {
-                if let Some(tx) = &self.menu_manager.menu_tx {
-                    tx.send(menu_bar::Event::OpenSettings);
-                }
-            }
             Event::Command(Command::Reactor(ReactorCommand::Debug)) => {
                 return command_workflow::handle_command_reactor_debug(
                     &self.layout_manager,
@@ -3519,7 +3514,7 @@ impl Reactor {
             self.update_focus_follows_mouse_state();
         }
         if outcome.refresh_layout_mode {
-            self.update_event_tap_layout_mode();
+            self.update_event_tap_scrolling_availability();
         }
         #[cfg(test)]
         self.event_outcome_phase_trace.push("broadcasts");
@@ -4500,8 +4495,6 @@ impl Reactor {
                 window,
             )
             && !self.layout_manager.layout_engine.is_window_floating(window)
-            && self.layout_manager.layout_engine.active_layout_mode_at(target)
-                != crate::common::config::LayoutMode::Floating
         {
             // Move directly into the destination tile. A source-sized placement
             // followed immediately by a resize can lose one AX size component.
@@ -5513,9 +5506,6 @@ impl Reactor {
                 .layout_engine
                 .workspaces()
                 .workspace_for_window(&self.state.windows, placement.space, placement.window)
-                && self.layout_manager.layout_engine.workspaces().workspaces[workspace]
-                    .layout_mode()
-                    == crate::common::config::LayoutMode::Floating
             {
                 self.layout_manager.layout_engine.store_floating_position(
                     workspace,
@@ -6422,13 +6412,13 @@ impl Reactor {
         self.set_focus_follows_mouse_enabled(should_enable);
     }
 
-    fn update_event_tap_layout_mode(&mut self) {
+    fn update_event_tap_scrolling_availability(&mut self) {
         let Some(input_tx) = self.communication_manager.input_tx.as_ref() else {
             return;
         };
 
-        let last_modes = &self.notification_manager.last_layout_modes_by_space;
-        let mut modes: Vec<(SpaceId, crate::common::config::LayoutMode)> =
+        let last_modes = &self.notification_manager.last_scrolling_by_space;
+        let mut modes: Vec<(SpaceId, bool)> =
             Vec::with_capacity(self.space_state.screens.len());
         let mut changed = false;
 
@@ -6449,16 +6439,10 @@ impl Reactor {
             }
 
             let engine = &self.layout_manager.layout_engine;
-            let mut mode = engine.active_layout_mode_at(space);
-            // This cache routes gesture candidates, not public layout mode. An
-            // empty/fullscreen strip must still permit workspace navigation.
-            if mode == crate::common::config::LayoutMode::Scrolling &&
-                !engine.workspaces().active_layout_for_space(space).is_some_and(|(ws, layout)| {
-                    matches!(&engine.workspaces()[ws].layout_system,
-                        crate::layout_engine::LayoutSystemKind::Scrolling(system) if system.viewport_gesture_available(layout))
-                }) {
-                mode = crate::common::config::LayoutMode::Traditional;
-            }
+            let mode = engine.workspaces().active_layout_for_space(space).is_some_and(|(ws, layout)| {
+                let crate::layout_engine::LayoutSystemKind::Scrolling(system) = &engine.workspaces()[ws].layout_system;
+                system.viewport_gesture_available(layout)
+            });
             if last_modes.get(&space).copied() != Some(mode) {
                 changed = true;
             }
@@ -6470,8 +6454,8 @@ impl Reactor {
         }
 
         let modes_by_space = modes.iter().copied().collect();
-        self.notification_manager.last_layout_modes_by_space = modes_by_space;
-        input_tx.send(crate::actor::input::Request::LayoutModesChanged(modes));
+        self.notification_manager.last_scrolling_by_space = modes_by_space;
+        input_tx.send(crate::actor::input::Request::ScrollingAvailabilityChanged(modes));
     }
 
     fn set_mission_control_active(&mut self, active: bool) {

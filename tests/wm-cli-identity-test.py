@@ -20,14 +20,23 @@ def main():
         help_text = subprocess.check_output([str(binary), "--help"], text=True)
         assert name in help_text
         assert "rift" not in help_text.lower(), help_text
+    close_help = subprocess.check_output([str(args.binary_dir / "wm"), "close-window", "--help"], text=True)
+    assert "native close button" in close_help, close_help
     namespace = "git.kdnk.wm.test." + uuid.uuid4().hex
+    for name, removed_argument in [("wm", "--settings"), ("wm-cli", "settings")]:
+        result = subprocess.run([str(args.binary_dir / name), removed_argument],
+                                env=dict(os.environ, WM_BS_NAME=namespace),
+                                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+        assert result.returncode == 2, result
+        assert removed_argument in result.stderr, result.stderr
+        assert "unexpected argument" in result.stderr or "unrecognized subcommand" in result.stderr, result.stderr
     result = subprocess.run([str(args.binary_dir / "wm-cli"), "query", "windows"],
                             env=dict(os.environ, WM_BS_NAME=namespace),
                             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
     assert result.returncode != 0, "An isolated nonexistent service unexpectedly answered"
     assert "not registered" in result.stderr, result.stderr
     assert "wm service start" in result.stderr, result.stderr
-    print("PASS: wm and wm-cli report their names and honor an isolated WM_BS_NAME")
+    print("PASS: wm and wm-cli report their names, reject Settings, and honor an isolated WM_BS_NAME")
 
 
 if __name__ == "__main__":

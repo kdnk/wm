@@ -220,37 +220,6 @@ impl VirtualWorkspace {
 
     pub fn create_layout_system(mode: LayoutMode, settings: &LayoutSettings) -> LayoutSystemKind {
         match mode {
-            LayoutMode::Traditional => LayoutSystemKind::Traditional(
-                crate::layout_engine::systems::TraditionalLayoutSystem::new(
-                    settings.window_insertion_point_for(mode),
-                    settings.traditional.equalize_nodes,
-                ),
-            ),
-            LayoutMode::Floating => LayoutSystemKind::Floating(
-                crate::layout_engine::systems::FloatingLayoutSystem::new(
-                    settings.window_insertion_point_for(mode),
-                ),
-            ),
-            LayoutMode::Bsp => {
-                let mut system = crate::layout_engine::systems::BspLayoutSystem::new(
-                    settings.window_insertion_point_for(mode),
-                );
-                system.set_single_window_aspect_ratio(settings.bsp.single_window_aspect_ratio);
-                LayoutSystemKind::Bsp(system)
-            }
-            LayoutMode::Stack => LayoutSystemKind::Stack(
-                crate::layout_engine::systems::StackLayoutSystem::new_with_insertion_point(
-                    settings.stack.default_orientation,
-                    settings.window_insertion_point_for(mode),
-                ),
-            ),
-            LayoutMode::MasterStack => {
-                let mut mode_settings = settings.master_stack.clone();
-                mode_settings.base = settings.resolved_base_for(mode);
-                LayoutSystemKind::MasterStack(
-                    crate::layout_engine::systems::MasterStackLayoutSystem::new(mode_settings),
-                )
-            }
             LayoutMode::Scrolling => {
                 let mut mode_settings = settings.scrolling.clone();
                 mode_settings.base = settings.resolved_base_for(mode);
@@ -2137,7 +2106,7 @@ mod tests {
             transient_ws
         ));
 
-        manager[migrated_ws].replace_layout_mode(LayoutMode::Stack, &LayoutSettings::default());
+        manager[migrated_ws].replace_layout_mode(LayoutMode::Scrolling, &LayoutSettings::default());
         manager[migrated_ws].ensure_layout_for_size(CGSize::new(1200.0, 800.0));
         let first = manager[migrated_ws].active_layout();
         manager[migrated_ws].ensure_layout_for_size(CGSize::new(1600.0, 1000.0));
@@ -2146,7 +2115,7 @@ mod tests {
         manager.remap_space(&mut window_store, old_space, new_space);
 
         assert_eq!(manager[migrated_ws].space, new_space);
-        assert_eq!(manager[migrated_ws].layout_mode, LayoutMode::Stack);
+        assert_eq!(manager[migrated_ws].layout_mode, LayoutMode::Scrolling);
         assert_eq!(manager[migrated_ws].last_focused(), Some(migrated_window));
         assert_eq!(
             ron::ser::to_string(&manager[migrated_ws].layout_state).unwrap(),
@@ -2351,8 +2320,7 @@ mod tests {
         settings.app_rules = vec![AppWorkspaceRule {
             app_id: Some("com.example.unmanaged".into()),
             workspace: None,
-            floating: false,
-            position: None,
+
             size: None,
             focus: false,
             manage: Some(false),
@@ -2535,7 +2503,7 @@ mod tests {
             // Floating by app_id
             AppWorkspaceRule {
                 app_id: Some("com.example.test".into()),
-                floating: true,
+
                 manage: Some(true),
                 ..Default::default()
             },
@@ -2565,7 +2533,7 @@ mod tests {
             // AX role + subrole floating
             AppWorkspaceRule {
                 app_id: Some("com.example.special".into()),
-                floating: true,
+
                 manage: Some(true),
                 ax_role: Some("AXWindow".into()),
                 ax_subrole: Some("AXDialog".into()),
@@ -2588,7 +2556,7 @@ mod tests {
             AppWorkspaceRule {
                 app_id: Some("app.zen-browser.zen".into()),
                 workspace: Some(WorkspaceSelector::Index(3)),
-                floating: true,
+
                 manage: Some(true),
                 title_substring: Some("bitwarden".into()),
                 ..Default::default()

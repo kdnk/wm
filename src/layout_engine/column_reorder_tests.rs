@@ -84,7 +84,7 @@ fn reorder_accepts_owned_active_scrolling_workspace_without_changing_focus() {
 }
 
 #[test]
-fn reorder_rejects_wrong_space_workspace_and_non_scrolling_layout() {
+fn reorder_rejects_wrong_space_and_inactive_workspace() {
     let mut f = Fixture::new();
     let initial = f.members();
     let mut request = f.request();
@@ -95,11 +95,6 @@ fn reorder_rejects_wrong_space_workspace_and_non_scrolling_layout() {
     f.engine.workspaces.set_active_workspace(f.space, other);
     assert!(!f.engine.reorder_column(request));
     assert_eq!(f.members(), initial);
-    f.engine.workspaces.set_active_workspace(f.space, f.workspace);
-    let request = f.request();
-    f.engine
-        .switch_workspace_layout_mode(&f.store, f.space, f.workspace, LayoutMode::Bsp);
-    assert!(!f.engine.reorder_column(request));
 }
 
 #[test]
@@ -110,14 +105,10 @@ fn reorder_rejects_deleted_column_and_reused_ids_with_different_members() {
         .engine
         .handle_event(&mut f.store, LayoutEvent::WindowRemoved(WindowId::new(1, 1)));
     assert!(!f.engine.reorder_column(request.clone()));
-    f.engine
-        .switch_workspace_layout_mode(&f.store, f.space, f.workspace, LayoutMode::Bsp);
-    let _ = f.engine.handle_event(
-        &mut f.store,
-        LayoutEvent::WindowAdded(f.space, WindowId::new(2, 1)),
-    );
-    f.engine
-        .switch_workspace_layout_mode(&f.store, f.space, f.workspace, LayoutMode::Scrolling);
+    let layout = f.engine.workspaces_mut().workspaces[f.workspace].replace_layout_mode(LayoutMode::Scrolling, &LayoutSettings::default());
+    for index in 1..=3 {
+        f.engine.workspaces_mut().workspaces[f.workspace].layout_system.add_window_after_selection(layout, WindowId::new(2, index));
+    }
     let current = f.request();
     assert_eq!(
         current.source, request.source,

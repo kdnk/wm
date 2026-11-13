@@ -254,14 +254,6 @@ impl WmMachClient {
             .map(|(_, subscription)| subscription)
     }
 
-    /// Returns the initial editable source and a configuration-change subscription
-    /// in one round trip. Changes racing the snapshot are retained for `recv_event`.
-    pub fn initialize_settings<T: DeserializeOwned>(
-        &self,
-    ) -> Result<(T, WmMachSubscription), ClientError> {
-        self.start_subscription(WmRequest::InitializeSettings)
-    }
-
     fn start_subscription<T: DeserializeOwned>(
         &self,
         request: WmRequest,
@@ -305,11 +297,6 @@ impl WmMachClient {
             reply_port: ReplyPort::allocate(MACH_PORT_QLIMIT_LARGE)?,
             sequence: 0,
         })
-    }
-
-    /// Synchronously acknowledge capture before the UI accepts a recorded keystroke.
-    pub fn set_shortcut_recording(&self, pid: i32, recording: bool) -> Result<(), ClientError> {
-        self.request(WmRequest::SetShortcutRecording { pid, recording })
     }
 
     fn request<T: DeserializeOwned>(&self, request: WmRequest) -> Result<T, ClientError> {

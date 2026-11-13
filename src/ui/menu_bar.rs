@@ -48,7 +48,7 @@ use crate::actor::reactor::{
 };
 use crate::actor::wm_controller::{WmCmd, WmCommand};
 use crate::common::config::{
-    ActiveWorkspaceLabel, LayoutMode, MenuBarDisplayMode, MenuBarSettings, WorkspaceDisplayStyle,
+    ActiveWorkspaceLabel, MenuBarDisplayMode, MenuBarSettings, WorkspaceDisplayStyle,
     WorkspaceSelector, restore_file,
 };
 use crate::layout_engine::{LayoutCommand, LayoutEngine, RestoreScope, RestoreSource};
@@ -91,7 +91,6 @@ pub enum MenuAction {
         source: RestoreSource,
     },
     FocusWindow(WindowId),
-    SetLayout(LayoutMode),
     ToggleSpaceActivated,
     NextWorkspace,
     PrevWorkspace,
@@ -110,7 +109,6 @@ pub enum MenuAction {
     OpenMatrix,
     OpenSponsor,
     OpenConfig,
-    OpenSettings,
     ReloadConfig,
     QuitWm,
 }
@@ -122,7 +120,6 @@ pub struct MenuIcon {
     hotkeys: Vec<(Hotkey, WmCommand)>,
     _menu: Rc<Menu>,
     menu_handler: Rc<MenuActionHandler>,
-    layout_items: Vec<(LayoutMode, Retained<NSMenuItem>)>,
     workspace_item: Retained<NSMenuItem>,
     workspace_submenu: Rc<Menu>,
     workspace_items: Vec<WorkspaceMenuItem>,
@@ -191,7 +188,6 @@ impl MenuIcon {
             hotkeys: Vec::new(),
             _menu: built.menu,
             menu_handler,
-            layout_items: built.layout_items,
             workspace_item: built.workspace_item,
             workspace_submenu: built.workspace_submenu,
             workspace_items: Vec::new(),
@@ -288,12 +284,8 @@ impl MenuIcon {
 
     pub fn update_menu_state(&self, active_space_is_activated: bool, workspaces: &[Workspace]) {
         let active = workspaces.iter().find(|workspace| workspace.is_active);
-        let active_layout = active.and_then(|workspace| parse_layout_mode(&workspace.layout_mode));
         let active_id = active.map(|workspace| workspace.id.as_str());
 
-        for (mode, item) in &self.layout_items {
-            set_menu_item_checked(item, active_layout == Some(*mode));
-        }
         for workspace in &self.workspace_items {
             set_menu_item_checked(&workspace.item, active_id == Some(workspace.identity.as_str()));
         }
@@ -602,28 +594,9 @@ fn as_any_object<T: Message>(obj: &T) -> &AnyObject {
     unsafe { &*(obj as *const T as *const AnyObject) }
 }
 
-fn parse_layout_mode(layout_mode: &str) -> Option<LayoutMode> {
-    match layout_mode {
-        "traditional" => Some(LayoutMode::Traditional),
-        "bsp" => Some(LayoutMode::Bsp),
-        "floating" => Some(LayoutMode::Floating),
-        "stack" => Some(LayoutMode::Stack),
-        "master_stack" => Some(LayoutMode::MasterStack),
-        "scrolling" => Some(LayoutMode::Scrolling),
-        _ => None,
-    }
-}
 
-fn layout_title(mode: &LayoutMode) -> &'static str {
-    match mode {
-        LayoutMode::Traditional => "Traditional",
-        LayoutMode::Bsp => "BSP",
-        LayoutMode::Floating => "Floating",
-        LayoutMode::Stack => "Stack",
-        LayoutMode::MasterStack => "Master Stack",
-        LayoutMode::Scrolling => "Scrolling",
-    }
-}
+
+
 
 type MenuCallback = fn(&MenuActionHandler, Option<&NSMenuItem>);
 
@@ -759,7 +732,6 @@ fn layout_library_files_in(directory: &Path) -> Vec<(String, PathBuf)> {
 
 struct BuiltStatusMenu {
     menu: Rc<Menu>,
-    layout_items: Vec<(LayoutMode, Retained<NSMenuItem>)>,
     workspace_item: Retained<NSMenuItem>,
     workspace_submenu: Rc<Menu>,
     next_workspace_item: Retained<NSMenuItem>,
@@ -814,29 +786,6 @@ fn build_static_menu(mtm: MainThreadMarker, handler: &Rc<MenuActionHandler>) -> 
     add_separator(&workspace_submenu);
     workspace_item.setEnabled(false);
 
-    let (_, layout_submenu) = add_submenu(&menu, mtm, "Layout");
-    let mut layout_items = Vec::with_capacity(5);
-    for mode in [
-        LayoutMode::Traditional,
-        LayoutMode::Bsp,
-        LayoutMode::Floating,
-        LayoutMode::Stack,
-        LayoutMode::MasterStack,
-        LayoutMode::Scrolling,
-    ] {
-        let action = match mode {
-            LayoutMode::Traditional => MenuActionHandler::on_set_layout_traditional,
-            LayoutMode::Bsp => MenuActionHandler::on_set_layout_bsp,
-            LayoutMode::Floating => MenuActionHandler::on_set_layout_floating,
-            LayoutMode::Stack => MenuActionHandler::on_set_layout_stack,
-            LayoutMode::MasterStack => MenuActionHandler::on_set_layout_master_stack,
-            LayoutMode::Scrolling => MenuActionHandler::on_set_layout_scrolling,
-        };
-        let item = add_action_item(&layout_submenu, mtm, handler, layout_title(&mode), action);
-        set_menu_item_checked(&item, false);
-        layout_items.push((mode, item));
-    }
-
     let (_, saved_layouts_menu) = add_submenu(&menu, mtm, "Saved Layouts");
     add_action_item(
         &saved_layouts_menu,
@@ -871,15 +820,6 @@ fn build_static_menu(mtm: MainThreadMarker, handler: &Rc<MenuActionHandler>) -> 
         "Reload Config",
         MenuActionHandler::on_reload_config,
     );
-    let settings_item = add_action_item(
-        &menu,
-        mtm,
-        handler,
-        "Settings…",
-        MenuActionHandler::on_open_settings,
-    );
-    settings_item.setKeyEquivalent(&NSString::from_str(","));
-    settings_item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
 
     add_separator(&menu);
     let (_, help_menu) = add_submenu(&menu, mtm, "Help");
@@ -909,7 +849,6 @@ fn build_static_menu(mtm: MainThreadMarker, handler: &Rc<MenuActionHandler>) -> 
 
     BuiltStatusMenu {
         menu,
-        layout_items,
         workspace_item,
         workspace_submenu,
         next_workspace_item,
@@ -1087,10 +1026,7 @@ impl MenuActionHandler {
 
     fn emit(&self, action: MenuAction) {
         let action = match (self.space, action) {
-            (Some(space), MenuAction::SetLayout(mode)) => MenuAction::ScopedLayout {
-                space,
-                command: LayoutCommand::SetWorkspaceLayout { workspace: None, mode },
-            },
+
             (Some(space), MenuAction::NextWorkspace) => MenuAction::ScopedLayout {
                 space,
                 command: LayoutCommand::NextWorkspace(None),
@@ -1194,29 +1130,17 @@ impl MenuActionHandler {
 }
 
 impl MenuActionHandler {
-    fn on_set_layout_traditional(&self, _sender: Option<&NSMenuItem>) {
-        self.emit(MenuAction::SetLayout(LayoutMode::Traditional));
-    }
 
-    fn on_set_layout_bsp(&self, _sender: Option<&NSMenuItem>) {
-        self.emit(MenuAction::SetLayout(LayoutMode::Bsp));
-    }
 
-    fn on_set_layout_floating(&self, _sender: Option<&NSMenuItem>) {
-        self.emit(MenuAction::SetLayout(LayoutMode::Floating));
-    }
 
-    fn on_set_layout_stack(&self, _sender: Option<&NSMenuItem>) {
-        self.emit(MenuAction::SetLayout(LayoutMode::Stack));
-    }
 
-    fn on_set_layout_master_stack(&self, _sender: Option<&NSMenuItem>) {
-        self.emit(MenuAction::SetLayout(LayoutMode::MasterStack));
-    }
 
-    fn on_set_layout_scrolling(&self, _sender: Option<&NSMenuItem>) {
-        self.emit(MenuAction::SetLayout(LayoutMode::Scrolling));
-    }
+
+
+
+
+
+
 
     fn on_toggle_space_activation(&self, _sender: Option<&NSMenuItem>) {
         self.emit(MenuAction::ToggleSpaceActivated);
@@ -1305,10 +1229,6 @@ impl MenuActionHandler {
                 source: RestoreSource::SavedActiveSpace,
             });
         }
-    }
-
-    fn on_open_settings(&self, _sender: Option<&NSMenuItem>) {
-        self.emit(MenuAction::OpenSettings);
     }
 
     fn on_open_documentation(&self, _sender: Option<&NSMenuItem>) {

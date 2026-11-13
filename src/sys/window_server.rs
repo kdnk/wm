@@ -724,8 +724,7 @@ fn find_window_at_point(point: &mut CGPoint, below_window_id: Option<u32>) -> Op
 
 fn is_own_window(cid: i32) -> bool { *G_CONNECTION == cid }
 
-/// Settings is Wm's only document window; its sheets are modal windows.
-/// Floating surfaces (menus/popovers) and compositor overlays are not targets.
+/// Wm's document and modal dialogs remain hit targets; overlays and menus do not.
 fn is_ignored_own_window(wid: u32, cid: i32) -> bool {
     if !is_own_window(cid) {
         return false;
@@ -761,14 +760,13 @@ pub fn get_window_at_point(mut point: CGPoint) -> Option<WindowServerId> {
 /// occludes the given screen point.
 ///
 /// Walks down the window stack at `point`, skipping Wm-owned surfaces except
-/// Settings and its sheets. Desktop/wallpaper windows sit well below
+/// document and modal dialogs. Desktop/wallpaper windows sit well below
 /// `NSNormalWindowLevel` and are not considered occluders.
 pub fn is_point_occluded_by_external_window(mut point: CGPoint) -> bool {
     use objc2_app_kit::NSNormalWindowLevel;
 
     let mut hit = find_window_at_point(&mut point, None);
 
-    // Skip other Wm surfaces without looking through Settings or its sheets.
     while let Some((wid, cid)) = hit {
         if !is_ignored_own_window(wid, cid) {
             let level = window_level(wid).unwrap_or(NSWindowLevel::MIN);

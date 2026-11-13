@@ -40,33 +40,7 @@ fn scrolling_display_widths_merge_and_validate() {
     );
 }
 
-#[test]
-fn layout_insertion_point_supports_global_default_and_per_mode_override() {
-    let settings: LayoutSettings = toml::from_str(
-        r#"
-                window_insertion_point = "end_of_tree"
 
-                [traditional]
-                window_insertion_point = "next_to_selection"
-                equalize_nodes = true
-
-                [scrolling]
-                animate = false
-            "#,
-    )
-    .unwrap();
-
-    assert_eq!(
-        settings.window_insertion_point_for(LayoutMode::Traditional),
-        WindowInsertionPoint::NextToSelection
-    );
-    assert_eq!(
-        settings.window_insertion_point_for(LayoutMode::Bsp),
-        WindowInsertionPoint::EndOfTree
-    );
-    assert!(settings.traditional.equalize_nodes);
-    assert_eq!(settings.scrolling.animate, Some(false));
-}
 
 #[test]
 fn virtual_workspace_prevent_wrapping_defaults_to_false_and_accepts_suggested_alias() {
@@ -84,8 +58,6 @@ fn app_rules_parse_placement_size_and_focus() {
         r#"
                 app_rules = [{
                     app_id = "com.example.Tool",
-                    floating = true,
-                    position = { x = 0.4, y = 0.7 },
                     size = { w = 640, h = 480 },
                     focus = true
                 }]
@@ -94,7 +66,6 @@ fn app_rules_parse_placement_size_and_focus() {
     .unwrap();
 
     let rule = &settings.app_rules[0];
-    assert_eq!(rule.position, Some(AppRulePosition { x: 0.4, y: 0.7 }));
     assert_eq!(rule.size, Some(AppRuleSize { w: Some(640.0), h: Some(480.0) }));
     assert!(rule.focus);
     assert!(settings.validate().is_empty());
@@ -121,8 +92,7 @@ fn app_rule_geometry_validation_rejects_invalid_values() {
     settings.app_rules.push(AppWorkspaceRule {
         app_id: Some("com.example.Tool".into()),
         workspace: None,
-        floating: false,
-        position: Some(AppRulePosition { x: -0.1, y: 1.1 }),
+
         size: Some(AppRuleSize {
             w: Some(0.0),
             h: Some(f64::NAN),
@@ -137,8 +107,6 @@ fn app_rule_geometry_validation_rejects_invalid_values() {
     });
 
     let issues = settings.validate();
-    assert!(issues.iter().any(|issue| issue.contains("between 0 and 1")));
-    assert!(issues.iter().any(|issue| issue.contains("only applies")));
     assert!(issues.iter().any(|issue| issue.contains("finite positive")));
 }
 
@@ -148,7 +116,7 @@ fn app_rule_validation_reports_invalid_regex_and_ignored_effects() {
     settings.app_rules.push(AppWorkspaceRule {
         app_id: Some("com.example.Tool".into()),
         workspace: Some(WorkspaceSelector::Index(1)),
-        floating: true,
+
         focus: true,
         manage: Some(false),
         title_regex: Some("[".into()),
@@ -584,8 +552,7 @@ fn typed_collections_keep_source_aliases_and_inline_commands() {
             });
             source.virtual_workspaces.app_rules.push(AppWorkspaceRule {
                 app_id: Some("com.example.Tool".into()),
-                floating: true,
-                position: Some(AppRulePosition { x: 0.4, y: 0.7 }),
+
                 ..Default::default()
             });
             source.virtual_workspaces.workspace_rules.push(WorkspaceLayoutRule {
@@ -678,12 +645,12 @@ fn workspace_resize_cleans_removed_assignments_and_preserves_valid_rules() {
     settings.workspace_rules = vec![
         WorkspaceLayoutRule {
             workspace: WorkspaceSelector::Name("three".into()),
-            layout: Some(LayoutMode::Stack),
+            layout: Some(LayoutMode::Scrolling),
             display: None,
         },
         WorkspaceLayoutRule {
             workspace: WorkspaceSelector::Index(0),
-            layout: Some(LayoutMode::Bsp),
+            layout: Some(LayoutMode::Scrolling),
             display: None,
         },
     ];
@@ -939,7 +906,7 @@ fn app_rule_commas_stay_on_the_preceding_line() {
         .unwrap();
     check(&document, 4);
     document
-        .update(|source| source.virtual_workspaces.app_rules[1].floating = true)
+        .update(|source| source.virtual_workspaces.app_rules[1].focus = true)
         .unwrap();
     check(&document, 4);
     document

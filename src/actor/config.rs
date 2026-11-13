@@ -6,36 +6,14 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
 use crate::actor::{self, reactor};
-use crate::common::config::{Config, ConfigCommand, ConfigDocument, ConfigSource, MAX_WORKSPACES};
+use crate::common::config::{Config, ConfigCommand, ConfigDocument, MAX_WORKSPACES};
 use crate::model::broadcast::{BroadcastEvent, BroadcastSender};
 
 pub type Sender = actor::Sender<Event>;
 pub type Receiver = actor::Receiver<Event>;
 
-/// A typed mutation of a source candidate; ConfigActor owns validation and persistence.
-pub type SourceEdit = Box<dyn FnOnce(&mut ConfigSource) -> Result<(), String> + Send>;
-
-#[derive(Serialize, Deserialize)]
-pub struct SourceSnapshot {
-    pub revision: u64,
-    pub source: ConfigSource,
-}
-
-type SnapshotResponse = SyncSender<Result<SourceSnapshot, String>>;
-
 #[derive(Serialize, Deserialize)]
 pub enum Event {
-    #[serde(skip)]
-    QuerySource(SnapshotResponse),
-    #[serde(skip)]
-    ReloadSource(SnapshotResponse),
-    /// Replace the source only if no other change happened since `expected_revision`.
-    #[serde(skip)]
-    ApplySource {
-        expected_revision: u64,
-        source: Box<ConfigSource>,
-        response: SnapshotResponse,
-    },
     #[serde(skip)]
     QueryConfig(SyncSender<Config>),
     #[serde(skip)]
@@ -110,22 +88,6 @@ impl ConfigActor {
     fn run(mut self, mut events: Receiver) {
         while let Some((_span, event)) = events.blocking_recv() {
             match event {
-                Event::QuerySource(response) => {
-                    let _ = response.send(self.source_snapshot());
-                }
-                Event::ReloadSource(response) => {
-                    let result = self
-                        .handle_config_command(ConfigCommand::ReloadConfig)
-                        .and_then(|()| self.source_snapshot());
-                    let _ = response.send(result);
-                }
-                Event::ApplySource {
-                    expected_revision,
-                    source,
-                    response,
-                } => {
-                    let _ = response.send(self.apply_source(expected_revision, *source));
-                }
                 Event::QueryConfig(resp) => {
                     let _ = resp.send(self.config.clone());
                 }
@@ -135,59 +97,6 @@ impl ConfigActor {
                 }
             }
         }
-    }
-
-    fn source_snapshot(&self) -> Result<SourceSnapshot, String> {
-        self.document
-            .source()
-            .map(|source| SourceSnapshot {
-                revision: self.source_revision,
-                source,
-            })
-            .map_err(|e| e.to_string())
-    }
-
-    fn apply_source(
-        &mut self,
-        expected_revision: u64,
-        source: ConfigSource,
-    ) -> Result<SourceSnapshot, String> {
-        if expected_revision != self.source_revision {
-            return Err(
-                "The configuration changed elsewhere, so this change was not saved. \
-                        Settings now shows the latest configuration; try again."
-                    .into(),
-            );
-        }
-        let current = self.source_snapshot()?;
-        if current.source == source {
-            return Ok(current);
-        }
-        let source = self.edit_source(current.source, move |current| {
-            *current = source;
-            Ok(())
-        })?;
-        Ok(SourceSnapshot {
-            revision: self.source_revision,
-            source,
-        })
-    }
-
-    fn edit_source(
-        &mut self,
-        source: ConfigSource,
-        edit: impl FnOnce(&mut ConfigSource) -> Result<(), String>,
-    ) -> Result<ConfigSource, String> {
-        let edited = self
-            .document
-            .edited_from(source, |source| edit(source).map_err(anyhow::Error::msg))
-            .map_err(|e| e.to_string())?;
-        // Persistence is part of the transaction: stale or failed saves never publish or commit.
-        self.persist(&edited.document)?;
-        self.document = edited.document;
-        self.config = edited.config;
-        self.publish();
-        Ok(edited.source)
     }
 
     fn publish(&mut self) {
@@ -262,7 +171,6 @@ impl ConfigActor {
                         Some(("animation_duration", *v, 0.0, 5.0))
                     }
                     ConfigCommand::SetAnimationFps(v) => Some(("animation_fps", *v, 0.0, 240.0)),
-                    ConfigCommand::SetStackOffset(v) => Some(("stack_offset", *v, 0.0, 200.0)),
                     _ => None,
                 };
                 if let Some((name, value, min, max)) = range
@@ -299,9 +207,7 @@ impl ConfigActor {
                             ConfigCommand::SetFocusFollowsMouse(v) => {
                                 settings.focus_follows_mouse = v
                             }
-                            ConfigCommand::SetStackOffset(v) => {
-                                settings.layout.stack.stack_offset = v
-                            }
+
                             ConfigCommand::SetOuterGaps { top, left, bottom, right } => {
                                 settings.layout.gaps.outer =
                                     crate::common::config::OuterGaps { top, left, bottom, right };
@@ -349,81 +255,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn source_transactions_check_revisions_and_skip_unchanged_sources() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("config.toml");
-        std::fs::write(&path, "# keep me\n[settings]\nanimate = false\n[keys]\n").unwrap();
-        let (reactor, _updates) = actor::channel();
-        let (events, mut changes) = actor::channel();
-        let actor = ConfigActor::spawn_with_path(Config::default(), reactor, events, path.clone());
-        let call = |event: fn(SnapshotResponse) -> Event| {
-            let (response, result) = sync_channel(1);
-            actor.send(event(response));
-            result.recv().unwrap()
-        };
-        let apply = |expected_revision, source: &ConfigSource| {
-            let (response, result) = sync_channel(1);
-            actor.send(Event::ApplySource {
-                expected_revision,
-                source: Box::new(source.clone()),
-                response,
-            });
-            result.recv().unwrap()
-        };
-        let initial = call(Event::QuerySource).unwrap();
-        // The child sends sources as JSON; the round trip must be lossless.
-        let json = serde_json::to_value(&initial.source).unwrap();
-        assert!(serde_json::from_value::<ConfigSource>(json).unwrap() == initial.source);
-        let unchanged = apply(initial.revision, &initial.source).unwrap();
-        assert_eq!(
-            unchanged.revision, initial.revision,
-            "no-op edits do not publish"
-        );
-        assert!(changes.try_recv().is_err());
-
-        let mut edited = initial.source.clone();
-        edited.settings.animate = true;
-        let saved = apply(initial.revision, &edited).unwrap();
-        assert_eq!(saved.revision, initial.revision + 1);
-        assert!(std::fs::read_to_string(&path).unwrap().starts_with("# keep me\n"));
-        let (_, event) = changes.try_recv().unwrap();
-        assert_eq!(event, BroadcastEvent::ConfigChanged { revision: saved.revision });
-
-        // A stale revision never overwrites a newer change.
-        let mut stale = initial.source.clone();
-        stale.settings.focus_follows_mouse = !stale.settings.focus_follows_mouse;
-        assert!(apply(initial.revision, &stale).err().unwrap().contains("changed elsewhere"));
-        assert!(call(Event::QuerySource).unwrap().source.settings.animate);
-
-        let mut external = ConfigDocument::read(&path).unwrap();
-        external.update(|s| s.settings.animate = false).unwrap();
-        external.save(&path).unwrap();
-        let reloaded = call(Event::ReloadSource).unwrap();
-        assert!(reloaded.revision > saved.revision);
-        assert!(!reloaded.source.settings.animate);
-        assert!(
-            apply(saved.revision, &edited).is_err(),
-            "reloads invalidate older revisions"
-        );
-    }
-
-    /// Settings sends whole sources as JSON; every source must read back unchanged.
-    #[test]
-    fn sources_round_trip_through_json() {
-        let text = include_str!("../../wm.default.toml");
-        let mut source = ConfigDocument::load(text).unwrap().0.source().unwrap();
-        for spec in ["Alt", "Ctrl + Fn"] {
-            source.settings.focus_follows_mouse_disable_hotkey =
-                Some(serde_json::from_value(serde_json::json!(spec)).unwrap());
-            let json = serde_json::to_value(&source).unwrap();
-            assert!(
-                serde_json::from_value::<ConfigSource>(json).unwrap() == source,
-                "{spec}"
-            );
-        }
-    }
-
-    #[test]
     fn commands_save_and_reload_the_source_document() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
@@ -455,124 +286,10 @@ mod tests {
         assert_eq!(Config::read(&path).unwrap().settings.animation_duration, 0.2);
     }
 
-    #[test]
-    fn settings_transactions_save_source_and_rollback_validation_and_io_failures() {
-        use crate::actor::wm_controller::{WmCmd, WmCommand};
-        use crate::common::config::{
-            AppWorkspaceRule, LayoutMode, WorkspaceLayoutRule, WorkspaceSelector,
-        };
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("config.toml");
-        let text = "# personal settings\n[settings]\nanimate = false # retain this comment\n[virtual_workspaces]\nworkspace_names = [\"Main\", \"Code\"]\n[keys]\n";
-        std::fs::write(&path, text).unwrap();
-        let (reactor_tx, mut updates) = actor::channel();
-        let mut actor = ConfigActor::load(
-            Config::read(&path).unwrap(),
-            reactor_tx,
-            actor::channel().0,
-            path.clone(),
-        );
-        let source = actor
-            .edit_source(actor.document.source().unwrap(), |s| {
-                s.settings.animate = true;
-                s.virtual_workspaces.workspace_names[1] = "Development".into();
-                s.virtual_workspaces.workspace_rules.push(WorkspaceLayoutRule {
-                    workspace: WorkspaceSelector::Index(1),
-                    layout: Some(LayoutMode::Scrolling),
-                    display: None,
-                });
-                s.virtual_workspaces.app_rules.push(AppWorkspaceRule {
-                    app_id: Some("com.apple.Safari".into()),
-                    manage: Some(false),
-                    ..Default::default()
-                });
-                s.virtual_workspaces.app_rules.push(AppWorkspaceRule {
-                    app_id: Some("com.apple.Terminal".into()),
-                    ..Default::default()
-                });
-                s.virtual_workspaces.app_rules.swap(0, 1);
-                s.binding_modes.insert(
-                    "resize".into(),
-                    [(
-                        "Alt + R".into(),
-                        WmCommand::Wm(WmCmd::BindingMode("default".into())),
-                    )]
-                    .into(),
-                );
-                s.keys.insert("Alt + H".into(), WmCommand::Wm(WmCmd::CloseWindow));
-                Ok(())
-            })
-            .unwrap();
-        let saved = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            saved.starts_with(
-                "# personal settings\n[settings]\nanimate = true # retain this comment"
-            )
-        );
-        assert!(!saved.contains("animation_duration"));
-        assert_eq!(source.virtual_workspaces.workspace_names[1], "Development");
-        assert_eq!(
-            source.virtual_workspaces.app_rules[0].app_id.as_deref(),
-            Some("com.apple.Terminal")
-        );
-        assert_eq!(Config::read(&path).unwrap().binding_mode_specs.len(), 2);
-        assert!(updates.try_recv().is_ok());
-        let document_before = actor.document.to_string();
-        assert!(
-            actor
-                .edit_source(actor.document.source().unwrap(), |s| {
-                    s.virtual_workspaces.app_rules[0].title_regex = Some("[".into());
-                    Ok(())
-                })
-                .is_err()
-        );
-        assert!(
-            actor
-                .edit_source(actor.document.source().unwrap(), |s| {
-                    s.keys.insert("Option + H".into(), WmCommand::Wm(WmCmd::NextWorkspace));
-                    Ok(())
-                })
-                .is_err()
-        );
-        assert_eq!(actor.document.to_string(), document_before);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
-        assert!(updates.try_recv().is_err());
-        actor.config_path = directory.path().to_path_buf(); // atomic replacement of a directory must fail
-        assert!(
-            actor
-                .edit_source(actor.document.source().unwrap(), |s| {
-                    s.settings.animate = false;
-                    Ok(())
-                })
-                .is_err()
-        );
-        assert!(actor.config.settings.animate);
-        assert_eq!(actor.document.to_string(), document_before);
-        assert!(updates.try_recv().is_err());
-        actor.config_path = path.clone();
-        actor
-            .edit_source(actor.document.source().unwrap(), |s| {
-                s.virtual_workspaces.app_rules.remove(1);
-                s.keys.remove("Alt + H");
-                s.binding_modes.remove("resize");
-                Ok(())
-            })
-            .unwrap();
-        let roundtrip = ConfigDocument::read(&path).unwrap().source().unwrap();
-        assert_eq!(roundtrip.virtual_workspaces.app_rules.len(), 1);
-        assert!(roundtrip.keys.is_empty());
-        assert!(roundtrip.binding_modes.is_empty());
-    }
-
-    /// Toggles `animate`, returning the saved value.
-    fn toggle_animate(actor: &mut ConfigActor) -> Result<bool, String> {
-        let edit = Box::new(|s: &mut ConfigSource| {
-            s.settings.animate = !s.settings.animate;
-            Ok(())
-        });
-        actor
-            .edit_source(actor.document.source().unwrap(), edit)
-            .map(|source| source.settings.animate)
+    fn save_toggled_animate(actor: &mut ConfigActor) -> Result<bool, String> {
+        actor.handle_config_command(ConfigCommand::SetAnimate(!actor.config.settings.animate))?;
+        actor.handle_config_command(ConfigCommand::SaveConfig)?;
+        Ok(actor.config.settings.animate)
     }
 
     #[test]
@@ -589,43 +306,46 @@ mod tests {
         );
 
         // Own saves succeed, and the watcher's echo of them publishes nothing.
-        assert!(toggle_animate(&mut actor).unwrap());
+        assert!(save_toggled_animate(&mut actor).unwrap());
         assert!(updates.try_recv().is_ok());
         let revision = actor.source_revision;
         actor.handle_config_command(ConfigCommand::ReloadConfig).unwrap();
         assert_eq!(actor.source_revision, revision);
         assert!(updates.try_recv().is_err());
 
-        // A valid external edit (same mtime-resolution window) wins and is adopted.
         let external = "# edited elsewhere\n[settings]\nanimate = true\nfocus_follows_mouse = false\n[keys]\n\"Alt + Y\" = \"close_window\"\n";
         std::fs::write(&path, external).unwrap();
-        let error = toggle_animate(&mut actor).unwrap_err();
+        let error = actor.handle_config_command(ConfigCommand::SaveConfig).unwrap_err();
         assert!(error.contains("changed on disk"), "{error}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), external);
         assert!(!actor.config.settings.focus_follows_mouse);
         assert!(
             actor.source_revision > revision,
-            "UI must resynchronize to the newer file"
+            "subscribers receive the newer file"
         );
         assert!(updates.try_recv().is_ok());
         // Retrying against the adopted file preserves its comments and custom bindings.
-        assert!(!toggle_animate(&mut actor).unwrap());
+        assert!(!save_toggled_animate(&mut actor).unwrap());
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(saved.starts_with("# edited elsewhere\n") && saved.contains("\"Alt + Y\""));
         assert!(saved.contains("animate = false"));
         assert!(updates.try_recv().is_ok());
 
-        // An invalid external edit is never replaced, by Settings or by `config save`.
         let invalid = "[settings\nanimate = true\n";
         std::fs::write(&path, invalid).unwrap();
         let revision = actor.source_revision;
-        assert!(toggle_animate(&mut actor).unwrap_err().contains("invalid"));
+        assert!(
+            actor
+                .handle_config_command(ConfigCommand::SaveConfig)
+                .unwrap_err()
+                .contains("invalid")
+        );
         actor.handle_config_command(ConfigCommand::SetAnimate(true)).unwrap();
         assert!(actor.handle_config_command(ConfigCommand::SaveConfig).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), invalid);
         assert!(actor.handle_config_command(ConfigCommand::ReloadConfig).is_err());
         assert!(
-            toggle_animate(&mut actor).is_err(),
+            actor.handle_config_command(ConfigCommand::SaveConfig).is_err(),
             "rejection must persist until fixed"
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), invalid);
@@ -633,9 +353,9 @@ mod tests {
 
         // Once fixed, the next save adopts the file instead of reverting the repair.
         std::fs::write(&path, "[settings]\nanimate = false\n[keys]\n").unwrap();
-        assert!(toggle_animate(&mut actor).is_err());
+        assert!(actor.handle_config_command(ConfigCommand::SaveConfig).is_err());
         assert!(!actor.config.settings.animate);
-        assert!(toggle_animate(&mut actor).unwrap());
+        assert!(save_toggled_animate(&mut actor).unwrap());
     }
 
     #[test]
@@ -646,10 +366,10 @@ mod tests {
         let (reactor_tx, _updates) = actor::channel();
         let mut actor =
             ConfigActor::load(Config::default(), reactor_tx, actor::channel().0, path.clone());
-        toggle_animate(&mut actor).unwrap();
+        save_toggled_animate(&mut actor).unwrap();
         assert!(Config::read(&path).is_ok(), "an absent file is created");
         std::fs::remove_file(&path).unwrap();
-        toggle_animate(&mut actor).unwrap();
+        save_toggled_animate(&mut actor).unwrap();
         assert!(
             path.exists(),
             "a deleted file has nothing to lose and is recreated"
@@ -658,12 +378,12 @@ mod tests {
         std::fs::rename(&path, &target).unwrap();
         std::os::unix::fs::symlink(&target, &path).unwrap();
         actor.handle_config_command(ConfigCommand::ReloadConfig).unwrap();
-        toggle_animate(&mut actor).unwrap();
+        save_toggled_animate(&mut actor).unwrap();
         assert!(std::fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
         let mut external = std::fs::read_to_string(&target).unwrap();
         external.insert_str(0, "# edited through the link target\n");
         std::fs::write(&target, &external).unwrap();
-        assert!(toggle_animate(&mut actor).is_err());
+        assert!(save_toggled_animate(&mut actor).is_err());
         assert_eq!(std::fs::read_to_string(&target).unwrap(), external);
     }
 

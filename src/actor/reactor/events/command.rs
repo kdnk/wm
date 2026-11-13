@@ -51,7 +51,6 @@ pub fn handle_command_layout(
         LayoutCommand::NextWindow
             | LayoutCommand::PrevWindow
             | LayoutCommand::MoveFocus(_)
-            | LayoutCommand::ToggleFocusFloating
     );
     let (is_virtual_workspace_command, is_workspace_switch, requires_workspace_space) = match cmd {
         LayoutCommand::NextWorkspace(_)
@@ -59,22 +58,11 @@ pub fn handle_command_layout(
         | LayoutCommand::SwitchToWorkspace(_)
         | LayoutCommand::SwitchToLastWorkspace => (true, true, true),
         LayoutCommand::MoveWindowToWorkspace { follow, .. } => (true, follow, follow),
-        LayoutCommand::SetWorkspaceLayout { .. } | LayoutCommand::CreateWorkspace => {
+        LayoutCommand::CreateWorkspace => {
             (true, false, true)
         }
         _ => (false, false, false),
     };
-    if matches!(
-        cmd,
-        LayoutCommand::JoinWindow(_)
-            | LayoutCommand::ToggleStack
-            | LayoutCommand::ConsumeOrExpelWindow(_)
-    ) && let Some(space) = command_space
-        && layout.layout_engine.active_layout_mode_at(space)
-            == crate::common::config::LayoutMode::Floating
-    {
-        store_current_floating_positions(state, layout, space);
-    }
     let workspace_space = if requires_workspace_space {
         if let Some(space) = command_space {
             store_current_floating_positions(state, layout, space);
@@ -215,14 +203,12 @@ fn current_floating_positions(
     layout: &LayoutManager,
     space: SpaceId,
 ) -> Vec<(WindowId, objc2_core_foundation::CGRect)> {
-    let floats_by_layout = layout.layout_engine.active_layout_mode_at(space)
-        == crate::common::config::LayoutMode::Floating;
     layout
         .layout_engine
         .workspaces()
         .windows_in_active_workspace(&state.windows, space)
         .into_iter()
-        .filter(|window| floats_by_layout || layout.layout_engine.is_window_floating(*window))
+        .filter(|window| layout.layout_engine.is_window_floating(*window))
         .filter_map(|window| {
             state.windows.window(window).map(|state| (window, state.frame_monotonic))
         })

@@ -396,10 +396,6 @@ mod tests {
             vec![Some(space)],
         ));
         r.handle_test_layout_command(LayoutCommand::NextWorkspace(Some(false)));
-        r.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
-            workspace: None,
-            mode: LayoutMode::Scrolling,
-        });
         for i in 1..=4 {
             r.send_layout_event(crate::layout_engine::LayoutEvent::WindowAdded(
                 space,
@@ -446,7 +442,7 @@ mod tests {
             0,
             space,
             (
-                LayoutMode::Scrolling,
+                true,
                 config.settings.layout.scrolling.gestures.fingers,
             ),
             settings,
@@ -631,10 +627,6 @@ mod tests {
                 spaces.push(Some(SpaceId::new(2)));
             }
             r.handle_loop_event(space_state_event(screens, spaces));
-            r.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
-                workspace: None,
-                mode: LayoutMode::Scrolling,
-            });
 
             apps.make_app_and_settle(&mut r, 1, make_windows(4));
 
@@ -874,21 +866,17 @@ mod tests {
         let (mut r, ctx, _, _) = setup_options_threshold(false, false, false, 0.25);
         r.gesture_event(Lifecycle::Reset);
         r.handle_test_layout_command(LayoutCommand::NextWorkspace(Some(false)));
-        r.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
-            workspace: None,
-            mode: LayoutMode::Scrolling,
-        });
         let (tx, mut rx) = crate::actor::channel();
         r.communication_manager.input_tx = Some(tx);
-        r.notification_manager.last_layout_modes_by_space.clear();
-        r.update_event_tap_layout_mode();
-        let crate::actor::input::Request::LayoutModesChanged(modes) = rx.try_recv().unwrap().1
+        r.notification_manager.last_scrolling_by_space.clear();
+        r.update_event_tap_scrolling_availability();
+        let crate::actor::input::Request::ScrollingAvailabilityChanged(modes) = rx.try_recv().unwrap().1
         else {
             panic!("gesture routing");
         };
         assert_eq!(
             modes,
-            vec![(ctx.space, LayoutMode::Traditional)],
+            vec![(ctx.space, false)],
             "empty strips must not acquire viewport strokes"
         );
         assert_eq!(

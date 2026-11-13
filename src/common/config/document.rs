@@ -107,7 +107,7 @@ impl ConfigDocument {
         Ok(config)
     }
 
-    /// Adapter for the existing CLI's dotted setting keys. UI callers use `update`.
+    /// Apply a CLI setting addressed by its dotted TOML key.
     pub(crate) fn set(&mut self, key: &str, value: &serde_json::Value) -> anyhow::Result<Config> {
         let mut candidate = self.clone();
         let mut parts = key.split('.').peekable();

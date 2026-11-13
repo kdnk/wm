@@ -320,6 +320,21 @@ fn migrate_legacy_resize_command(command: &mut toml::Value) -> bool {
     true
 }
 
+fn migrate_disabled_floating_rules(document: &mut toml::Value) {
+    if let Some(rules) = document.get_mut("virtual_workspaces")
+        .and_then(|value| value.get_mut("app_rules"))
+        .and_then(toml::Value::as_array_mut)
+    {
+        for rule in rules {
+            if let Some(table) = rule.as_table_mut()
+                && table.get("floating").and_then(toml::Value::as_bool) == Some(false)
+            {
+                table.remove("floating");
+            }
+        }
+    }
+}
+
 fn migrate_legacy_window_snapping(document: &mut toml::Value) -> bool {
     let Some(settings) = document.get_mut("settings").and_then(toml::Value::as_table_mut) else {
         return false;
@@ -356,6 +371,7 @@ pub(super) fn parse_config_file(buf: &str) -> Result<ConfigSource, toml::de::Err
     let mut document = toml::from_str::<toml::Value>(buf)?;
     migrate_legacy_resize_bindings(&mut document);
     migrate_legacy_window_snapping(&mut document);
+    migrate_disabled_floating_rules(&mut document);
     migrate_legacy_stack_line(&mut document);
     let explicit_workspace_names = document
         .get("virtual_workspaces")

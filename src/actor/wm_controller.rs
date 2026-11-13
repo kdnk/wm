@@ -87,67 +87,27 @@ impl WmCommand {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfiguredLayoutCommand {
-    ToggleWindowFloating(wm_protocol::ToggleWindowFloatingOptions),
     SwitchPresetColumnWidth,
 }
 
-#[derive(
-    Debug,
-    Clone,
-    Serialize,
-    Deserialize,
-    PartialEq,
-    Eq,
-    strum_macros::VariantNames,
-    wm_config_derive::CommandCatalog,
-)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, strum_macros::VariantNames)]
 #[serde(rename_all = "snake_case")]
 pub enum WmCmd {
-    #[command(group = 2, label = "Toggle tiling", order = 40)]
     ToggleSpaceActivated,
-    #[command(
-        label = "Run command",
-        order = 45,
-        sample = "Self::Exec(ExecCmd::String(String::new()))"
-    )]
     Exec(ExecCmd),
-    #[command(order = 46)]
     ReloadConfig,
-    #[command(
-        label = "Switch to keymap",
-        order = 44,
-        sample = "Self::BindingMode(\"default\".into())"
-    )]
     BindingMode(String),
 
-    #[command(group = 2, order = 31)]
     NextWorkspace,
-    #[command(group = 2, label = "Previous workspace", order = 32)]
     PrevWorkspace,
-    #[command(
-        group = 2,
-        order = 29,
-        sample = "Self::SwitchToWorkspace(WorkspaceSelector::Index(0))"
-    )]
     SwitchToWorkspace(WorkspaceSelector),
-    #[command(
-        group = 2,
-        order = 30,
-        sample = "Self::MoveWindowToWorkspace(WorkspaceSelector::Index(0))"
-    )]
     MoveWindowToWorkspace(WorkspaceSelector),
-    #[command(group = 2, order = 34)]
     CreateWorkspace,
-    #[command(group = 2, label = "Last workspace", order = 33)]
     SwitchToLastWorkspace,
 
-    #[command(group = 5, label = "Show all workspaces", order = 41)]
     ShowMissionControlAll,
-    #[command(group = 5, label = "Show current workspace", order = 42)]
     ShowMissionControlCurrent,
-    #[command(group = 5, label = "Dismiss overview", order = 43)]
     DismissMissionControl,
-    #[command(group = 0, order = 11)]
     CloseWindow,
 }
 
@@ -514,11 +474,7 @@ impl WmController {
             Command(Wm(Exec(cmd))) => {
                 self.exec_cmd(cmd);
             }
-            Command(ConfiguredLayout(ConfiguredLayoutCommand::ToggleWindowFloating(options))) => {
-                self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
-                    layout::LayoutCommand::ToggleWindowFloatingWithOptions(options),
-                )));
-            }
+
             Command(ConfiguredLayout(ConfiguredLayoutCommand::SwitchPresetColumnWidth)) => {
                 self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
                     layout::LayoutCommand::SwitchPresetColumnWidth { backwards: false },

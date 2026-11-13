@@ -27,15 +27,6 @@ fn menu_column_drop_on_unfocused_display_arranges_only_its_space_without_focus_e
     let (mut reactor, left, right) = two_displays();
     let engine = &mut reactor.layout_manager.layout_engine;
     let workspace = engine.workspaces().active_workspace(right).unwrap();
-    let response = engine.handle_virtual_workspace_command(
-        &mut reactor.state.windows,
-        right,
-        &layout::LayoutCommand::SetWorkspaceLayout {
-            workspace: None,
-            mode: LayoutMode::Scrolling,
-        },
-    );
-    assert!(response.changed);
     assert_eq!(engine.active_layout_mode_at(right), LayoutMode::Scrolling);
     for index in 1..=3 {
         let _ = engine.handle_event(
@@ -140,10 +131,6 @@ fn active_menu_windows(mode: LayoutMode, animated: bool) -> (Apps, Reactor, Spac
         vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 1000.0))],
         vec![Some(space)],
     ));
-    reactor.handle_test_layout_command(layout::LayoutCommand::SetWorkspaceLayout {
-        workspace: None,
-        mode,
-    });
     let focused = WindowId::new(1, 2);
     reactor.handle_events(apps.make_app_with_opts(1, make_windows(3), Some(focused), true, true));
     reactor.handle_event(Event::ApplicationGloballyActivated(1));
@@ -154,7 +141,7 @@ fn active_menu_windows(mode: LayoutMode, animated: bool) -> (Apps, Reactor, Spac
 
 #[test]
 fn menu_column_icon_click_warps_to_revealed_window_and_repeated_click_still_warps() {
-    for mode in [LayoutMode::Traditional, LayoutMode::Scrolling] {
+    for mode in [LayoutMode::Scrolling] {
         for animated in [false, true] {
             for enabled in [false, true] {
                 let (_apps, mut reactor, _space) = active_menu_windows(mode, animated);

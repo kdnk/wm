@@ -72,10 +72,6 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
 
-    /// Internal: run only the Settings window, connected to the running daemon.
-    #[arg(long, hide = true)]
-    settings: bool,
-
     /// Internal: recover offscreen windows after this daemon PID exits.
     #[arg(long, hide = true)]
     recover_windows: Option<i32>,
@@ -112,7 +108,6 @@ fn spawn_supervised<F: Future<Output = ()> + 'static>(
 }
 
 fn main() {
-    let entry = wm::ui::settings::timing::start();
     let opt = Cli::parse();
 
     if matches!(opt.command, Some(Commands::CloseWindow)) {
@@ -128,12 +123,6 @@ fn main() {
         return;
     }
     sigpipe::reset();
-
-    if opt.settings {
-        wm::ui::settings::timing::finish(entry, "entry/argument parsing");
-        log::init_logging();
-        wm::ui::settings::process::run(opt.config.unwrap_or_else(config_file));
-    }
 
     if let Some(Commands::Service { service }) = &opt.command {
         match handle_service_command(service) {
@@ -359,7 +348,6 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Wm."
         events_tx.clone(),
         config_tx.clone(),
         mtm,
-        config_path.clone(),
     );
     let stack_line = StackLine::new(
         config.clone(),

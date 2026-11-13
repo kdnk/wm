@@ -2692,10 +2692,6 @@ mod tests {
         apps.make_app_and_settle(&mut reactor, 1, make_windows(2));
         for space in spaces {
             reactor.space_state.command_space = Some(space);
-            reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
-                workspace: None,
-                mode: LayoutMode::Scrolling,
-            });
         }
         let wid = WindowId::new(1, 1);
         let (sender, mut receiver) = AnimationSender::channel();

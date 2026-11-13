@@ -3,7 +3,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use cgs::MainThreadMarker;
-use objc2_app_kit::{NSApplication, NSApplicationActivationOptions, NSMenu, NSRunningApplication};
+use objc2_app_kit::{NSApplication, NSMenu};
 use objc2_core_foundation::CGRect;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -83,7 +83,6 @@ impl Update {
 }
 
 pub enum Event {
-    OpenSettings,
     BindingModeChanged(String),
     Update(Update),
     ConfigUpdated(Box<Config>),
@@ -128,10 +127,7 @@ pub struct Menu {
     action_tx: UnboundedSender<MenuAction>,
     action_rx: tokio::sync::mpsc::UnboundedReceiver<MenuAction>,
     icon: Option<MenuIcon>,
-    /// The `wm --settings` process; checked only when Settings is requested.
-    settings: Option<std::process::Child>,
     mtm: MainThreadMarker,
-    config_path: std::path::PathBuf,
     last_signature: Option<u64>,
     last_update: Option<Update>,
     binding_mode: String,
@@ -147,10 +143,8 @@ impl Menu {
         reactor_tx: reactor::Sender,
         config_tx: config::Sender,
         mtm: MainThreadMarker,
-        config_path: std::path::PathBuf,
     ) -> Self {
-        // AppKit only dispatches the status menu's key equivalents (⌘, for Settings…)
-        // while it tracks if the application has a main menu, even an empty one.
+        // AppKit requires a main menu to dispatch status-menu key equivalents.
         let app = NSApplication::sharedApplication(mtm);
         if app.mainMenu().is_none() {
             app.setMainMenu(Some(&NSMenu::new(mtm)));
@@ -168,7 +162,6 @@ impl Menu {
         }
         Self {
             icon,
-            settings: None,
             config,
             rx,
             reactor_tx,
@@ -176,7 +169,6 @@ impl Menu {
             action_tx,
             action_rx,
             mtm,
-            config_path,
             last_signature: None,
             last_update: None,
             binding_mode: "default".into(),
@@ -245,7 +237,6 @@ impl Menu {
                                     }
                                 }
                                 Event::ConfigUpdated(cfg) => self.handle_config_updated(*cfg),
-                                Event::OpenSettings => self.open_settings(),
                             }
                         }
                         None => {
@@ -257,42 +248,6 @@ impl Menu {
                     }
                 }
             }
-        }
-    }
-
-    /// Focus the running Settings process, or start one. Its exit is noticed here, lazily.
-    fn open_settings(&mut self) {
-        if let Some(child) = &mut self.settings {
-            if let Ok(None) = child.try_wait() {
-                // A child still starting has no application yet; it activates itself when ready.
-                if let Some(app) =
-                    NSRunningApplication::runningApplicationWithProcessIdentifier(child.id() as i32)
-                {
-                    app.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows);
-                }
-                return;
-            }
-            self.settings = None;
-        }
-        let timing = crate::ui::settings::timing::start();
-        let child = std::env::current_exe().and_then(|exe| {
-            let mut command = std::process::Command::new(exe);
-            if timing.is_some() {
-                command.env(
-                    "WM_SETTINGS_SPAWN_TIME_NS",
-                    crate::ui::settings::timing::spawn_time_ns().to_string(),
-                );
-            }
-            command.arg("--settings").arg("--config").arg(&self.config_path).spawn()
-        });
-        crate::ui::settings::timing::finish(timing, "parent process spawn");
-        match child {
-            Ok(child) => {
-                // Reap on exit so a closed Settings leaves no zombie behind.
-                crate::sys::dispatch::reap_on_exit_proc(child.id() as i32);
-                self.settings = Some(child);
-            }
-            Err(error) => tracing::error!(%error, "Could not start Settings"),
         }
     }
 
@@ -360,8 +315,6 @@ impl Menu {
             MenuAction::FocusWindow(window) => {
                 self.reactor_tx.send(reactor::Event::MenuBarFocusWindow(window));
             }
-            MenuAction::SetLayout(mode) => self
-                .send_layout_command(LayoutCommand::SetWorkspaceLayout { workspace: None, mode }),
             MenuAction::NextWorkspace => {
                 self.send_layout_command(LayoutCommand::NextWorkspace(None));
             }
@@ -414,7 +367,6 @@ impl Menu {
             MenuAction::OpenSponsor => {
                 Self::open_path_or_url("https://github.com/sponsors/acsandmann");
             }
-            MenuAction::OpenSettings => self.open_settings(),
             MenuAction::OpenConfig => {
                 Self::open_path_or_url(common::config::config_file());
             }

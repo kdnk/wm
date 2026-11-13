@@ -10,7 +10,7 @@ use objc2_core_graphics::CGEvent;
 use parking_lot::Mutex;
 
 use crate::actor::reactor::{Event, Sender};
-use crate::common::config::{Config, HapticPattern, LayoutMode};
+use crate::common::config::{Config, HapticPattern};
 use crate::sys::dispatch::{DispatchExt, gesture_deadline_queue};
 use crate::sys::geometry::CGRectExt;
 use crate::sys::gesture::{Owner, Ownership};
@@ -83,9 +83,9 @@ impl Settings {
         self.scroll.into_iter().chain(self.workspace).any(|a| a.fingers == fingers)
     }
 
-    fn action_for(self, mode: LayoutMode, fingers: usize) -> Option<ActionConfig> {
+    fn action_for(self, mode: bool, fingers: usize) -> Option<ActionConfig> {
         self.scroll
-            .filter(|a| mode == LayoutMode::Scrolling && a.fingers == fingers)
+            .filter(|a| mode && a.fingers == fingers)
             .or_else(|| self.workspace.filter(|a| a.fingers == fingers))
     }
 }
@@ -124,7 +124,7 @@ struct Routing {
     ui_session: u64,
     settings: Settings,
     enabled: bool,
-    screens: Vec<(CGRect, SpaceId, LayoutMode)>,
+    screens: Vec<(CGRect, SpaceId, bool)>,
 }
 #[derive(Clone, Debug)]
 pub struct Control {
@@ -188,7 +188,7 @@ impl Control {
         &self,
         settings: Settings,
         enabled: bool,
-        screens: Vec<(CGRect, SpaceId, LayoutMode)>,
+        screens: Vec<(CGRect, SpaceId, bool)>,
     ) {
         let mut r = self.routing.lock();
         r.settings = settings;
@@ -310,7 +310,7 @@ struct DeviceSession {
     lifting: Option<Duration>,
 }
 impl DeviceSession {
-    fn new(context: Context, settings: Settings, mode: LayoutMode) -> Self {
+    fn new(context: Context, settings: Settings, mode: bool) -> Self {
         let max_fingers = settings
             .scroll
             .map_or(0, |a| a.fingers)
@@ -318,7 +318,7 @@ impl DeviceSession {
         let alternate = if context.action.scrolling {
             settings.workspace
         } else {
-            settings.scroll.filter(|_| mode == LayoutMode::Scrolling)
+            settings.scroll.filter(|_| mode)
         }
         .filter(|a| a.fingers != context.action.fingers);
         Self {
@@ -615,7 +615,7 @@ mod tests {
             session: u64,
             epoch: u64,
             space: SpaceId,
-            candidate: (LayoutMode, usize),
+            candidate: (bool, usize),
             settings: Settings,
             started: Duration,
         ) -> Option<Self> {
@@ -690,7 +690,7 @@ mod tests {
                 (
                     CGRect::new(CGPoint::ZERO, objc2_core_foundation::CGSize::new(1440.0, 900.0)),
                     SpaceId::new(10),
-                    LayoutMode::Scrolling,
+                    true,
                 ),
                 (
                     CGRect::new(
@@ -698,7 +698,7 @@ mod tests {
                         objc2_core_foundation::CGSize::new(1920.0, 1080.0),
                     ),
                     SpaceId::new(20),
-                    LayoutMode::Scrolling,
+                    true,
                 ),
             ]);
             let session = control.begin_at(Duration::ZERO, 3, point, 0).unwrap();
@@ -717,7 +717,7 @@ mod tests {
                 objc2_core_foundation::CGSize::new(2e9, 2e9),
             ),
             SpaceId::new(10),
-            LayoutMode::Scrolling,
+            true,
         )]);
         let device = || {
             Arc::new(Mutex::new(DeviceInput {
@@ -784,7 +784,7 @@ mod tests {
                     objc2_core_foundation::CGSize::new(2e9, 2e9),
                 ),
                 SpaceId::new(10),
-                LayoutMode::Traditional,
+                false,
             )];
             let device = || {
                 Arc::new(Mutex::new(DeviceInput {
@@ -934,11 +934,7 @@ mod tests {
         config.settings.layout.scrolling.gestures.fingers = 3;
         let settings = Settings::new(&config);
         let control = Control::new(&config);
-        let mode = if scrolling {
-            LayoutMode::Scrolling
-        } else {
-            LayoutMode::Traditional
-        };
+        let mode = scrolling;
         control.configure(settings, true, Vec::new());
         let c = Context::new(
             1,

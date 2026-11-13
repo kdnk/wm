@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{
-    GapSettings, ScrollingAlignment, ScrollingFocusNavigationStyle, ScrollingLayoutSettings,
+    GapSettings, ScrollingAlignment, ScrollingLayoutSettings,
     WindowInsertionPoint,
 };
 use crate::layout_engine::systems::constraints::{AxisConstraints, solve_axis_lengths};
@@ -547,18 +547,6 @@ impl Geometry {
             return Vec::new();
         };
         let view = self.tiling.size.width;
-        let anchored = settings.focus_navigation_style == ScrollingFocusNavigationStyle::Anchored;
-        if anchored {
-            return self
-                .columns
-                .iter()
-                .enumerate()
-                .map(|(index, _)| SnapPoint {
-                    offset: self.anchor_offset(index, settings.alignment),
-                    column: index,
-                })
-                .collect();
-        }
         let last = self.columns.last().unwrap();
         let left = first.world_x;
         let right = last.world_x + last.width - view;
@@ -961,18 +949,11 @@ impl LayoutState {
         let Some(column) = self.columns.get(self.active_column).and_then(|c| g.column(c.id)) else {
             return;
         };
-        let offset = if settings.focus_navigation_style == ScrollingFocusNavigationStyle::Anchored {
-            g.anchor_offset(
-                g.columns.iter().position(|c| c.id == column.id).unwrap(),
-                settings.alignment,
-            )
-        } else {
-            let target = match &self.viewport {
-                Viewport::Animation(s) => s.target,
-                _ => self.viewport.offset(),
-            };
-            fit_offset(target, g.tiling.size.width, column)
+        let target = match &self.viewport {
+            Viewport::Animation(s) => s.target,
+            _ => self.viewport.offset(),
         };
+        let offset = fit_offset(target, g.tiling.size.width, column);
         if matches!(&self.viewport, Viewport::Animation(s) if s.target == offset) {
             return;
         }
@@ -1428,28 +1409,12 @@ impl ScrollingLayoutSystem {
         let state = self.layouts.get_mut(layout)?;
         let g = state.geometry.as_ref()?;
         let from_offset = state.viewport.offset();
-        let niri = self.settings.focus_navigation_style == ScrollingFocusNavigationStyle::Niri;
         let snap = g.snaps.iter().min_by(|a, b| {
-            (a.offset - projected)
-                .abs()
-                .total_cmp(&(b.offset - projected).abs())
-                .then_with(|| {
-                    if niri {
-                        // Niri sorts snaps by position before nearest-point selection.
-                        a.offset.total_cmp(&b.offset)
-                    } else {
-                        (gesture_release
-                            && g.columns[a.column].id != state.columns[state.active_column].id)
-                            .cmp(
-                                &(gesture_release
-                                    && g.columns[b.column].id
-                                        != state.columns[state.active_column].id),
-                            )
-                    }
-                })
+            (a.offset - projected).abs().total_cmp(&(b.offset - projected).abs())
+                .then_with(|| a.offset.total_cmp(&b.offset))
         })?;
         let mut index = snap.column;
-        if niri {
+        {
             // Choose the furthest fully visible column
             // in the direction of travel.
             index = if projected >= from_offset {
@@ -2345,6 +2310,7 @@ fn set_height_share(
 }
 #[cfg(test)]
 pub(crate) mod tests {
+    use crate::common::config::ScrollingFocusNavigationStyle;
     pub(crate) fn presented_frames(
         system: &super::ScrollingLayoutSystem,
         layout: crate::layout_engine::LayoutId,
@@ -3334,40 +3300,7 @@ pub(crate) mod tests {
         }
     }
 
-    #[test]
-    fn anchored_alignments_and_single_column_placement_remain_supported() {
-        for (alignment, middle, single) in [
-            (ScrollingAlignment::Left, 0.0, 0.0),
-            (ScrollingAlignment::Center, 250.0, 250.0),
-            (ScrollingAlignment::Right, 500.0, 500.0),
-        ] {
-            let mut f = Fixture::new(3);
-            let mut settings = f.system.settings.clone();
-            settings.alignment = alignment;
-            settings.focus_navigation_style = ScrollingFocusNavigationStyle::Anchored;
-            f.system.update_settings(&settings);
-            for (index, x) in [(2, middle), (3, 500.0), (1, 0.0)] {
-                f.select(index);
-                assert_eq!(f.frame(index).origin.x, x);
-                f.system.begin_viewport_gesture(f.layout, Instant::now());
-                f.system.update_viewport_gesture(f.layout, 20.0, Duration::from_millis(10));
-                let release = f
-                    .system
-                    .end_viewport_gesture(f.layout, Duration::from_millis(210), false)
-                    .unwrap();
-                assert_eq!(release.window, wid(index), "alignment={alignment:?}");
-                assert_eq!(f.frame(index).origin.x, x);
-            }
-            let mut system = ScrollingLayoutSystem::new(&settings);
-            let layout = system.create_layout();
-            system.add_window_after_selection(layout, wid(1));
-            system.prepare_layout(layout, f.screen, &f.constraints, &f.gaps);
-            assert_eq!(
-                presented_frames(&system, layout).next().unwrap().1.origin.x,
-                single
-            );
-        }
-    }
+
 
     #[test]
     fn gesture_changes_focus_only_once_after_lift() {
@@ -3439,7 +3372,6 @@ pub(crate) mod tests {
     fn release_respects_navigation_style_and_preserves_flick_momentum() {
         for style in [
             ScrollingFocusNavigationStyle::Niri,
-            ScrollingFocusNavigationStyle::Anchored,
         ] {
             for ((distance, speed), target) in [
                 (240.0, 75.0),

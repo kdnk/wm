@@ -21,5 +21,6 @@ cargo run --locked --example menu-bar-window-list-check
 cargo build --locked --bin wm --bin wm-cli
 binary_dir=$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"] + "/debug")')
 python3 tests/wm-cli-identity-test.py "$binary_dir"
+python3 tests/niri-only-test.py "$binary_dir"
 WM_SERVICE_TEST_BINARY="$binary_dir/wm" \
     bash tests/rift-patched-service-test.sh

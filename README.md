@@ -37,8 +37,20 @@ Put `target/release/wm` and `target/release/wm-cli` in a stable location on PATH
 
 ```sh
 mkdir -p ~/.config/wm
-cp wm.default.toml ~/.config/wm/config.toml
+test -e ~/.config/wm/config.toml || cp wm.default.toml ~/.config/wm/config.toml
 ```
+
+The release also installs its default configuration and licenses in `~/.local/share/wm/release`.
+
+Edit `~/.config/wm/config.toml` to configure wm. Changes reload automatically while
+`[settings].hot_reload` is enabled, which is the default. To reload manually, run
+`wm-cli execute config reload`.
+
+wm uses niri-style scrolling columns. Columns can contain multiple windows. Other
+layout modes, anchored navigation, and floating controls are removed. When updating
+an older configuration, remove their settings and keybindings. Redundant
+`floating = false` app-rule settings are ignored. Use `manage = false` to leave a
+window unmanaged.
 
 Stop other window managers and grant wm Accessibility access.
 
