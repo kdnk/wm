@@ -37,7 +37,7 @@ fn config_read_rejects_semantically_invalid_files() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
     for (text, field) in [
-        ("[settings]\nanimation_fps = 0\n[keys]\n", "animation_fps"),
+        ("[settings]\nanimation_fps = -1\n[keys]\n", "animation_fps"),
         (
             "[settings]\nanimation_duration = -1\n[keys]\n",
             "animation_duration",
@@ -56,7 +56,7 @@ fn config_read_rejects_semantically_invalid_files() {
 #[test]
 fn config_document_load_rejects_semantically_invalid_files() {
     for (text, field) in [
-        ("[settings]\nanimation_fps = 0\n[keys]\n", "animation_fps"),
+        ("[settings]\nanimation_fps = -1\n[keys]\n", "animation_fps"),
         (
             "[settings]\nanimation_duration = -1\n[keys]\n",
             "animation_duration",
@@ -72,11 +72,24 @@ fn config_document_load_rejects_semantically_invalid_files() {
 }
 
 #[test]
+fn animation_settings_reject_nonfinite_values_and_negative_frame_rates() {
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.] {
+        let mut settings = Config::default().settings;
+        settings.animation_fps = value;
+        assert!(settings.validate().iter().any(|issue| issue.contains("animation_fps")));
+        settings.animation_fps = 0.;
+        settings.animation_duration = value;
+        assert!(settings.validate().iter().any(|issue| issue.contains("animation_duration")));
+    }
+}
+
+#[test]
 fn config_read_and_document_load_accept_defaults_and_valid_overrides() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
     for text in [
         include_str!("../../../wm.default.toml"),
+        "[settings]\nanimation_fps = 0\n[keys]\n",
         "[settings]\nanimation_fps = 60\nanimation_duration = 0.2\n[keys]\n",
     ] {
         std::fs::write(&path, text).unwrap();

@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-15. Original attribution is preserved in LICENSE.
 //! Display cadence for a locked screen. AppKit objects stay on the main thread.
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -80,20 +81,16 @@ pub struct DisplayLink {
 
 impl DisplayLink {
     pub fn for_display(display: u32, wake: Sender<()>) -> Self {
-        Self::create(
-            display,
-            move || {
-                let _ = wake.try_send(());
-            },
-            false,
-        )
+        Self::create(display, move || {
+            let _ = wake.try_send(());
+        })
     }
 
     pub fn for_display_callback(display: u32, wake: impl Fn() + Send + Sync + 'static) -> Self {
-        Self::create(display, wake, true)
+        Self::create(display, wake)
     }
 
-    fn create(display: u32, wake: impl Fn() + Send + Sync + 'static, high_refresh: bool) -> Self {
+    fn create(display: u32, wake: impl Fn() + Send + Sync + 'static) -> Self {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let state = Arc::new(State {
             wake: Box::new(wake),
@@ -104,8 +101,8 @@ impl DisplayLink {
         });
         queue::main().after_f_s(
             Time::NOW,
-            (id, display, state.clone(), high_refresh),
-            |(id, display, state, high_refresh)| {
+            (id, display, state.clone()),
+            |(id, display, state)| {
                 if state.cancelled.load(Ordering::Acquire) {
                     return;
                 }
@@ -125,14 +122,8 @@ impl DisplayLink {
                 let target: Retained<DisplayLinkTarget> = unsafe { msg_send![super(target), init] };
                 // The target is retained by the link. It does not retain the link in return.
                 let link = unsafe { screen.displayLinkWithTarget_selector(&target, sel!(tick:)) };
-                if high_refresh {
-                    let fps = screen.maximumFramesPerSecond() as f32;
-                    link.setPreferredFrameRateRange(CAFrameRateRange::new(
-                        30_f32.min(fps),
-                        fps,
-                        fps,
-                    ));
-                }
+                let fps = screen.maximumFramesPerSecond() as f32;
+                link.setPreferredFrameRateRange(CAFrameRateRange::new(30_f32.min(fps), fps, fps));
                 link.setPaused(paused);
                 unsafe {
                     link.addToRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSRunLoopCommonModes)

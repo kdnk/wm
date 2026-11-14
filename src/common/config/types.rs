@@ -398,7 +398,7 @@ pub struct Settings {
     /// Duration of a window animation, in seconds.
     pub animation_duration: f64,
     #[serde(default = "default_animation_fps")]
-    /// Maximum number of frames per second during a window animation.
+    /// Maximum animation frame rate. Zero follows the display refresh rate.
     pub animation_fps: f64,
     #[serde(default)]
     /// The timing curve used for window animations.
@@ -1183,16 +1183,16 @@ impl Settings {
     pub fn validate(&self) -> Vec<String> {
         let mut issues = Vec::new();
 
-        if self.animation_duration < 0.0 {
+        if !self.animation_duration.is_finite() || self.animation_duration < 0.0 {
             issues.push(format!(
                 "animation_duration must be non-negative, got {}",
                 self.animation_duration
             ));
         }
 
-        if self.animation_fps <= 0.0 {
+        if !self.animation_fps.is_finite() || self.animation_fps < 0.0 {
             issues.push(format!(
-                "animation_fps must be positive, got {}",
+                "animation_fps must be non-negative and finite, got {}",
                 self.animation_fps
             ));
         }
@@ -1401,7 +1401,7 @@ pub fn default_stack_orientation() -> StackDefaultOrientation {
 
 fn default_animation_duration() -> f64 { 0.3 }
 
-fn default_animation_fps() -> f64 { 100.0 }
+fn default_animation_fps() -> f64 { 0.0 }
 
 fn default_layout_folder() -> PathBuf { PathBuf::from("~/.config/wm/layouts") }
 

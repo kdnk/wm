@@ -76,6 +76,8 @@ def run(args):
     config = json.loads(subprocess.check_output([client, "execute", "config", "get"], timeout=5))
     overrides = {
         "settings.animate": True,
+        "settings.animation_duration": 0.3,
+        "settings.animation_fps": args.animation_fps,
         "settings.mouse_hides_on_focus": False,
         "settings.focus_follows_mouse": False,
         "settings.layout.scrolling.preserve_window_sizes": False,
@@ -108,7 +110,8 @@ def run(args):
     if empty is None:
         raise RuntimeError("An empty scrolling workspace is required")
     original_pointer = pointer.position()
-    report = {"label": "wm-polish-" + uuid.uuid4().hex[:8], "scenes": [], "failures": []}
+    report = {"label": "wm-polish-" + uuid.uuid4().hex[:8], "settings": overrides,
+              "scenes": [], "failures": []}
     fixture = None
 
     def focus(window):
@@ -281,4 +284,6 @@ if __name__ == "__main__":
     parser.add_argument("--qt-python", type=Path, default=Path("/Applications/Anki.app/Contents/Frameworks/Python.framework/Versions/3.13/bin/python3.13"))
     parser.add_argument("--qt-packages", type=Path, default=Path("/Applications/Anki.app/Contents/Resources/app_packages"))
     parser.add_argument("--expect-cursor-retention", action="store_true")
+    parser.add_argument("--animation-fps", type=float, default=0.0,
+                        help="Animation FPS cap; 0 follows the display refresh rate")
     run(parser.parse_args())

@@ -230,15 +230,15 @@ impl Reactor {
             }
         }
         let s = self.viewport_gesture.take().unwrap();
-        let animate = s
-            .context
-            .action
-            .animate
-            .or(self
-                .layout_manager
-                .layout_engine
-                .layout_specific_animate_settings(s.context.space))
-            .unwrap_or(self.config.settings.animate);
+        let animate = !self.reduce_motion
+            && s.context
+                .action
+                .animate
+                .or(self
+                    .layout_manager
+                    .layout_engine
+                    .layout_specific_animate_settings(s.context.space))
+                .unwrap_or(self.config.settings.animate);
         let LayoutSystemKind::Scrolling(system) =
             &mut self.layout_manager.layout_engine.workspaces_mut()[s.workspace].layout_system;
         let release = if cancelled {
@@ -532,6 +532,57 @@ mod tests {
             assert_eq!(r.workspace_switch_manager.active_workspace_switch, None);
             assert!(!r.workspace_switch_manager.manual_switch_in_progress());
         }
+    }
+
+    #[test]
+    fn reduce_motion_keeps_direct_tracking_and_finishes_release_without_inertia() {
+        let (mut r, ctx, _, motion) = setup_options_threshold(false, false, false, 0.25);
+        r.viewport_gesture.as_mut().unwrap().context.action.animate = Some(true);
+        let session = r.viewport_gesture.as_ref().unwrap();
+        let (workspace, layout) = (session.workspace, session.layout);
+        r.add_test_app(1);
+        let LayoutSystemKind::Scrolling(system) =
+            &r.layout_manager.layout_engine.workspaces()[workspace].layout_system;
+        let frames: Vec<_> =
+            crate::layout_engine::systems::scrolling::tests::presented_frames(system, layout)
+                .collect();
+        for (wid, frame) in frames {
+            r.insert_test_window_state(wid, frame, None, true);
+        }
+        r.start_gesture_presentation();
+        motion.publish(sample(1, 40., 100));
+        r.presentations
+            .get_mut(&ctx.space)
+            .unwrap()
+            .headless
+            .as_mut()
+            .unwrap()
+            .sample(Instant::now());
+        r.handle_event(super::super::Event::ReduceMotionChanged(true));
+        let camera = r.presentations.get_mut(&ctx.space).unwrap().headless.as_mut().unwrap();
+        assert!(camera.presentation.gesturing());
+        assert!(camera.active);
+        let first = camera.presentation.offset();
+        motion.publish(sample(1, 300., 150));
+        camera.sample(Instant::now());
+        assert_ne!(
+            camera.presentation.offset(),
+            first,
+            "the finger must continue moving the viewport"
+        );
+        r.gesture_event(Lifecycle::End {
+            sample: sample(1, 300., 160),
+            cancelled: false,
+        });
+        assert!(
+            r.viewport_gesture.is_none(),
+            "release must retire without autonomous inertia"
+        );
+        let LayoutSystemKind::Scrolling(system) =
+            &r.layout_manager.layout_engine.workspaces()[workspace].layout_system;
+        let presentation = system.presentation(layout).unwrap().0;
+        assert!(!presentation.animated());
+        assert!(!presentation.gesturing());
     }
 
     #[test]

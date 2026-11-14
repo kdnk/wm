@@ -261,7 +261,7 @@ mod tests {
         );
         let original = serde_json::to_value(&actor.config).unwrap();
         for (invalid, field) in [
-            ("[settings]\nanimation_fps = 0\n[keys]\n", "animation_fps"),
+            ("[settings]\nanimation_fps = -1\n[keys]\n", "animation_fps"),
             (
                 "[settings]\nanimation_duration = -1\n[keys]\n",
                 "animation_duration",

@@ -84,6 +84,13 @@ define_class! {
             self.handle_session_event(notif);
         }
 
+        #[unsafe(method(recvAccessibilityDisplayOptions:))]
+        fn recv_accessibility_display_options(&self, _notif: &NSNotification) {
+            self.send_event(WmEvent::ReduceMotionChanged(
+                NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion(),
+            ));
+        }
+
         #[unsafe(method(recvPowerEvent:))]
         fn recv_power_event(&self, notif: &NSNotification) {
             trace!("{notif:#?}");
@@ -440,6 +447,17 @@ impl NotificationCenter {
             );
         };
 
+        unsafe {
+            workspace_center.addObserver_selector_name_object(
+                &handler,
+                sel!(recvAccessibilityDisplayOptions:),
+                Some(objc2_app_kit::NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification),
+                None,
+            );
+        }
+        handler.send_event(WmEvent::ReduceMotionChanged(
+            workspace.accessibilityDisplayShouldReduceMotion(),
+        ));
         init_power_state();
 
         NotificationCenter { inner: handler }

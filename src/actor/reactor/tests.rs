@@ -15,6 +15,83 @@ use crate::sys::geometry::SameAs;
 use crate::sys::window_server::WindowServerId;
 
 #[test]
+fn reduce_motion_settles_navigation_and_isolates_runtime_preferences() {
+    use super::animation::{AnimationManager, AnimationSender};
+
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    reactor.config.settings.animate = true;
+    reactor.config.settings.layout.scrolling.animate = Some(true);
+    reactor.config.settings.layout.scrolling.column_width_ratio = 1.;
+    reactor.config.settings.layout.scrolling.preserve_window_sizes = false;
+    reactor
+        .layout_manager
+        .layout_engine
+        .set_layout_settings(&reactor.config.settings.layout);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(3));
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, WindowId::new(1, 1)));
+    reactor.update_layout_or_warn(false, false, Some(space));
+    apps.simulate_until_quiet(&mut reactor);
+    let (sender, receiver) = AnimationSender::channel();
+    reactor.animation_tx = Some(sender);
+    let mut presenter = AnimationManager::new();
+    reactor.handle_test_layout_command(LayoutCommand::MoveFocus(Direction::Right));
+    for message in receiver.commands.try_iter() {
+        presenter.handle_message(message);
+    }
+    presenter.tick_at(Instant::now() + Duration::from_millis(40));
+    apps.simulate_events();
+    reactor.handle_event(Event::ReduceMotionChanged(true));
+    for message in receiver.commands.try_iter() {
+        presenter.handle_message(message);
+    }
+    apps.simulate_events();
+    reactor.commit_presentations();
+    let selected = reactor.layout_manager.layout_engine.focused_window().unwrap();
+    let final_frame = apps.windows[&selected].frame;
+    assert!(
+        final_frame.min().x >= screen.min().x && final_frame.max().x <= screen.max().x,
+        "Reduce Motion must settle the selected window immediately: {final_frame:?}"
+    );
+    assert!(reactor.config.settings.animate);
+    assert_eq!(reactor.config.settings.layout.scrolling.animate, Some(true));
+    reactor.handle_test_layout_command(LayoutCommand::MoveFocus(Direction::Right));
+    for message in receiver.commands.try_iter() {
+        presenter.handle_message(message);
+    }
+    presenter.tick_at(Instant::now());
+    apps.simulate_events();
+    let selected = reactor.layout_manager.layout_engine.focused_window().unwrap();
+    let frame = apps.windows[&selected].frame;
+    assert!(
+        frame.min().x >= screen.min().x && frame.max().x <= screen.max().x,
+        "the explicit layout override cannot re-enable animation: {frame:?}"
+    );
+    reactor.handle_event(Event::ReduceMotionChanged(false));
+    reactor.handle_test_layout_command(LayoutCommand::MoveFocus(Direction::Left));
+    let messages: Vec<_> = receiver.commands.try_iter().collect();
+    assert!(messages.iter().any(|m| matches!(m, super::animation::Message::Camera(_))));
+    for message in messages {
+        presenter.handle_message(message);
+    }
+    presenter.tick_at(Instant::now() + Duration::from_millis(40));
+    apps.simulate_events();
+    let selected = reactor.layout_manager.layout_engine.focused_window().unwrap();
+    let moving = apps.windows[&selected].frame;
+    presenter.tick_at(Instant::now() + Duration::from_secs(2));
+    apps.simulate_events();
+    let settled = apps.windows[&selected].frame;
+    assert_ne!(
+        moving, settled,
+        "disabling Reduce Motion must restore animated travel for later navigation"
+    );
+    assert!(settled.min().x >= screen.min().x);
+    let (_, independent) = test_context();
+    assert!(!independent.reduce_motion);
+}
+
+#[test]
 fn duplicate_space_snapshot_does_not_stop_keyboard_navigation_midway() {
     use super::animation::{AnimationManager, AnimationSender, Message};
 

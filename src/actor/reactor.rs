@@ -474,6 +474,7 @@ pub enum Event {
 
     #[serde(skip)]
     ConfigUpdated(Config),
+    ReduceMotionChanged(bool),
 }
 
 /// The AX-side observation that caused an app actor to discard its handle.
@@ -487,6 +488,7 @@ pub enum WindowInvalidationSource {
 
 pub struct Reactor {
     pub config: Config,
+    reduce_motion: bool,
     pub one_space: bool,
     pub(crate) binding_mode: String,
     app_manager: managers::AppManager,
@@ -591,6 +593,7 @@ impl Reactor {
         };
         let reactor = Reactor {
             config: config.clone(),
+            reduce_motion: false,
             one_space,
             binding_mode: "default".into(),
             app_manager: managers::AppManager::new(),
@@ -2741,6 +2744,15 @@ impl Reactor {
             }
             Event::RaiseTimeout { sequence_id } => {
                 return Ok(system_workflow::handle_raise_timeout(sequence_id)?);
+            }
+            Event::ReduceMotionChanged(enabled) => {
+                if self.reduce_motion != enabled {
+                    self.reduce_motion = enabled;
+                    if enabled {
+                        self.settle_motion();
+                    }
+                }
+                return Ok(EventOutcome::no_change());
             }
             Event::ConfigUpdated(new_cfg) => {
                 if new_cfg.virtual_workspaces.mode == crate::common::config::WorkspaceMode::Global

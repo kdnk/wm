@@ -57,6 +57,7 @@ pub enum WmEvent {
     AppExited(pid_t, AppThreadHandle),
     SpaceStateUpdated(ForwardedSpaceState, CoordinateConverter),
     PowerStateChanged(bool),
+    ReduceMotionChanged(bool),
     KeyboardLayoutChanged,
     OverviewChanged,
     OverviewActivationTarget(reactor::OverviewTarget),
@@ -346,6 +347,9 @@ impl WmController {
                 self.config.config = new_cfg;
 
                 _ = self.input_tx.send(input::Request::ConfigUpdated(self.config.config.clone()));
+            }
+            ReduceMotionChanged(enabled) => {
+                self.events_tx.send(reactor::Event::ReduceMotionChanged(enabled));
             }
             PowerStateChanged(is_low_power_mode) => {
                 info!("Power state changed: low power mode = {}", is_low_power_mode);
