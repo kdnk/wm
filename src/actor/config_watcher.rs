@@ -40,11 +40,15 @@ impl ConfigWatcher {
         file: PathBuf,
     ) -> notify::Result<(Self, RecommendedWatcher, Receiver<Event>)> {
         // FSEvents reports absolute paths; preserve the final symlink itself.
+        let file = std::path::absolute(file)?;
         let file = file
-            .parent()
-            .and_then(|p| fs::canonicalize(p).ok())
-            .zip(file.file_name())
-            .map(|(parent, name)| parent.join(name))
+            .ancestors()
+            .skip(1)
+            .find_map(|parent| {
+                fs::canonicalize(parent)
+                    .ok()
+                    .map(|parent_path| parent_path.join(file.strip_prefix(parent).unwrap()))
+            })
             .unwrap_or(file);
         let mut actor = Self {
             file,
@@ -68,22 +72,25 @@ impl ConfigWatcher {
     fn run(config_tx: config_actor::Sender, file: PathBuf) -> notify::Result<()> {
         let (mut actor, mut watcher, rx) = Self::watch(config_tx, file)?;
         while let Ok(event) = rx.recv() {
-            if !actor.is_relevant(&event) {
-                continue;
-            }
-            actor.settle(&rx);
-            // Watch parents rather than files: atomic saves replace the inode, and a
-            // deleted file must remain discoverable. Retargeted symlinks need new parents.
-            // A failed refresh must not end hot reload; keep the existing watches.
-            if let Err(error) = actor.refresh_watches(&mut watcher) {
-                warn!("config-watcher: failed to refresh watches: {error}");
-            }
-            actor.reload_if_changed();
+            actor.handle_event(&mut watcher, &rx, event);
             if actor.config_tx.is_closed() {
                 break;
             }
         }
         Ok(())
+    }
+
+    fn handle_event(&mut self, watcher: &mut dyn Watcher, rx: &Receiver<Event>, event: Event) {
+        if !self.is_relevant(&event) {
+            return;
+        }
+        self.settle(rx);
+        // Watch parents rather than files: atomic saves replace the inode, and a
+        // deleted file must remain discoverable. Retargeted symlinks need new parents.
+        if let Err(error) = self.refresh_watches(watcher) {
+            warn!("config-watcher: failed to refresh watches: {error}");
+        }
+        self.reload_if_changed();
     }
 
     fn settle(&self, rx: &Receiver<Event>) {
@@ -107,16 +114,18 @@ impl ConfigWatcher {
             .parent()
             .into_iter()
             .chain(real_file.as_deref().and_then(|p| p.parent()))
+            .filter_map(|parent| parent.ancestors().find(|ancestor| ancestor.is_dir()))
             .map(PathBuf::from)
             .collect();
-        for dir in parents.difference(&self.parents) {
-            watcher.watch(dir, RecursiveMode::NonRecursive)?;
+        for dir in parents.difference(&self.parents).cloned().collect::<Vec<_>>() {
+            watcher.watch(&dir, RecursiveMode::NonRecursive)?;
             info!("watching {:?}", dir);
+            self.parents.insert(dir);
         }
-        for dir in self.parents.difference(&parents) {
-            watcher.unwatch(dir)?;
+        for dir in self.parents.difference(&parents).cloned().collect::<Vec<_>>() {
+            watcher.unwatch(&dir)?;
+            self.parents.remove(&dir);
         }
-        self.parents = parents;
         self.real_file_id = real_file
             .as_ref()
             .and_then(|p| fs::metadata(p).ok())
@@ -127,8 +136,8 @@ impl ConfigWatcher {
 
     fn is_relevant(&self, event: &Event) -> bool {
         event.paths.iter().any(|path| {
-            path == &self.file
-                || self.real_file.as_ref() == Some(path)
+            self.file.starts_with(path)
+                || self.real_file.as_ref().is_some_and(|file| file.starts_with(path))
                 || self.parents.contains(path)
                 || self
                     .real_file_id
@@ -186,5 +195,109 @@ impl ConfigWatcher {
         let (response, result) = std::sync::mpsc::sync_channel(1);
         self.config_tx.try_send(ConfigEvent::QueryConfig(response)).map_err(|_| ())?;
         result.recv().map_err(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::time::Instant;
+
+    use super::*;
+    use crate::actor::{self, reactor};
+
+    struct WatchingConfig {
+        actor: ConfigWatcher,
+        watcher: RecommendedWatcher,
+        events: Receiver<Event>,
+        updates: actor::Receiver<reactor::Event>,
+    }
+
+    impl WatchingConfig {
+        fn new(path: &Path) -> Self {
+            let (reactor_tx, updates) = actor::channel();
+            let config_tx = config_actor::ConfigActor::spawn_with_path(
+                config::Config::default(),
+                reactor_tx,
+                actor::channel().0,
+                path.to_path_buf(),
+            );
+            let (actor, watcher, events) =
+                ConfigWatcher::watch(config_tx, path.to_path_buf()).unwrap();
+            actor.query_config().unwrap();
+            Self {
+                actor,
+                watcher,
+                events,
+                updates,
+            }
+        }
+
+        fn await_animate(&mut self, expected: bool) {
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                while let Ok((_, update)) = self.updates.try_recv() {
+                    if let reactor::Event::ConfigUpdated(config) = update {
+                        assert_eq!(config.settings.animate, expected);
+                        return;
+                    }
+                }
+                let event = self
+                    .events
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .expect("filesystem changes must publish ConfigUpdated");
+                self.actor.handle_event(&mut self.watcher, &self.events, event);
+            }
+        }
+    }
+
+    fn write_config(path: &Path, animate: bool) {
+        fs::write(path, format!("[settings]\nanimate = {animate}\n[keys]\n")).unwrap();
+    }
+
+    #[test]
+    fn reloads_after_missing_parent_directories_are_created() {
+        let directory = tempfile::Builder::new()
+            .prefix("wm-config-watcher-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let path = directory.path().join("new/settings/config.toml");
+        let mut config = WatchingConfig::new(&path);
+
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        write_config(&path, true);
+        config.await_animate(true);
+
+        write_config(&path, false);
+        config.await_animate(false);
+    }
+
+    #[test]
+    fn reloads_atomic_replacements_and_retargeted_symlinks() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("first/config.toml");
+        let second = directory.path().join("second/config.toml");
+        fs::create_dir(first.parent().unwrap()).unwrap();
+        fs::create_dir(second.parent().unwrap()).unwrap();
+        write_config(&first, false);
+        write_config(&second, false);
+        let path = directory.path().join("config.toml");
+        std::os::unix::fs::symlink(&first, &path).unwrap();
+        let mut config = WatchingConfig::new(&path);
+
+        let replacement = first.with_file_name("replacement.toml");
+        write_config(&replacement, true);
+        fs::rename(replacement, &first).unwrap();
+        config.await_animate(true);
+
+        let replacement = path.with_file_name("replacement-link");
+        std::os::unix::fs::symlink(&second, &replacement).unwrap();
+        fs::rename(replacement, &path).unwrap();
+        config.await_animate(false);
+
+        let replacement = second.with_file_name("replacement.toml");
+        write_config(&replacement, true);
+        fs::rename(replacement, &second).unwrap();
+        config.await_animate(true);
     }
 }

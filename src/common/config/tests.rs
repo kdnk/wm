@@ -12,6 +12,64 @@ use crate::layout_engine::{LayoutCommand, ResizeOrientation};
 use crate::sys::hotkey::Modifiers;
 
 #[test]
+fn config_read_rejects_semantically_invalid_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    for (text, field) in [
+        ("[settings]\nanimation_fps = 0\n[keys]\n", "animation_fps"),
+        (
+            "[settings]\nanimation_duration = -1\n[keys]\n",
+            "animation_duration",
+        ),
+        (
+            "[settings]\n[virtual_workspaces]\ndefault_workspace_count = 0\n[keys]\n",
+            "default_workspace_count",
+        ),
+    ] {
+        std::fs::write(&path, text).unwrap();
+        let error = Config::read(&path).unwrap_err();
+        assert!(error.to_string().contains(field), "{error}");
+    }
+}
+
+#[test]
+fn config_document_load_rejects_semantically_invalid_files() {
+    for (text, field) in [
+        ("[settings]\nanimation_fps = 0\n[keys]\n", "animation_fps"),
+        (
+            "[settings]\nanimation_duration = -1\n[keys]\n",
+            "animation_duration",
+        ),
+        (
+            "[settings]\n[virtual_workspaces]\ndefault_workspace_count = 0\n[keys]\n",
+            "default_workspace_count",
+        ),
+    ] {
+        let error = ConfigDocument::load(text).err().expect("invalid config was accepted");
+        assert!(error.to_string().contains(field), "{error}");
+    }
+}
+
+#[test]
+fn config_read_and_document_load_accept_defaults_and_valid_overrides() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    for text in [
+        include_str!("../../../wm.default.toml"),
+        "[settings]\nanimation_fps = 60\nanimation_duration = 0.2\n[keys]\n",
+    ] {
+        std::fs::write(&path, text).unwrap();
+        let config = Config::read(&path).unwrap();
+        let (document, loaded) = ConfigDocument::load(text).unwrap();
+        assert_eq!(document.to_string(), text);
+        assert_eq!(
+            serde_json::to_value(config).unwrap(),
+            serde_json::to_value(loaded).unwrap()
+        );
+    }
+}
+
+#[test]
 fn scrolling_display_widths_merge_and_validate() {
     let settings: ScrollingLayoutSettings = toml::from_str(
         r#"
