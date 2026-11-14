@@ -55,11 +55,15 @@ python3 tests/install-release-test.py
 
 Keep fixture tests isolated from the user's installation, service, signing material, keychains, and certificate trust. Live desktop tests require a matching daemon and macOS permissions. Report checks that could not run.
 
-Summarize the version rationale, release contents, verification results, and exact candidate commit before publication. Preparation-only requests end with the local change or commit.
+Summarize the version rationale, release contents, verification results, and exact candidate commit before publication. When publication is authorized below, continue without asking for confirmation of the summary. Preparation-only requests end with the local change or commit.
 
 ## Publish through the existing workflow
 
-Require an explicit user request to publish or release before pushing, creating a PR, merging a version bump, or dispatching the release workflow. Creating this skill, preparing a release, or committing changes does not authorize publication. Automatic skill selection grants no authority. Respect narrower user limits, such as opening a PR without merging it.
+An explicit `$release` invocation or direct request to release or publish authorizes the necessary version preparation, local commit, merge into local `main`, push of `main`, existing workflow dispatch when needed, and confirmation of publication. Carry that authorization through the release without asking again after the candidate summary. Respect narrower preparation-only, commit-only, or other explicit limits. Creating or editing this skill, a version-bump request alone, and automatic skill selection do not authorize publication.
+
+For sandbox approval justifications, quote the actual user request and name the exact candidate SHA and intended side effects, including the local `main` merge, remote `main` push, and resulting release workflow. Do not substitute a generic claim that the skill authorizes publication. If tool approval review denies an action, report the denied action and stated reason honestly. Do not bypass the denial or retry unchanged without new authorization or evidence that addresses the denial. Ask only for authorization still required by that denial or an explicit user limit.
+
+Follow the repository's GitButler path through local `main`, without creating a PR or merging through GitHub. Confirm that the configured target is `main`, then use `but merge RELEASE_BRANCH --ff-only --yes` to merge and push the verified candidate. Publication authorization includes this push, so do not apply the local-only remote override used for unpublished landing. If fast-forwarding is impossible, reassess and verify the resulting candidate before publication rather than silently creating a different release commit.
 
 The normal path is a root version change merged into `main`. That push starts `release.yml`, which verifies the pinned source SHA, creates an immutable tag, builds both macOS architectures, signs the universal `wm` binary, and publishes the archive. Keep tag creation and publication in that workflow. Do not create tags or releases manually with `scripts/release.py tag`, `scripts/release.py publish`, or `gh release create`.
 
