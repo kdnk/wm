@@ -255,6 +255,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reload_rejects_semantic_errors_without_changing_runtime_or_document() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let text = "[settings]\nanimate = false\n[keys]\n";
+        std::fs::write(&path, text).unwrap();
+        let (reactor_tx, mut updates) = actor::channel();
+        let mut actor = ConfigActor::load(
+            Config::read(&path).unwrap(),
+            reactor_tx,
+            actor::channel().0,
+            path.clone(),
+        );
+        let original = serde_json::to_value(&actor.config).unwrap();
+        for (invalid, field) in [
+            ("[settings]\nanimation_fps = 0\n[keys]\n", "animation_fps"),
+            ("[settings]\nanimation_duration = -1\n[keys]\n", "animation_duration"),
+            (
+                "[settings]\n[virtual_workspaces]\ndefault_workspace_count = 0\n[keys]\n",
+                "default_workspace_count",
+            ),
+        ] {
+            std::fs::write(&path, invalid).unwrap();
+            let error = actor.handle_config_command(ConfigCommand::ReloadConfig).unwrap_err();
+            assert!(error.contains(field), "{error}");
+            assert_eq!(serde_json::to_value(&actor.config).unwrap(), original);
+            assert_eq!(actor.document.to_string(), text);
+            assert_eq!(actor.disk.as_deref(), Some(text));
+            assert!(updates.try_recv().is_err());
+        }
+        std::fs::write(&path, text.replace("false", "true")).unwrap();
+        actor.handle_config_command(ConfigCommand::ReloadConfig).unwrap();
+        let (_, update) = updates.try_recv().unwrap();
+        assert!(matches!(update, reactor::Event::ConfigUpdated(config) if config.settings.animate));
+    }
+
+    #[test]
     fn commands_save_and_reload_the_source_document() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
