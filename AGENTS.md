@@ -3,6 +3,7 @@
 - Use `but` for version-control writes. Work in the existing checkout on a dedicated branch; do not create worktrees.
 - When asked to land changes, use `but` to merge into local `main`. Do not create a pull request or merge through GitHub. This repository rule overrides skill workflows that require PRs. Push only when explicitly requested.
 - Use `env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=branch.main.remote GIT_CONFIG_VALUE_0= but merge BRANCH` for local-only landing. Plain `but merge` or `but land` pushes when `main` tracks a remote; the process-only override preserves the persistent tracking configuration.
+- An explicit request to run `but land` authorizes its normal remote push and takes precedence over the local-only landing default above. Run `but land` without URL rewrites, remote overrides, or other changes that suppress its push. Use local-only landing only when the user explicitly requests it or asks to land changes without naming `but land`.
 - The `cgs/` directory contains vendored cgs sources with the exact-capture extension required by live resizing. Preserve its license and record source updates in `cgs/README.fork.md`.
 - Run `bash scripts/verify-dot-port.sh` after changing the imported Rift features. Pass a configuration file as the optional argument to validate additional app rules.
 - The verification script tests LaunchAgent serialization with an isolated HOME. It must not start or stop the user's service, change signing identities, or install the daemon.
