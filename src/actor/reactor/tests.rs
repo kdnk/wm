@@ -6761,6 +6761,22 @@ fn empty_inventory_keeps_window_parked_on_inactive_workspace() {
         reactor.test_workspace_windows(space, secondary).contains(&wid),
         "the window must stay in its workspace layout"
     );
+
+    reactor.handle_event(Event::WindowInvalidated(
+        wid,
+        super::WindowInvalidationSource::InvalidUiElement,
+    ));
+    assert!(reactor.state.windows.is_temporarily_unavailable(wid));
+    crate::sys::window_server::set_window_ordered_in_override(wsid, Some(false));
+    reactor.discover_test_windows(wid.pid, vec![], vec![]);
+    crate::sys::window_server::set_window_ordered_in_override(wsid, None);
+
+    assert_eq!(
+        reactor.test_workspace_for_window(space, wid),
+        Some(secondary),
+        "AX invalidation must not make an empty inventory retire the parked window"
+    );
+    assert!(reactor.test_workspace_windows(space, secondary).contains(&wid));
 }
 
 #[test]
@@ -7083,11 +7099,13 @@ fn native_tab_matching_does_not_merge_independent_windows() {
 
 #[test]
 fn native_tab_departure_preserves_focus_before_notifications_and_discovery() {
-    for (ax_first, server_first, discovered) in [
-        (false, false, true),
-        (true, false, true),
-        (true, true, true),
-        (false, false, false),
+    for (ax_first, server_first, discovered, invalidated) in [
+        (false, false, true, false),
+        (true, false, true, false),
+        (true, true, true, false),
+        (false, false, false, false),
+        (false, false, true, true),
+        (false, false, false, true),
     ] {
         let (mut apps, mut reactor) = test_context();
         let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
@@ -7108,6 +7126,12 @@ fn native_tab_departure_preserves_focus_before_notifications_and_discovery() {
         }
         if server_first {
             reactor.handle_event(Event::WindowServerFocusChanged(new_tab, space));
+        }
+        if invalidated {
+            reactor.handle_event(Event::WindowInvalidated(
+                old_tab,
+                super::WindowInvalidationSource::AxDestroyedNotification,
+            ));
         }
         let native_new = WindowId::new(2, 20_002);
         reactor.native_focus_for_removal = Some(native_new);
@@ -7189,58 +7213,80 @@ fn native_tab_departure_keeps_recovery_without_a_native_successor() {
 
 #[test]
 fn closing_focused_window_refocuses_survivor() {
-    for (closed_idx, survivor_idx) in [(2, 3), (3, 2)] {
-        let (mut apps, mut reactor) = test_context_with_workspace_count(2);
-        let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-        let space = SpaceId::new(1);
-        let survivor = WindowId::new(1, survivor_idx);
-        let closed = WindowId::new(1, closed_idx);
-        let other_workspace_window = WindowId::new(1, 4);
+    for ax_first in [false, true] {
+        for (closed_idx, survivor_idx) in [(2, 3), (3, 2)] {
+            let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+            let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+            let space = SpaceId::new(1);
+            let survivor = WindowId::new(1, survivor_idx);
+            let closed = WindowId::new(1, closed_idx);
+            let other_workspace_window = WindowId::new(1, 4);
 
-        apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(4));
-        let active_workspace = reactor
-            .layout_manager
-            .layout_engine
-            .workspaces()
-            .active_workspace(space)
-            .unwrap();
-        let other_workspace = reactor
-            .test_workspace_ids(space)
-            .into_iter()
-            .find(|workspace| *workspace != active_workspace)
-            .unwrap();
-        assert!(reactor.assign_test_window_to_workspace(
-            space,
-            other_workspace_window,
-            other_workspace
-        ));
+            apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(4));
+            let active_workspace = reactor
+                .layout_manager
+                .layout_engine
+                .workspaces()
+                .active_workspace(space)
+                .unwrap();
+            let other_workspace = reactor
+                .test_workspace_ids(space)
+                .into_iter()
+                .find(|workspace| *workspace != active_workspace)
+                .unwrap();
+            assert!(reactor.assign_test_window_to_workspace(
+                space,
+                other_workspace_window,
+                other_workspace
+            ));
+            assert!(reactor.assign_test_window_to_workspace(
+                space,
+                WindowId::new(1, 1),
+                other_workspace
+            ));
+            apps.simulate_until_quiet(&mut reactor);
+            let (raise_manager_tx, mut raise_manager_rx) = actor::channel();
+            reactor.communication_manager.raise_manager_tx = raise_manager_tx;
+            reactor.handle_event(Event::ApplicationGloballyActivated(1));
+            reactor.send_layout_event(LayoutEvent::WindowFocused(space, closed));
+            assert_eq!(
+                reactor.layout_manager.layout_engine.focused_window(),
+                Some(closed)
+            );
+            while raise_manager_rx.try_recv().is_ok() {}
 
-        apps.simulate_until_quiet(&mut reactor);
-        let (raise_manager_tx, mut raise_manager_rx) = actor::channel();
-        reactor.communication_manager.raise_manager_tx = raise_manager_tx;
-        reactor.handle_event(Event::ApplicationGloballyActivated(1));
-        reactor.send_layout_event(LayoutEvent::WindowFocused(space, closed));
-        assert_eq!(
-            reactor.layout_manager.layout_engine.focused_window(),
-            Some(closed)
-        );
-        while raise_manager_rx.try_recv().is_ok() {}
+            let wsid = reactor.test_window_server_id(closed);
+            if ax_first {
+                reactor.handle_event(Event::WindowInvalidated(
+                    closed,
+                    super::WindowInvalidationSource::AxDestroyedNotification,
+                ));
+                reactor.handle_event(Event::WindowServerHidden(wsid));
+                window_server::set_window_ordered_in_override(wsid, Some(false));
+                reactor.handle_event(Event::WindowServerDestroyed(
+                    wsid,
+                    space,
+                    SpaceEventKind::User,
+                ));
+                window_server::set_window_ordered_in_override(wsid, None);
+            } else {
+                reactor.handle_event(Event::WindowClosed(wsid));
+            }
 
-        reactor.handle_event(Event::WindowClosed(reactor.test_window_server_id(closed)));
-
-        let requests: Vec<_> = std::iter::from_fn(|| raise_manager_rx.try_recv().ok())
-            .map(|(_, event)| event)
-            .collect();
-        assert!(
-            requests.iter().any(|event| matches!(
-                event,
-                raise_manager::Event::RaiseRequest(RaiseRequest { focus_window: Some((wid, _)), app_handles, .. })
-                    if *wid == survivor && app_handles.contains_key(&survivor.pid)
-            )),
-            "closing the focused window must request deliverable focus for the survivor: {requests:?}"
-        );
-        reactor.handle_event(Event::WindowServerFocusChanged(survivor, space));
-        assert!(reactor.create_window_data(survivor).unwrap().is_focused);
+            let requests: Vec<_> = std::iter::from_fn(|| raise_manager_rx.try_recv().ok())
+                .map(|(_, event)| event)
+                .collect();
+            assert!(
+                requests.iter().any(|event| matches!(
+                    event,
+                    raise_manager::Event::RaiseRequest(RaiseRequest { focus_window: Some((wid, _)), app_handles, .. })
+                        if *wid == survivor && app_handles.contains_key(&survivor.pid)
+                )),
+                "ax_first={ax_first}: closing the focused window must request deliverable focus for the survivor: {requests:?}"
+            );
+            reactor.handle_event(Event::WindowServerFocusChanged(survivor, space));
+            assert!(reactor.create_window_data(survivor).unwrap().is_focused);
+        }
     }
 }
 
@@ -8170,13 +8216,13 @@ fn inventory_negatives_require_native_authority_even_when_hidden() {
     for (invalidated, inactive) in [(false, false), (true, false), (true, true)] {
         for visible in [true, false] {
             for (suitable, ordered_in, retired) in [
-                (Some(true), Some(false), invalidated),
+                (Some(true), Some(false), invalidated && !inactive),
                 (Some(true), Some(true), false),
                 (Some(true), None, false),
                 (None, Some(true), false),
                 (None, None, false),
-                (Some(false), None, true),
-                (None, Some(false), true),
+                (Some(false), None, !inactive),
+                (None, Some(false), !inactive),
             ] {
                 let (mut reactor, wid, wsid, _, _, _) = reactor_with_window_on_space1();
                 if invalidated {

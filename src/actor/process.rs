@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::future;
 
 use objc2_app_kit::NSRunningApplication;
@@ -76,18 +77,20 @@ impl ProcessActor {
 
         let wm_sender = sender.clone();
         let listener = CarbonListener::application(&types, move |ev: Event| {
-            let pid = unsafe {
+            let psn = match unsafe {
                 ev.parameter::<ProcessSerialNumber>(
                     K_EVENT_PARAM_PROCESS_ID,
                     TYPE_PROCESS_SERIAL_NUMBER,
                 )
-                .and_then(|psn| pid_for_psn(&psn))
+            } {
+                Some(psn) => psn,
+                None => return NO_ERR,
             };
-            if ev.kind == K_EVENT_APP_TERMINATED {
-                wm_sender.send(WmEvent::AppTerminated(pid));
-                return NO_ERR;
-            }
-            let Some(pid) = pid else { return NO_ERR };
+
+            let pid = match unsafe { pid_for_psn(&psn) } {
+                Some(pid) => pid,
+                None => return NO_ERR,
+            };
 
             match ev.kind {
                 K_EVENT_APP_LAUNCHED => {
@@ -109,6 +112,10 @@ impl ProcessActor {
                     let info = app_info_for_pid(pid);
                     spaces_sender.send(session_event_for_front_app(&info));
                     wm_sender.send(WmEvent::AppGloballyActivated(pid));
+                }
+                K_EVENT_APP_TERMINATED => {
+                    debug!("Carbon: App terminated ({pid})");
+                    wm_sender.send(WmEvent::AppTerminated(pid));
                 }
                 _ => {}
             }

@@ -2793,43 +2793,54 @@ mod tests {
         use super::super::testing::*;
         use crate::actor::reactor::Event;
 
-        let (mut apps, mut reactor) = test_context();
-        let space = SpaceId::new(1);
-        let Event::SpaceStateChanged(mut snapshot) =
-            space_state_event(vec![rect(0., 0., 1000., 800.)], vec![Some(space)])
-        else {
-            unreachable!()
-        };
-        reactor.handle_event(Event::SpaceStateChanged(snapshot.clone()));
-        apps.make_app_and_settle(&mut reactor, 1, make_windows(1));
-        let wid = WindowId::new(1, 1);
-        let (sender, receiver) = AnimationSender::channel();
-        let frame = rect(10., 10., 500., 400.);
-        sender
-            .control
-            .lock()
-            .frames
-            .insert(wid, (reactor.app_manager.apps[&1].handle.clone(), frame));
-        let control = Arc::clone(&sender.control);
-        reactor.animation_tx = Some(sender);
-        for revision in [
-            snapshot.revision,
-            snapshot.revision.saturating_sub(1),
-            snapshot.revision + 1,
-        ] {
-            let mut restated = snapshot.clone();
-            restated.revision = revision;
-            reactor.handle_event(Event::SpaceStateChanged(restated));
-            assert!(control.lock().frames.contains_key(&wid));
+        for destroy_space in [false, true] {
+            let (mut apps, mut reactor) = test_context();
+            let space = SpaceId::new(1);
+            let Event::SpaceStateChanged(mut snapshot) =
+                space_state_event(vec![rect(0., 0., 1000., 800.)], vec![Some(space)])
+            else {
+                unreachable!()
+            };
+            reactor.handle_event(Event::SpaceStateChanged(snapshot.clone()));
+            apps.make_app_and_settle(&mut reactor, 1, make_windows(1));
+            let wid = WindowId::new(1, 1);
+            let (sender, receiver) = AnimationSender::channel();
+            let frame = rect(10., 10., 500., 400.);
+            sender
+                .control
+                .lock()
+                .frames
+                .insert(wid, (reactor.app_manager.apps[&1].handle.clone(), frame));
+            let control = Arc::clone(&sender.control);
+            reactor.animation_tx = Some(sender);
+            for revision in [
+                snapshot.revision,
+                snapshot.revision.saturating_sub(1),
+                snapshot.revision + 1,
+            ] {
+                let mut restated = snapshot.clone();
+                restated.revision = revision;
+                reactor.handle_event(Event::SpaceStateChanged(restated));
+                assert!(control.lock().frames.contains_key(&wid));
+                assert!(
+                    receiver
+                        .commands
+                        .try_iter()
+                        .all(|message| !matches!(message, Message::Stop(_)))
+                );
+            }
+            snapshot.revision += 2;
+            if destroy_space {
+                snapshot.destroyed_spaces.insert(space);
+            } else {
+                snapshot.screens[0].frame.size.width += 100.;
+            }
+            reactor.handle_event(Event::SpaceStateChanged(snapshot));
+            assert!(!control.lock().frames.contains_key(&wid));
             assert!(
-                receiver.commands.try_iter().all(|message| !matches!(message, Message::Stop(_)))
+                receiver.commands.try_iter().any(|message| matches!(message, Message::Stop(_)))
             );
         }
-        snapshot.revision += 2;
-        snapshot.screens[0].frame.size.width += 100.;
-        reactor.handle_event(Event::SpaceStateChanged(snapshot));
-        assert!(!control.lock().frames.contains_key(&wid));
-        assert!(receiver.commands.try_iter().any(|message| matches!(message, Message::Stop(_))));
     }
 
     #[test]
