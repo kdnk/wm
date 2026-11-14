@@ -21,7 +21,7 @@ def main():
         return subprocess.run([str(binary), *arguments], env=env, text=True,
                               capture_output=True, timeout=15)
 
-    client = binaries / "wm-cli"
+    client = binaries / "wm"
     for group, command in [
         ("workspace", "set-layout"),
         ("layout", "toggle-orientation"),

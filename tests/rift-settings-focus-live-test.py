@@ -215,7 +215,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Verify settings windows survive repeated native focus changes.")
     parser.add_argument("--app", choices=PROFILES, default="muse")
     parser.add_argument("--other-bundle", help="Bundle ID of the other managed application to focus.")
-    parser.add_argument("--client", type=Path, default=Path(__file__).resolve().parents[1] / "target/debug/wm-cli")
+    parser.add_argument("--client", type=Path, default=Path(__file__).resolve().parents[1] / "target/debug/wm")
     parser.add_argument("--cycles", type=int, default=3)
     arguments = parser.parse_args()
     if arguments.cycles < 1:

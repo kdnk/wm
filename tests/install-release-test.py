@@ -51,7 +51,8 @@ if name == 'curl':
         shutil.copyfile(os.environ['INSTALL_TEST_ARCHIVE'],destination)
 elif name == 'codesign':
     assert args[:4] == ['--verify','--strict','--all-architectures','--test-requirement']
-    identifier='git.kdnk.wm.cli' if Path(args[-1]).name == 'wm-cli' else 'git.kdnk.wm'
+    assert Path(args[-1]).name == 'wm'
+    identifier='git.kdnk.wm'
     assert args[4] == '=identifier "'+identifier+'" and certificate leaf = H"'+os.environ['INSTALL_TEST_PIN']+'"'
     if os.environ.get('INSTALL_TEST_BAD_SIGNATURE') == Path(args[-1]).name:
         print('invalid signature',file=sys.stderr)
@@ -75,7 +76,7 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.home = self.directory / "home"
         self.home.mkdir()
         self.payload = {
-            "wm": b"signed-daemon", "wm-cli": b"signed-client", "wm.default.toml": b"[settings]\n",
+            "wm": b"signed-daemon", "wm.default.toml": b"[settings]\n",
             "release-signing.pem": (ROOT / "assets/release-signing.pem").read_bytes(),
             "licenses/wm-LICENSE": b"wm license", "licenses/wm-NOTICE": b"wm notice",
             "licenses/cgs/LICENSE": b"cgs license",
@@ -137,7 +138,7 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.assertEqual((self.prefix / "bin/wm-cli").read_bytes(), b"old-client")
         self.assertEqual((self.prefix / "share/wm/release/old").read_bytes(), b"old-metadata")
 
-    def test_installs_verified_pair_without_touching_configuration_identity_or_service(self):
+    def test_installs_verified_wm_without_touching_configuration_identity_or_service(self):
         configuration = self.home / ".config/wm/config.toml"
         configuration.parent.mkdir(parents=True)
         configuration.write_text("personal settings")
@@ -146,12 +147,29 @@ class ReleaseInstallerTests(unittest.TestCase):
         identity.write_text("protected signing material")
         self.invoke(str(self.archive))
         for name, data in self.payload.items():
-            target = self.prefix / "bin" / name if name in {"wm", "wm-cli"} else self.prefix / "share/wm/release" / name
+            target = self.prefix / "bin" / name if name == "wm" else self.prefix / "share/wm/release" / name
             self.assertEqual(target.read_bytes(), data)
         self.assertTrue(os.access(self.prefix / "bin/wm", os.X_OK))
+        self.assertEqual({path.name for path in (self.prefix / "bin").iterdir()}, {"wm"})
         self.assertEqual(configuration.read_text(), "personal settings")
         self.assertEqual(identity.read_text(), "protected signing material")
-        self.assertEqual([call[0] for call in self.calls()], ["codesign", "codesign"])
+        self.assertEqual([call[0] for call in self.calls()], ["codesign"])
+
+    def test_upgrade_preserves_an_existing_unmanaged_client(self):
+        self.seed_installation()
+        self.invoke(str(self.archive))
+        self.assertEqual((self.prefix / "bin/wm").read_bytes(), self.payload["wm"])
+        self.assertEqual((self.prefix / "bin/wm-cli").read_bytes(), b"old-client")
+        self.assertFalse((self.prefix / "share/wm/release/old").exists())
+
+    def test_old_two_binary_archive_is_rejected_before_replacement(self):
+        self.seed_installation()
+        self.payload["wm-cli"] = b"signed-client"
+        self.make_archive()
+        result = self.invoke(str(self.archive), successful=False)
+        self.assertIn("Unexpected archive entry: wm-cli", result.stderr)
+        self.assert_old_installation()
+        self.assertEqual(self.calls(), [])
 
     def test_downloads_latest_or_selected_release_without_github_cli(self):
         self.invoke()
@@ -170,7 +188,7 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.invoke(environment=dict(
             self.environment, INSTALL_TEST_TAG="v0.8.2+build.1",
             INSTALL_TEST_LATEST_URL="https://github.com/kdnk/wm/releases/tag/v0.8.2%2Bbuild.1"))
-        self.assertEqual((self.prefix / "bin/wm-cli").read_bytes(), self.payload["wm-cli"])
+        self.assertEqual((self.prefix / "bin/wm").read_bytes(), self.payload["wm"])
 
     def test_standalone_installer_needs_no_repository_files(self):
         standalone = self.directory / "install-release.py"
@@ -178,9 +196,9 @@ class ReleaseInstallerTests(unittest.TestCase):
         result = subprocess.run([sys.executable, str(standalone), "--prefix", str(self.prefix)],
                                 cwd=self.directory, env=self.environment, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((self.prefix / "bin/wm-cli").read_bytes(), self.payload["wm-cli"])
+        self.assertEqual((self.prefix / "bin/wm").read_bytes(), self.payload["wm"])
 
-    def test_failed_download_preserves_installed_pair(self):
+    def test_failed_download_preserves_installation(self):
         self.seed_installation()
         result = self.invoke("--version", "v0.8.2", successful=False,
                              environment=dict(self.environment, INSTALL_TEST_DOWNLOAD_FAIL="all"))
@@ -194,7 +212,7 @@ class ReleaseInstallerTests(unittest.TestCase):
                 self.invoke("--version", tag, successful=False)
         self.assertEqual(self.calls(), [])
 
-    def test_invalid_latest_redirect_preserves_installed_pair(self):
+    def test_invalid_latest_redirect_preserves_installation(self):
         self.seed_installation()
         for url in ("https://github.com/kdnk/wm/releases/latest", "https://example.com/tag/v0.8.2",
                     "https://github.com/kdnk/wm/releases/tag/../../escape",
@@ -208,7 +226,7 @@ class ReleaseInstallerTests(unittest.TestCase):
         prefix = self.directory / "installation with spaces"
         self.bootstrap("--version", "v0.8.2", "--prefix", str(prefix))
         self.assertEqual((prefix / "bin/wm").read_bytes(), self.payload["wm"])
-        self.assertEqual((prefix / "bin/wm-cli").read_bytes(), self.payload["wm-cli"])
+        self.assertFalse((prefix / "bin/wm-cli").exists())
         downloads = [call for call in self.calls() if call[0] == "curl"]
         self.assertEqual(len(downloads), 2)
         self.assertEqual(downloads[0][-1], "https://raw.githubusercontent.com/kdnk/wm/main/scripts/install-release.py")
@@ -244,10 +262,10 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.assertIn("requires macOS", result.stderr)
         self.assertEqual([call[0] for call in self.calls()], ["uname"])
 
-    def test_bad_client_signature_preserves_installed_pair(self):
+    def test_bad_signature_preserves_installation(self):
         self.seed_installation()
         result = self.invoke(str(self.archive), successful=False,
-                             environment=dict(self.environment, INSTALL_TEST_BAD_SIGNATURE="wm-cli"))
+                             environment=dict(self.environment, INSTALL_TEST_BAD_SIGNATURE="wm"))
         self.assertIn("invalid signature", result.stderr)
         self.assert_old_installation()
 
@@ -259,7 +277,7 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.assertEqual(self.calls(), [])
         self.assert_old_installation()
 
-    def test_unsafe_or_incomplete_archive_preserves_installed_pair(self):
+    def test_unsafe_or_incomplete_archive_preserves_installation(self):
         self.seed_installation()
         cases = []
         for name in ("../escape", "/absolute", "./wm", "unexpected", "wm"):
@@ -276,7 +294,7 @@ class ReleaseInstallerTests(unittest.TestCase):
                 self.make_archive([entry])
                 self.invoke(str(self.archive), successful=False)
                 self.assert_old_installation()
-        del self.payload["wm-cli"]
+        del self.payload["wm"]
         self.make_archive()
         self.invoke(str(self.archive), successful=False)
         self.assert_old_installation()
@@ -290,7 +308,7 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.invoke(str(self.archive), successful=False)
         self.assertEqual(list(outside.iterdir()), [])
 
-    def test_replacement_failure_rolls_back_binaries_and_metadata(self):
+    def test_replacement_failure_rolls_back_binary_and_metadata(self):
         self.seed_installation()
         extracted = self.directory / "extracted"
         extracted.mkdir()
@@ -307,7 +325,7 @@ class ReleaseInstallerTests(unittest.TestCase):
                 installer.install(extracted, self.prefix)
         self.assert_old_installation()
 
-    def test_failed_rollback_retains_original_binaries_for_recovery(self):
+    def test_failed_rollback_retains_original_binary_for_recovery(self):
         self.seed_installation()
         extracted = self.directory / "extracted"
         extracted.mkdir()

@@ -203,7 +203,7 @@ verifier.time = SimpleNamespace(sleep=lambda _: None, monotonic=time.monotonic, 
 verifier.subprocess = SimpleNamespace(check_output=query, run=execute, TimeoutExpired=subprocess.TimeoutExpired,
                                      DEVNULL=subprocess.DEVNULL)
 with tempfile.TemporaryDirectory(prefix="wm-multi-cleanup-") as directory:
-    args = SimpleNamespace(client=ROOT / "target/debug/wm-cli", run=False, output=Path(directory) / "result",
+    args = SimpleNamespace(client=ROOT / "target/debug/wm", run=False, output=Path(directory) / "result",
                            trace_file=Path(directory) / "trace.jsonl", video=False, settle=0.5, windows=2)
     with redirect_stdout(io.StringIO()):
         verifier.run(args)

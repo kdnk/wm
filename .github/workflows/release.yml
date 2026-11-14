@@ -107,14 +107,14 @@ jobs:
         run: |
           set -euxo pipefail
           cargo build --release --locked --package wm \
-            --bin wm --bin wm-cli --target "${{ matrix.target }}"
+            --bin wm --target "${{ matrix.target }}"
 
       - name: Bundle architecture binaries
         run: |
           set -euxo pipefail
           mkdir -p artifacts
           tar -C "target/${{ matrix.target }}/release" \
-            -czf "artifacts/${{ matrix.target }}.tar.gz" wm wm-cli
+            -czf "artifacts/${{ matrix.target }}.tar.gz" wm
 
       - name: Upload architecture binaries
         uses: actions/upload-artifact@v4
@@ -149,7 +149,7 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Create universal binaries
+      - name: Create universal binary
         run: |
           set -euxo pipefail
           mkdir -p dist
@@ -162,16 +162,10 @@ jobs:
             slices/aarch64-apple-darwin/wm \
             slices/x86_64-apple-darwin/wm \
             -output dist/wm
-          lipo -create \
-            slices/aarch64-apple-darwin/wm-cli \
-            slices/x86_64-apple-darwin/wm-cli \
-            -output dist/wm-cli
-          strip -x dist/wm dist/wm-cli
-          chmod +x dist/wm dist/wm-cli
-          for bin in dist/wm dist/wm-cli; do
-            for arch in arm64 x86_64; do
-              lipo "$bin" -verify_arch "$arch"
-            done
+          strip -x dist/wm
+          chmod +x dist/wm
+          for arch in arm64 x86_64; do
+            lipo dist/wm -verify_arch "$arch"
           done
 
       - name: Import signing certificate
@@ -200,7 +194,7 @@ jobs:
             -k /Library/Keychains/System.keychain \
             "$RUNNER_TEMP/wm.crt"
 
-      - name: Sign release binaries
+      - name: Sign release binary
         run: |
           set -euo pipefail
 
@@ -217,14 +211,7 @@ jobs:
             --identifier git.kdnk.wm \
             dist/wm
 
-          codesign --force --timestamp=none \
-            --keychain signing_temp.keychain \
-            --sign "$SIGNER" \
-            --identifier git.kdnk.wm.cli \
-            dist/wm-cli
-
           codesign --verify --verbose=2 dist/wm
-          codesign --verify --verbose=2 dist/wm-cli
           codesign -dr - dist/wm
 
 
@@ -242,19 +229,18 @@ jobs:
           cp NOTICE dist/licenses/wm-NOTICE
           cp cgs/LICENSE dist/licenses/cgs/LICENSE
           cp cgs/third-party/ProgressiveBlurHeader.LICENSE dist/licenses/cgs/ProgressiveBlurHeader.LICENSE
-          tar -C dist -czf "$ASSET" wm wm-cli wm.default.toml release-signing.pem licenses
+          tar -C dist -czf "$ASSET" wm wm.default.toml release-signing.pem licenses
           sha256=$(shasum -a 256 "$ASSET" | awk '{print $1}')
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "asset=${ASSET}" >> "$GITHUB_OUTPUT"
           echo "sha256=${sha256}" >> "$GITHUB_OUTPUT"
 
-      - name: Verify packaged binary versions
+      - name: Verify packaged binary version
         env:
           VERSION: ${{ steps.pkg.outputs.version }}
         run: |
           set -euo pipefail
           test "$(dist/wm --version)" = "wm ${VERSION}"
-          test "$(dist/wm-cli --version)" = "wm-cli ${VERSION}"
           test -s dist/wm.default.toml
 
       - name: Create or complete GitHub release

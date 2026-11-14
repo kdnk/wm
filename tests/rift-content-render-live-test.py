@@ -314,7 +314,7 @@ if __name__ == "__main__":
         fixture(sys.argv[2])
     else:
         parser = argparse.ArgumentParser(description="Record Wm native geometry and real content paint events during resizing.")
-        parser.add_argument("--client", type=Path, default=Path(__file__).resolve().parents[1] / "target/debug/wm-cli")
+        parser.add_argument("--client", type=Path, default=Path(__file__).resolve().parents[1] / "target/debug/wm")
         parser.add_argument("--qt-python", type=Path, default=Path("/Applications/Anki.app/Contents/Frameworks/Python.framework/Versions/3.13/bin/python3.13"))
         parser.add_argument("--qt-packages", type=Path, default=Path("/Applications/Anki.app/Contents/Resources/app_packages"))
         parser.add_argument("--output", type=Path, help="Save native samples and command timestamps, including failures.")

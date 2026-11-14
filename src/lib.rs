@@ -1,7 +1,9 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 #![allow(stable_features)]
 #![allow(non_upper_case_globals)]
 
 pub mod actor;
+pub mod cli;
 pub mod common;
 pub mod ipc;
 pub mod layout_engine;

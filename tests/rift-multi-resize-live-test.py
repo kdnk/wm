@@ -520,7 +520,7 @@ def main():
         content.fixture(sys.argv[2])
         return
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--client", type=Path, default=ROOT / "target/debug/wm-cli")
+    parser.add_argument("--client", type=Path, default=ROOT / "target/debug/wm")
     parser.add_argument("--windows", type=int, default=2, help="Number of disposable fixture processes, from 2 to 4.")
     parser.add_argument("--run", action="store_true", help="Create disposable windows and run resize scenes. Without this flag, inspect readiness only.")
     parser.add_argument("--output", type=Path, default=Path("/private/tmp/wm-multi-resize-verification") / time.strftime("%Y%m%d-%H%M%S"))

@@ -21,7 +21,7 @@ VERSION_TAG = r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9
 CURL = ("curl", "--fail", "--location", "--silent", "--show-error",
         "--proto", "=https", "--proto-redir", "=https")
 FILES = {
-    "wm", "wm-cli", "wm.default.toml", "release-signing.pem",
+    "wm", "wm.default.toml", "release-signing.pem",
     "licenses/wm-LICENSE", "licenses/wm-NOTICE", "licenses/cgs/LICENSE",
     "licenses/cgs/ProgressiveBlurHeader.LICENSE",
 }
@@ -88,7 +88,7 @@ def extract_archive(archive, destination):
             target.parent.mkdir(parents=True, exist_ok=True)
             with source.extractfile(member) as incoming, target.open("wb") as output:
                 shutil.copyfileobj(incoming, output)
-            target.chmod(0o755 if member.name in {"wm", "wm-cli"} else 0o644)
+            target.chmod(0o755 if member.name == "wm" else 0o644)
 
 
 def verify_release(directory):
@@ -96,10 +96,9 @@ def verify_release(directory):
     if hashlib.sha256(pinned).hexdigest() != PINNED_CERTIFICATE_SHA256:
         raise InstallError("Release certificate differs from the pinned signing certificate")
     fingerprint = hashlib.sha1(pinned).hexdigest()
-    for name, identifier in (("wm", "git.kdnk.wm"), ("wm-cli", "git.kdnk.wm.cli")):
-        requirement = f'=identifier "{identifier}" and certificate leaf = H"{fingerprint}"'
-        run("codesign", "--verify", "--strict", "--all-architectures",
-            "--test-requirement", requirement, str(directory / name))
+    requirement = f'=identifier "git.kdnk.wm" and certificate leaf = H"{fingerprint}"'
+    run("codesign", "--verify", "--strict", "--all-architectures",
+        "--test-requirement", requirement, str(directory / "wm"))
 
 
 def check_directory(path):
@@ -109,7 +108,7 @@ def check_directory(path):
 
 
 def install(directory, prefix):
-    targets = [prefix / "bin/wm", prefix / "bin/wm-cli", prefix / "share/wm/release"]
+    targets = [prefix / "bin/wm", prefix / "share/wm/release"]
     for target in targets:
         check_directory(target.parent)
         if target.is_symlink():
@@ -123,11 +122,10 @@ def install(directory, prefix):
         metadata = stage / "release"
         metadata.mkdir()
         for name in FILES:
-            target = stage / name if name in {"wm", "wm-cli"} else metadata / name
+            target = stage / name if name == "wm" else metadata / name
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(directory / name, target)
-        replacements = [(stage / "wm", targets[0]), (stage / "wm-cli", targets[1]),
-                        (metadata, targets[2])]
+        replacements = [(stage / "wm", targets[0]), (metadata, targets[1])]
         changed = []
         try:
             for index, (source, target) in enumerate(replacements):
@@ -176,7 +174,7 @@ def main():
         extract_archive(archive, extracted)
         verify_release(extracted)
         install(extracted, prefix)
-    print(f"Installed wm and wm-cli in {prefix / 'bin'}")
+    print(f"Installed wm in {prefix / 'bin'}")
     print(f"Default configuration and licenses: {prefix / 'share/wm/release'}")
     print("Add the bin directory to PATH and configure ~/.config/wm/config.toml.")
     print("For the first start, run wm service install, then wm service start.")

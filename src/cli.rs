@@ -1,36 +1,73 @@
 // Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::process::{self};
+use std::process;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use wm::actor::app::WindowId as InternalWindowId;
-use wm::actor::reactor::{self, DisplaySelector};
-use wm::common::config::WorkspaceSelector;
-use wm::ipc::WmMachClient;
-use wm::layout_engine as layout;
-use wm::sys::window_server::WindowServerId;
 use wm_protocol::{EventKind, WmRequest, WmResponse};
 
+use crate::actor::app::WindowId as InternalWindowId;
+use crate::actor::reactor::{self, DisplaySelector};
+use crate::common::config::WorkspaceSelector;
+use crate::ipc::WmMachClient;
+use crate::layout_engine as layout;
+use crate::sys::service::{ServiceCommands, handle_service_command};
+use crate::sys::window_server::WindowServerId;
+
 #[derive(Parser)]
-#[command(version = env!("WM_VERSION"))]
-#[command(name = "wm-cli")]
-#[command(about = "Command-line interface for wm window manager")]
-struct Cli {
+#[command(name = "wm", version = env!("WM_VERSION"), args_conflicts_with_subcommands = true)]
+pub struct Cli {
+    /// Only run the window manager on the current space.
+    #[arg(long)]
+    pub one: bool,
+
+    /// Disable new spaces by default.
+    ///
+    /// Ignored if --one is used.
+    #[arg(long)]
+    pub default_disable: bool,
+
+    /// Disable animations.
+    #[arg(long)]
+    pub no_animate: bool,
+
+    /// Check whether the saved layout snapshot can be loaded.
+    #[arg(long)]
+    pub validate: bool,
+
+    /// Restore the master layout file saved at shutdown.
+    #[arg(long)]
+    pub restore: bool,
+
+    /// Record reactor events to the specified file path. Overwrites the file if
+    /// exists.
+    #[arg(long)]
+    pub record: Option<PathBuf>,
+
+    /// Path to configuration file to use (overrides default).
+    #[arg(long, value_name = "PATH")]
+    pub config: Option<PathBuf>,
+
+    /// Internal: recover offscreen windows after this daemon PID exits.
+    #[arg(long, hide = true)]
+    recover_windows: Option<i32>,
+
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 enum CliCommand {
     Reactor(reactor::Command),
-    Config(wm::common::config::ConfigCommand),
+    Config(crate::common::config::ConfigCommand),
 }
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Close the focused window, including all its tabs, using its native close button
+    CloseWindow,
     /// Query information from wm
     Query {
         #[command(subcommand)]
@@ -51,20 +88,6 @@ enum Commands {
         #[command(subcommand)]
         service: ServiceCommands,
     },
-}
-
-#[derive(Subcommand)]
-enum ServiceCommands {
-    /// Install the per-user launchd service
-    Install,
-    /// Uninstall the per-user launchd service
-    Uninstall,
-    /// Start (or bootstrap) the service
-    Start,
-    /// Stop (or bootout/kill) the service
-    Stop,
-    /// Restart the service (kickstart -k)
-    Restart,
 }
 
 #[derive(Args)]
@@ -179,7 +202,7 @@ enum ExecuteCommands {
     Debug,
     /// Serialize and print runtime state
     Serialize,
-    /// this command is deprecated, use `wm-cli execute space toggle-activated`
+    /// this command is deprecated, use `wm execute space toggle-activated`
     #[deprecated]
     ToggleSpaceActivated,
     /// Show timing metrics
@@ -223,8 +246,8 @@ enum WindowCommands {
     /// - Pass a signed floating value: positive to grow, negative to shrink.
     /// - The value is a fraction of the current size (e.g. `0.05` = 5%).
     /// Examples:
-    ///   wm-cli execute window resize-by --amount 0.05    # grow by 5%
-    ///   wm-cli execute window resize-by --amount -0.10   # shrink by 10%
+    ///   wm execute window resize-by --amount 0.05    # grow by 5%
+    ///   wm execute window resize-by --amount -0.10   # shrink by 10%
     ResizeBy {
         #[arg(long)]
         amount: f64,
@@ -251,7 +274,7 @@ enum CliResizeOrientation {
     Smart,
 }
 
-impl From<CliResizeOrientation> for wm::layout_engine::ResizeOrientation {
+impl From<CliResizeOrientation> for crate::layout_engine::ResizeOrientation {
     fn from(value: CliResizeOrientation) -> Self {
         match value {
             CliResizeOrientation::Horizontal => Self::Horizontal,
@@ -378,7 +401,7 @@ enum ConfigCommands {
     SetWorkspaceNames { names: Vec<String> },
 
     /// Generic set: set an arbitrary config key (dot-separated path) to a JSON value.
-    /// Example: wm-cli execute config set --key settings.animate --value true
+    /// Example: wm execute config set --key settings.animate --value true
     Set {
         /// Dot-separated key path (e.g. settings.animate or settings.layout.gaps.outer.top)
         key: String,
@@ -512,36 +535,65 @@ enum SubscribeCommands {
     ListCli,
 }
 
-fn main() {
-    sigpipe::reset();
-    let cli = Cli::parse();
-
-    let request = match cli.command {
-        Commands::Service { .. } => {
-            println!(
-                "service commands have been moved to the `wm` binary. (ie `wm service install`)"
-            );
-            process::exit(0);
-        }
-        Commands::Subscribe {
-            subscribe: SubscribeCommands::Mach { event },
-        } => {
-            if let Err(e) = run_mach_subscription(event) {
-                eprintln!("Communication error: {}", e);
-                eprintln!("Hint: ensure the wm service is running (try `wm service start`).");
+impl Cli {
+    /// Run a local or IPC command before native daemon initialization.
+    /// Returns false when the daemon should start.
+    pub fn run_command(&mut self) -> bool {
+        let command = self.command.take();
+        if matches!(command, Some(Commands::CloseWindow)) {
+            if let Err(error) = crate::sys::close_window::close_focused_window() {
+                eprintln!("wm close-window: {error:#}");
                 process::exit(1);
             }
-            process::exit(0);
+            return true;
         }
-        command => match build_request(command) {
-            Ok(req) => req,
-            Err(e) => {
-                eprintln!("Error: {}", e);
+
+        if let Some(pid) = self.recover_windows {
+            crate::sys::window_recovery::run(pid).expect("window recovery failed");
+            return true;
+        }
+        sigpipe::reset();
+
+        let request = match command {
+            None => return false,
+            Some(Commands::CloseWindow) => unreachable!(),
+            Some(Commands::Service { service }) => {
+                match handle_service_command(&service) {
+                    Ok(message) => println!("{message}"),
+                    Err(error) => {
+                        eprintln!("{error}");
+                        process::exit(1);
+                    }
+                }
+                return true;
+            }
+            Some(Commands::Subscribe {
+                subscribe: SubscribeCommands::Mach { event },
+            }) => {
+                if let Err(error) = run_mach_subscription(event) {
+                    eprintln!("Communication error: {error}");
+                    eprintln!("Hint: ensure the wm service is running (try `wm service start`).");
+                    process::exit(1);
+                }
+                return true;
+            }
+            Some(Commands::Query { query }) => build_query_request(query),
+            Some(Commands::Execute { command }) => build_execute_request(command),
+            Some(Commands::Subscribe { subscribe }) => build_subscribe_request(subscribe),
+        };
+        let request = match request {
+            Ok(request) => request,
+            Err(error) => {
+                eprintln!("Error: {error}");
                 process::exit(1);
             }
-        },
-    };
+        };
+        send_request(request);
+        true
+    }
+}
 
+fn send_request(request: WmRequest) {
     let client = match WmMachClient::connect() {
         Ok(c) => c,
         Err(e) => {
@@ -579,18 +631,6 @@ fn main() {
             eprintln!("Hint: ensure the wm service is running (try `wm service start`).");
             process::exit(1);
         }
-    }
-}
-
-fn build_request(command: Commands) -> Result<WmRequest, String> {
-    match command {
-        Commands::Query { query } => build_query_request(query),
-        Commands::Execute { command } => build_execute_request(command),
-        Commands::Subscribe { subscribe } => build_subscribe_request(subscribe),
-        Commands::Service { .. } => Err(
-            "Service commands are handled locally and should not be sent to the wm server."
-                .to_string(),
-        ),
     }
 }
 
@@ -676,7 +716,7 @@ fn build_execute_request(execute: ExecuteCommands) -> Result<WmRequest, String> 
         }
         ExecuteCommands::SaveLayout { file } => {
             let path = if file.master {
-                wm::common::config::restore_file()
+                crate::common::config::restore_file()
             } else {
                 absolute_layout_path(file.path.expect("clap requires either PATH or --master"))?
             };
@@ -687,7 +727,7 @@ fn build_execute_request(execute: ExecuteCommands) -> Result<WmRequest, String> 
         ExecuteCommands::LoadLayout { file, scope } => {
             let (path, source) = if file.master {
                 (
-                    wm::common::config::restore_file(),
+                    crate::common::config::restore_file(),
                     layout::RestoreSource::CurrentSpace,
                 )
             } else {
@@ -718,17 +758,17 @@ fn build_execute_request(execute: ExecuteCommands) -> Result<WmRequest, String> 
         }
         #[allow(deprecated)]
         ExecuteCommands::ToggleSpaceActivated => {
-            eprintln!("this command is deprecated, use wm-cli execute space toggle-activated");
+            eprintln!("this command is deprecated, use wm execute space toggle-activated");
             CliCommand::Reactor(reactor::Command::Reactor(
                 reactor::ReactorCommand::ToggleSpaceActivated,
             ))
         }
         ExecuteCommands::ShowTiming => CliCommand::Reactor(reactor::Command::Metrics(
-            wm::common::log::MetricsCommand::ShowTiming,
+            crate::common::log::MetricsCommand::ShowTiming,
         )),
     };
 
-    if let CliCommand::Config(wm::common::config::ConfigCommand::GetConfig) = &wm_command {
+    if let CliCommand::Config(crate::common::config::ConfigCommand::GetConfig) = &wm_command {
         return Ok(WmRequest::GetConfig);
     }
 
@@ -952,7 +992,7 @@ fn map_layout_command(cmd: LayoutCommands) -> Result<CliCommand, String> {
 }
 
 fn map_config_command(cmd: ConfigCommands) -> Result<CliCommand, String> {
-    use wm::common::config::{AnimationEasing, ConfigCommand};
+    use crate::common::config::{AnimationEasing, ConfigCommand};
 
     let cfg_cmd = match cmd {
         ConfigCommands::SetAnimate { value } => {
@@ -1140,11 +1180,65 @@ mod tests {
     use super::*;
 
     #[test]
+    fn no_subcommand_preserves_daemon_options() {
+        let cli = Cli::try_parse_from([
+            "wm",
+            "--one",
+            "--default-disable",
+            "--no-animate",
+            "--validate",
+            "--restore",
+            "--record",
+            "events.json",
+            "--config",
+            "config.toml",
+        ])
+        .unwrap();
+        assert!(cli.command.is_none());
+        assert!(cli.one && cli.default_disable && cli.no_animate && cli.validate && cli.restore);
+        assert_eq!(cli.record, Some(PathBuf::from("events.json")));
+        assert_eq!(cli.config, Some(PathBuf::from("config.toml")));
+
+        let recovery = Cli::try_parse_from(["wm", "--recover-windows", "123"]).unwrap();
+        assert_eq!(recovery.recover_windows, Some(123));
+        assert!(recovery.command.is_none());
+    }
+
+    #[test]
+    fn local_commands_use_the_unified_parser() {
+        let close = Cli::try_parse_from(["wm", "close-window"]).unwrap();
+        assert!(matches!(close.command, Some(Commands::CloseWindow)));
+        let service = Cli::try_parse_from(["wm", "service", "start"]).unwrap();
+        assert!(matches!(
+            service.command,
+            Some(Commands::Service {
+                service: ServiceCommands::Start,
+            })
+        ));
+    }
+
+    #[test]
+    fn daemon_options_conflict_with_subcommands() {
+        for command in [
+            vec!["wm", "--one", "query", "windows"],
+            vec!["wm", "--config", "config.toml", "execute", "debug"],
+            vec!["wm", "--restore", "subscribe", "list-cli"],
+            vec!["wm", "--validate", "close-window"],
+            vec!["wm", "--recover-windows", "123", "service", "start"],
+        ] {
+            assert!(Cli::try_parse_from(command).is_err());
+        }
+    }
+
+    #[test]
     fn binding_mode_query_and_subscription_parse() {
-        let cli = Cli::try_parse_from(["wm-cli", "query", "binding-mode"]).unwrap();
-        assert!(matches!(cli.command, Commands::Query {
-            query: QueryCommands::BindingMode
-        }));
+        let cli = Cli::try_parse_from(["wm", "query", "binding-mode"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Query {
+                query: QueryCommands::BindingMode
+            })
+        ));
         assert_eq!(
             build_query_request(QueryCommands::BindingMode).unwrap(),
             WmRequest::GetBindingMode

@@ -1,7 +1,7 @@
 // Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 //! A small, synchronous Rust client for Wm's Mach IPC API.
 //!
-//! The client talks to the same bootstrap service as `wm-cli` and includes
+//! The client talks to the same bootstrap service as `wm` and includes
 //! the public request and response wire types.
 
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]

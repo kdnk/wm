@@ -1,9 +1,8 @@
 // Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::future::Future;
-use std::path::PathBuf;
 use std::process;
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use objc2::MainThreadMarker;
 use objc2_application_services::AXUIElement;
 use tokio::join;
@@ -20,6 +19,7 @@ use wm::actor::spaces::SpacesActor;
 use wm::actor::stack_line::StackLine;
 use wm::actor::window_notify as window_notify_actor;
 use wm::actor::wm_controller::{self, WmController};
+use wm::cli::Cli;
 use wm::common::config::{Config, config_file, restore_file};
 use wm::common::log;
 use wm::common::util::execute_startup_commands;
@@ -30,66 +30,12 @@ use wm::sys::accessibility::ensure_accessibility_permission;
 use wm::sys::executor::Executor;
 use wm::sys::mach::init_window_sub_level_server_port;
 use wm::sys::screen::{CoordinateConverter, displays_have_separate_spaces};
-use wm::sys::service::{ServiceCommands, handle_service_command};
 use wm::sys::skylight::{
     CGEnableEventStateCombining, CGSEventType, CGSetLocalEventsSuppressionInterval, KnownCGSEvent,
     SLSWindowManagementBridgeSetDelegate,
 };
 
 embed_plist::embed_info_plist!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/Info.plist"));
-
-#[derive(Parser)]
-#[command(name = "wm", version = env!("WM_VERSION"))]
-struct Cli {
-    /// Only run the window manager on the current space.
-    #[arg(long)]
-    one: bool,
-
-    /// Disable new spaces by default.
-    ///
-    /// Ignored if --one is used.
-    #[arg(long)]
-    default_disable: bool,
-
-    /// Disable animations.
-    #[arg(long)]
-    no_animate: bool,
-
-    /// Check whether the saved layout snapshot can be loaded.
-    #[arg(long)]
-    validate: bool,
-
-    /// Restore the master layout file saved at shutdown.
-    #[arg(long)]
-    restore: bool,
-
-    /// Record reactor events to the specified file path. Overwrites the file if
-    /// exists.
-    #[arg(long)]
-    record: Option<PathBuf>,
-
-    /// Path to configuration file to use (overrides default).
-    #[arg(long, value_name = "PATH")]
-    config: Option<PathBuf>,
-
-    /// Internal: recover offscreen windows after this daemon PID exits.
-    #[arg(long, hide = true)]
-    recover_windows: Option<i32>,
-
-    #[command(subcommand)]
-    command: Option<Commands>,
-}
-
-#[derive(Subcommand)]
-enum Commands {
-    /// Close the focused window, including all its tabs, using its native close button
-    CloseWindow,
-    /// Manage the launchd service for wm
-    Service {
-        #[command(subcommand)]
-        service: ServiceCommands,
-    },
-}
 
 /// Actors cannot recover after exiting; panic so the service can restart.
 async fn supervise(name: &'static str, fut: impl Future<Output = ()>) {
@@ -108,33 +54,9 @@ fn spawn_supervised<F: Future<Output = ()> + 'static>(
 }
 
 fn main() {
-    let opt = Cli::parse();
-
-    if matches!(opt.command, Some(Commands::CloseWindow)) {
-        if let Err(error) = wm::sys::close_window::close_focused_window() {
-            eprintln!("wm close-window: {error:#}");
-            process::exit(1);
-        }
+    let mut opt = Cli::parse();
+    if opt.run_command() {
         return;
-    }
-
-    if let Some(pid) = opt.recover_windows {
-        wm::sys::window_recovery::run(pid).expect("window recovery failed");
-        return;
-    }
-    sigpipe::reset();
-
-    if let Some(Commands::Service { service }) = &opt.command {
-        match handle_service_command(service) {
-            Ok(msg) => {
-                println!("{}", msg);
-                process::exit(0);
-            }
-            Err(e) => {
-                eprintln!("{}", e);
-                process::exit(1);
-            }
-        }
     }
 
     if std::env::var_os("RUST_BACKTRACE").is_none() {

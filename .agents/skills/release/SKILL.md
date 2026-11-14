@@ -41,7 +41,7 @@ An existing tag reserves its version for its exact source commit, even if public
 
 ## Prepare and verify the release change
 
-Update root `[package].version` in `Cargo.toml` and the matching `wm` entry in `Cargo.lock`. Keep dependency resolution unchanged. Both `wm` and `wm-cli` binaries use the root version. Do not bump `wm-client`, `wm-protocol`, or vendored `cgs` solely to match the binary release.
+Update root `[package].version` in `Cargo.toml` and the matching `wm` entry in `Cargo.lock`. Keep dependency resolution unchanged. The `wm` binary uses the root version. Do not bump `wm-client`, `wm-protocol`, or vendored `cgs` solely to match the binary release.
 
 Review with `but diff` and `but status -fv`. Verify that the manifest and lockfile agree and only intended files changed. When committing is authorized, use an English Conventional Commit message with a body explaining why and what changed. Select only the release files with `but`.
 
@@ -61,7 +61,7 @@ Summarize the version rationale, release contents, verification results, and exa
 
 Require an explicit user request to publish or release before pushing, creating a PR, merging a version bump, or dispatching the release workflow. Creating this skill, preparing a release, or committing changes does not authorize publication. Automatic skill selection grants no authority. Respect narrower user limits, such as opening a PR without merging it.
 
-The normal path is a root version change merged into `main`. That push starts `release.yml`, which verifies the pinned source SHA, creates an immutable tag, builds both macOS architectures, signs universal binaries, and publishes the archive. Keep tag creation and publication in that workflow. Do not create tags or releases manually with `scripts/release.py tag`, `scripts/release.py publish`, or `gh release create`.
+The normal path is a root version change merged into `main`. That push starts `release.yml`, which verifies the pinned source SHA, creates an immutable tag, builds both macOS architectures, signs the universal `wm` binary, and publishes the archive. Keep tag creation and publication in that workflow. Do not create tags or releases manually with `scripts/release.py tag`, `scripts/release.py publish`, or `gh release create`.
 
 For an authorized first release or retry, dispatch against `main` after confirming the remote root version and source commit:
 
@@ -79,6 +79,6 @@ Preserve the fixed identity pinned in `assets/release-signing.pem`. Ordinary rel
 
 Confirm workflow success, a published release, and a version tag pointing to the intended source SHA. Inspect the release with `gh release view` and the tag with `gh api`. Resolve annotated tags to their commit when necessary.
 
-Check for the nonempty `wm-universal-macos-VERSION.tar.gz` asset. Confirm that the workflow verified packaged binary versions and the pinned certificate. Do not install the release or operate the local daemon unless requested.
+Check for the nonempty `wm-universal-macos-VERSION.tar.gz` asset. Confirm that the workflow verified the packaged binary version and the pinned certificate. Do not install the release or operate the local daemon unless requested.
 
 Report the version and rationale, source commit, checks, and descriptive links to the release and workflow run. For local preparation, report the branch and changed files instead. State remaining failures or required publication actions explicitly.

@@ -10,12 +10,14 @@ On macOS with Python 3.8 or later and curl, run:
 curl -fsSL https://raw.githubusercontent.com/kdnk/wm/main/install.sh | sh
 ```
 
-The installer downloads the latest universal macOS release and verifies both executables against the pinned signing certificate. A repository checkout, GitHub CLI, and Rust toolchain are not required. It installs `wm` and `wm-cli` in `~/.local/bin`. Add that directory to PATH.
+The installer downloads the latest universal macOS release and verifies the executable against the pinned signing certificate. A repository checkout, GitHub CLI, and Rust toolchain are not required. It installs `wm` in `~/.local/bin`. Add that directory to PATH.
 
-To select a version or installation prefix, pass options to the script:
+`wm` now includes the former `wm-cli` commands. Update scripts and shortcuts to use `wm query`, `wm execute`, and `wm subscribe`. Existing `wm-cli` installations are left untouched. Older two-binary releases require a compatible older installer; see the [release installation notes](docs/release-signing.md#install-a-signed-release).
+
+Pass `--version TAG` to select a single-binary release, or `--prefix PATH` to change the installation prefix:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kdnk/wm/main/install.sh | sh -s -- --version v0.8.2 --prefix "$HOME/.local"
+curl -fsSL https://raw.githubusercontent.com/kdnk/wm/main/install.sh | sh -s -- --prefix "$HOME/.local"
 ```
 
 From a checkout, `python3 scripts/install-release.py` accepts the same options and a local `.tar.gz` archive for offline installation. The installer preserves the release signatures and your configuration. Service control remains explicit.
@@ -26,7 +28,7 @@ To update a running installation, stop wm, run the installer, then start wm agai
 wm service stop
 curl -fsSL https://raw.githubusercontent.com/kdnk/wm/main/install.sh | sh
 wm service start
-wm-cli query windows
+wm query windows
 ```
 
 ## Build
@@ -34,10 +36,10 @@ wm-cli query windows
 Use macOS with Apple's Command Line Tools and Rust 1.95.0 or later.
 
 ```sh
-cargo build --locked --release --bin wm --bin wm-cli
+cargo build --locked --release --bin wm
 ```
 
-Put `target/release/wm` and `target/release/wm-cli` in a stable location on PATH.
+Put `target/release/wm` in a stable location on PATH.
 
 ## Configure and run
 
@@ -50,7 +52,7 @@ The release installs its default configuration and licenses in `~/.local/share/w
 
 Edit `~/.config/wm/config.toml` to configure wm. Changes reload automatically while
 `[settings].hot_reload` is enabled, which is the default. To reload manually, run
-`wm-cli execute config reload`.
+`wm execute config reload`.
 
 wm uses niri-style scrolling columns. Columns can contain multiple windows. Other
 layout modes, anchored navigation, and floating controls are removed. When updating
@@ -63,7 +65,7 @@ Stop other window managers and grant wm Accessibility access.
 ```sh
 wm service install
 wm service start
-wm-cli query windows
+wm query windows
 ```
 
 ## Close a window
@@ -72,7 +74,7 @@ wm-cli query windows
 wm close-window
 ```
 
-The command presses the focused window's native close button, including all its tabs. With the wm daemon running, it selects the next tiled neighbor after the window disappears, or the previous neighbor at the end. It also works without the daemon. `wm-cli execute window close` retains Command-W behavior for closing a tab.
+The command presses the focused window's native close button, including all its tabs. With the wm daemon running, it selects the next tiled neighbor after the window disappears, or the previous neighbor at the end. It also works without the daemon. `wm execute window close` retains Command-W behavior for closing a tab.
 
 ## Verify changes
 

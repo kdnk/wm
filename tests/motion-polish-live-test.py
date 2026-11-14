@@ -275,7 +275,7 @@ def run(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--client", type=Path, default=Path("target/debug/wm-cli"))
+    parser.add_argument("--client", type=Path, default=Path("target/debug/wm"))
     parser.add_argument("--closer", type=Path, default=Path("target/debug/examples/close-window-check"))
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--qt-python", type=Path, default=Path("/Applications/Anki.app/Contents/Frameworks/Python.framework/Versions/3.13/bin/python3.13"))

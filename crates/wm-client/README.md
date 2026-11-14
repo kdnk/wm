@@ -104,9 +104,9 @@ when running multiple instances).
 
 ## Binding modes
 
-Use `client.get_binding_mode()` or `wm-cli query binding-mode` to read the
+Use `client.get_binding_mode()` or `wm query binding-mode` to read the
 active mode name (for example, `"default"`). Subscribe with
-`wm-cli subscribe mach binding_mode_changed` or
+`wm subscribe mach binding_mode_changed` or
 `client.subscribe(EventKind::BindingModeChanged)` to receive changes:
 
 ```json

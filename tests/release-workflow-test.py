@@ -4,8 +4,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 
@@ -93,6 +95,12 @@ assert sys.argv[1]=='show', 'Only read-only git show is permitted'
 revision=sys.argv[2].split(':',1)[0]
 print('[package]\nname = "wm"\nversion = "'+state['versions'][revision]+'"\n\n[dependencies]\nother = "9.9.9"')
 '''
+
+
+def read_workflow(name):
+    ruby = '''require "yaml"; require "json"; data = YAML.load_file(ARGV[0]); data["on"] = data.delete(true) if data.key?(true); puts JSON.generate(data)'''
+    return json.loads(subprocess.check_output(
+        ["ruby", "-e", ruby, str(ROOT / ".github/workflows" / name)], text=True))
 
 
 class ReleaseTests(unittest.TestCase):
@@ -294,9 +302,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertFalse(self.state()["calls"])
 
     def test_workflow_connects_verified_source_to_tag_build_and_publication(self):
-        ruby = '''require "yaml"; require "json"; data = YAML.load_file(ARGV[0]); data["on"] = data.delete(true) if data.key?(true); puts JSON.generate(data)'''
-        workflow = json.loads(subprocess.check_output(["ruby", "-e", ruby,
-                                                       str(ROOT / ".github/workflows/release.yml")], text=True))
+        workflow = read_workflow("release.yml")
         triggers = workflow["on"]
         self.assertNotIn("release", triggers)
         self.assertEqual(triggers["push"]["branches"], ["main"])
@@ -305,8 +311,7 @@ class ReleaseTests(unittest.TestCase):
         jobs = workflow["jobs"]
         self.assertEqual(jobs["verify"]["uses"], "./.github/workflows/rust.yml")
         self.assertEqual(jobs["verify"]["with"]["source_sha"], "${{ needs.prepare.outputs.sha }}")
-        verification = json.loads(subprocess.check_output(
-            ["ruby", "-e", ruby, str(ROOT / ".github/workflows/rust.yml")], text=True))
+        verification = read_workflow("rust.yml")
         self.assertEqual(verification["on"]["workflow_call"]["inputs"]["source_sha"]["type"], "string")
         self.assertIn("${{ inputs.source_sha || github.ref }}", verification["concurrency"]["group"])
         for job in verification["jobs"].values():
@@ -320,12 +325,75 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(checkout["fetch-depth"], 0)
         steps = jobs["publish"]["steps"]
         names = [step.get("name") for step in steps]
-        self.assertLess(names.index("Sign release binaries"), names.index("Create or complete GitHub release"))
-        self.assertLess(names.index("Verify packaged binary versions"), names.index("Create or complete GitHub release"))
+        self.assertLess(names.index("Sign release binary"), names.index("Create or complete GitHub release"))
+        self.assertLess(names.index("Verify packaged binary version"), names.index("Create or complete GitHub release"))
         self.assertEqual(jobs["tag"]["permissions"], {"contents": "write"})
         self.assertEqual(jobs["publish"]["permissions"], {"contents": "write"})
         self.assertEqual(workflow["permissions"], {"contents": "read"})
         self.assertFalse((ROOT / ".github/workflows/tag.yml").exists())
+
+    def test_workflow_builds_and_packages_only_the_wm_binary(self):
+        jobs = read_workflow("release.yml")["jobs"]
+        build = {step.get("name"): step for step in jobs["build"]["steps"]}
+        publish = {step.get("name"): step for step in jobs["publish"]["steps"]}
+        tools = self.directory / "bin"
+        commands = {
+            "cargo": '''import sys
+assert sys.argv[1:] == ['build','--release','--locked','--package','wm','--bin','wm','--target',__import__('os').environ['TEST_TARGET']]
+''',
+            "lipo": '''import sys
+from pathlib import Path
+args=sys.argv[1:]
+if args[0] == '-create':
+    assert len(args) == 5 and args[3] == '-output'
+    assert all(Path(name).name == 'wm' and Path(name).is_file() for name in args[1:3])
+    Path(args[4]).write_text('#!/bin/sh\\nprintf "wm 1.2.3\\\\n"\\n')
+else:
+    assert args[0] == 'dist/wm' and args[1] == '-verify_arch' and args[2] in ('arm64','x86_64')
+''',
+            "strip": '''import sys
+assert sys.argv[1:] == ['-x','dist/wm']
+''',
+        }
+        for name, content in commands.items():
+            path = tools / name
+            path.write_text(f"#!{sys.executable}\n" + content)
+            path.chmod(0o700)
+
+        def run_step(step, **extra):
+            script = step["run"].replace("${{ matrix.target }}", extra.get("TEST_TARGET", ""))
+            result = subprocess.run(["/bin/bash", "-c", script], cwd=self.directory,
+                                    env=dict(self.environment, **extra), text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+        for target in jobs["build"]["strategy"]["matrix"]["target"]:
+            binaries = self.directory / "target" / target / "release"
+            binaries.mkdir(parents=True)
+            (binaries / "wm").write_bytes(b"wm slice")
+            (binaries / "wm-cli").write_bytes(b"stale client must not ship")
+            run_step(build["Build release"], TEST_TARGET=target)
+            run_step(build["Bundle architecture binaries"], TEST_TARGET=target)
+            with tarfile.open(self.directory / "artifacts" / f"{target}.tar.gz") as archive:
+                self.assertEqual(archive.getnames(), ["wm"])
+
+        run_step(publish["Create universal binary"])
+        for name in ("wm.default.toml", "assets/release-signing.pem", "LICENSE", "NOTICE",
+                     "cgs/LICENSE", "cgs/third-party/ProgressiveBlurHeader.LICENSE"):
+            destination = self.directory / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / name, destination)
+        (self.directory / "dist/wm-cli").write_bytes(b"stale client must not ship")
+        run_step(publish["Package tarball"], RELEASE_TAG=TAG, ASSET_BASENAME="wm-universal-macos",
+                 GITHUB_OUTPUT=str(self.directory / "outputs"))
+        with tarfile.open(self.asset) as archive:
+            self.assertEqual({member.name for member in archive if member.isfile()}, {
+                "wm", "wm.default.toml", "release-signing.pem", "licenses/wm-LICENSE",
+                "licenses/wm-NOTICE", "licenses/cgs/LICENSE", "licenses/cgs/ProgressiveBlurHeader.LICENSE",
+            })
+        run_step(publish["Verify packaged binary version"], VERSION="1.2.3")
+        signature = publish["Sign release binary"]["run"]
+        self.assertIn("--identifier git.kdnk.wm", signature)
+        self.assertNotIn("wm-cli", signature)
 
 
 if __name__ == "__main__":

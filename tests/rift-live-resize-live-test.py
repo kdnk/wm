@@ -657,7 +657,7 @@ def main():
         content.fixture(sys.argv[2])
         return
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--client", type=Path, default=ROOT / "target/debug/wm-cli")
+    parser.add_argument("--client", type=Path, default=ROOT / "target/debug/wm")
     parser.add_argument("--mode", choices=["fixture", "chrome"], default="fixture")
     parser.add_argument("--window-id", type=int, help="Borrow an existing managed Chrome window and restore its saved Wm layout afterward.")
     parser.add_argument("--run", action="store_true", help="Run resize scenes on a disposable or borrowed window. Without this flag, inspect readiness only.")

@@ -62,8 +62,8 @@ auto_focus_blacklist = []
 #
 # Example (sketchybar integration):
 # run_on_start = [
-#   "wm-cli subscribe cli --event workspace_changed --command sh --args -c --args 'sketchybar --trigger wm_workspace_changed WM_WORKSPACE_NAME=\"$WM_WORKSPACE_NAME\" WM_WORKSPACE_ID=\"$WM_WORKSPACE_ID\"'",
-#   "wm-cli subscribe cli --event windows_changed --command sh --args -c --args 'sketchybar --trigger wm_windows_changed WM_WORKSPACE_NAME=\"$WM_WORKSPACE_NAME\" WM_WINDOW_COUNT=\"$WM_WINDOW_COUNT\"'"
+#   "wm subscribe cli --event workspace_changed --command sh --args -c --args 'sketchybar --trigger wm_workspace_changed WM_WORKSPACE_NAME=\"$WM_WORKSPACE_NAME\" WM_WORKSPACE_ID=\"$WM_WORKSPACE_ID\"'",
+#   "wm subscribe cli --event windows_changed --command sh --args -c --args 'sketchybar --trigger wm_windows_changed WM_WORKSPACE_NAME=\"$WM_WORKSPACE_NAME\" WM_WINDOW_COUNT=\"$WM_WINDOW_COUNT\"'"
 # ]
 
 run_on_start = []
@@ -96,7 +96,7 @@ expand_single_column = false
 min_column_width_ratio = 0.3
 max_column_width_ratio = 0.9
 # Per-display width overrides inherit unspecified values above. Find display UUIDs
-# with `wm-cli query displays`.
+# with `wm query displays`.
 # [settings.layout.scrolling.per_display."11111111-2222-3333-4444-555555555555"]
 # column_width_ratio = 0.5
 # min_column_width_ratio = 0.2

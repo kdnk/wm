@@ -1,6 +1,6 @@
 # Set up self-signed releases
 
-wm releases use one persistent, self-signed code-signing identity. GitHub Actions signs both executables with that identity, and the repository pins its public certificate in `assets/release-signing.pem`. The release archive includes the public certificate. Releases are not notarized by Apple.
+wm releases use one persistent, self-signed code-signing identity. GitHub Actions signs `wm` with that identity, and the repository pins its public certificate in `assets/release-signing.pem`. The release archive includes the public certificate. Releases are not notarized by Apple.
 
 ## Prepare and register the identity
 
@@ -33,7 +33,7 @@ If both signing secrets already exist, setup leaves them unchanged. Check the pi
 
 ## Publish a release
 
-The release workflow checks that the imported certificate matches the pinned public certificate before trusting it on the temporary Actions runner. It signs `wm` as `git.kdnk.wm` and `wm-cli` as `git.kdnk.wm.cli`, then packages the signed binaries, default configuration, public certificate, and license notices.
+The release workflow checks that the imported certificate matches the pinned public certificate before trusting it on the temporary Actions runner. It signs `wm` as `git.kdnk.wm`, then packages the signed binary, default configuration, public certificate, and license notices.
 
 The local setup command does not publish a release. To publish a new version, change `[package].version` in `Cargo.toml` and merge that change into `main`. The release workflow detects the version change, runs the reusable Rust checks, creates the matching tag at that exact commit, builds and signs both architectures, then creates a GitHub release with the completed archive.
 
@@ -55,9 +55,13 @@ curl -fsSL https://raw.githubusercontent.com/kdnk/wm/main/install.sh | sh
 
 The bootstrap downloads the standalone Python installer to a temporary directory and forwards its arguments. No repository checkout or GitHub CLI is required. Use `sh -s -- --version TAG` after the pipe to select a release. From a checkout, `python3 scripts/install-release.py` also accepts a local release archive for offline installation.
 
-The installer downloads public releases over HTTPS and checks the bundled certificate against its embedded SHA-256 pin before verifying both binary identifiers and signatures. A test checks that the pin matches `assets/release-signing.pem`. The installer verifies every architecture before replacing installed files.
+The installer downloads public releases over HTTPS and checks the bundled certificate against its embedded SHA-256 pin before verifying the `git.kdnk.wm` identifier and signature. A test checks that the pin matches `assets/release-signing.pem`. The installer verifies every architecture before replacing installed files.
 
-The default prefix is `~/.local`. Executables go in `bin`, and the default configuration, public certificate, and licenses go in `share/wm/release`. The installer preserves user configuration and `share/wm/release-signing`. Failed replacements roll back to the previous files. If rollback also fails, the installer reports the retained backup directory. It does not change certificate trust, sign binaries, or operate the service. Stop wm before updating, then start wm with the installed executable.
+The default prefix is `~/.local`. `wm` goes in `bin`, and the default configuration, public certificate, and licenses go in `share/wm/release`. The installer preserves user configuration and `share/wm/release-signing`.
+
+Updates leave any existing `bin/wm-cli` untouched. Use `wm query`, `wm execute`, and `wm subscribe` for IPC commands. The current installer accepts single-binary archives. Older two-binary archives require an older installer compatible with that archive.
+
+Failed replacements roll back to the previous files. If rollback also fails, the installer reports the retained backup directory. It does not change certificate trust, sign binaries, or operate the service. Stop wm before updating, then start wm with the installed executable.
 
 ## Test changes
 
