@@ -26,6 +26,15 @@ state['calls'].append(a)
 def save(): path.write_text(json.dumps(state))
 def fail(message,status=1):
     save(); print(message,file=sys.stderr); raise SystemExit(status)
+def create_release(tag,prerelease):
+    if any(release['tag_name']==tag for release in state['releases']): fail('Release already exists')
+    assert tag in state['tags']
+    release={'id':len(state['releases'])+1,'tag_name':tag,'draft':True,'assets':[],
+             'html_url':'https://github.com/kdnk/wm/releases/tag/'+tag,
+             'prerelease':prerelease}
+    state['releases'].append(release)
+    if state.pop('fail_after_create',False): fail('Connection lost after draft creation')
+    return release
 if state.get('network_error'): fail('gh: authentication failed (HTTP 401)')
 if a[0]=='api':
     endpoint=a[1]
@@ -42,23 +51,21 @@ if a[0]=='api':
         if tag in state['tags']: fail('gh: Reference exists (HTTP 422)')
         state['tags'][tag]={'type':'commit','sha':fields['sha']}
         answer={'object':state['tags'][tag]}
+    elif endpoint.endswith('/releases') and 'POST' in a:
+        fields=[a[i+1] for i in range(len(a)-1) if a[i] in ('--field','--raw-field')]
+        fields=dict(field.split('=',1) for field in fields)
+        assert fields['draft']=='true' and fields['generate_release_notes']=='true'
+        target=state['tags'][fields['tag_name']]
+        while target['type']=='tag': target=state['tag_objects'][target['sha']]
+        assert fields['target_commitish']==target['sha']
+        assert fields['name']==fields['tag_name']
+        answer=create_release(fields['tag_name'],fields['prerelease']=='true')
     elif '/releases?' in endpoint:
-        answer=[state['releases']]
+        answer=[state.get('release_list_snapshot',state['releases'])]
     elif '/releases/' in endpoint:
         identifier=int(endpoint.rsplit('/',1)[1])
         answer=next(release for release in state['releases'] if release['id']==identifier)
     else: fail('Unexpected API endpoint: '+endpoint)
-elif a[:2]==['release','create']:
-    tag=a[2]
-    if any(release['tag_name']==tag for release in state['releases']): fail('Release already exists')
-    assert '--draft' in a and '--verify-tag' in a
-    assert tag in state['tags']
-    release={'id':len(state['releases'])+1,'tag_name':tag,'draft':True,'assets':[],
-             'html_url':'https://github.com/kdnk/wm/releases/tag/'+tag,
-             'prerelease':'--prerelease' in a}
-    state['releases'].append(release)
-    if state.pop('fail_after_create',False): fail('Connection lost after draft creation')
-    answer=release
 elif a[:2]==['release','upload']:
     release=next(item for item in state['releases'] if item['tag_name']==a[2])
     assert release['draft'], 'A published release must never receive an upload'
@@ -153,8 +160,7 @@ class ReleaseTests(unittest.TestCase):
         state = self.state()
         self.assertEqual(state["tags"][TAG]["sha"], SHA)
         self.assertFalse(state["releases"][0]["draft"])
-        commands = [call[:2] for call in state["calls"] if call[0] == "release"]
-        self.assertEqual(commands, [["release", "create"], ["release", "upload"], ["release", "edit"]])
+        self.assertEqual([asset["name"] for asset in state["releases"][0]["assets"]], [self.asset.name])
 
     def test_conflicting_tag_never_moves_or_publishes(self):
         state = self.state()
@@ -164,6 +170,18 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("another commit", self.invoke("tag", "--tag", TAG, successful=False))
         self.assertEqual(self.state()["tags"][TAG]["sha"], OTHER)
         self.assertFalse(self.state()["releases"])
+
+    def test_stale_release_list_does_not_hide_the_created_draft(self):
+        self.create_tag()
+        state = self.state()
+        state["release_list_snapshot"] = []
+        self.write_state(state)
+        self.assertEqual(self.publish()["status"], "published")
+        release, = self.state()["releases"]
+        self.assertFalse(release["draft"])
+        self.assertEqual(release["assets"], [{"name": self.asset.name,
+                                           "size": self.asset.stat().st_size,
+                                           "digest": "sha256:" + hashlib.sha256(self.asset.read_bytes()).hexdigest()}])
 
     def test_annotated_tag_resolves_to_the_source_commit(self):
         state = self.state()
@@ -195,7 +213,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("Command failed", self.publish(successful=False))
         self.assertTrue(self.state()["releases"][0]["draft"])
         self.assertEqual(self.publish()["status"], "published")
-        self.assertEqual(sum(call[:2] == ["release", "create"] for call in self.state()["calls"]), 1)
+        self.assertEqual(len(self.state()["releases"]), 1)
 
     def test_lost_draft_creation_response_is_recoverable(self):
         self.create_tag()
@@ -213,6 +231,7 @@ class ReleaseTests(unittest.TestCase):
         before = self.state()
         self.assertEqual(self.publish()["status"], "already_published")
         self.assertEqual(self.invoke("plan", "--event", "workflow_dispatch")["reason"], "already_published")
+        self.assertEqual(self.state()["releases"], before["releases"])
         self.assertEqual([call for call in self.state()["calls"] if call[0] == "release"],
                          [call for call in before["calls"] if call[0] == "release"])
 

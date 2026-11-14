@@ -137,14 +137,14 @@ def publish(args):
         return {"status": "already_published", "tag": args.tag, "url": release["html_url"]}
     prerelease = "-" in args.tag.split("+", 1)[0]
     if release is None:
-        arguments = ["gh", "release", "create", args.tag, "--repo", args.repo,
-                     "--target", args.sha, "--verify-tag", "--title", args.tag,
-                     "--generate-notes", "--draft"]
-        if prerelease:
-            arguments.append("--prerelease")
-        run(*arguments)
-        release = find_release(args.repo, args.tag)
-        if release is None or not release["draft"]:
+        release = api(f"repos/{args.repo}/releases", "--method", "POST",
+                      "--raw-field", "tag_name=" + args.tag,
+                      "--raw-field", "target_commitish=" + args.sha,
+                      "--raw-field", "name=" + args.tag,
+                      "--field", "draft=true", "--field", "generate_release_notes=true",
+                      "--field", "prerelease=" + str(prerelease).lower())
+        if (not isinstance(release, dict) or release.get("tag_name") != args.tag
+                or release.get("draft") is not True or type(release.get("id")) is not int):
             raise ReleaseError("GitHub did not report the prepared draft release.")
     run("gh", "release", "upload", args.tag, str(asset), "--repo", args.repo, "--clobber")
     uploaded = api(f"repos/{args.repo}/releases/{release['id']}")
