@@ -19,6 +19,7 @@ cargo test --locked --test wm_identity -- --test-threads=1
 cargo test --locked -p wm-client -p wm-protocol -- --test-threads=1
 cargo run --locked --example config-check -- "${1:-wm.default.toml}"
 cargo run --locked --example menu-bar-window-list-check
+cargo run --locked --example drag-preview-check
 cargo build --locked --bin wm
 binary_dir=$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"] + "/debug")')
 python3 tests/wm-cli-identity-test.py "$binary_dir"

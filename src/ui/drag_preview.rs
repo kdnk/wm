@@ -1,4 +1,4 @@
-// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
+// Modified by kdnk for wm on 2026-11-15. Original attribution is preserved in LICENSE.
 use std::sync::LazyLock;
 
 use cgs::compositor::{
@@ -22,11 +22,66 @@ static BORDER: LazyLock<Retained<CGColor>> =
     LazyLock::new(|| CGColor::new_generic_rgb(0.13, 0.62, 1.0, 0.95).into());
 static STACK_FILL: LazyLock<Retained<CGColor>> =
     LazyLock::new(|| CGColor::new_generic_rgb(0.34, 0.64, 1.0, 0.16).into());
+static OPAQUE_FILL: LazyLock<Retained<CGColor>> =
+    LazyLock::new(|| CGColor::new_generic_rgb(0.81, 0.91, 1.0, 1.0).into());
+static CONTRAST_FILL: LazyLock<Retained<CGColor>> =
+    LazyLock::new(|| CGColor::new_generic_rgb(0.72, 0.86, 1.0, 0.90).into());
+static CONTRAST_BORDER: LazyLock<Retained<CGColor>> =
+    LazyLock::new(|| CGColor::new_generic_rgb(0.02, 0.25, 0.52, 1.0).into());
+static OPAQUE_STACK_FILL: LazyLock<Retained<CGColor>> =
+    LazyLock::new(|| CGColor::new_generic_rgb(0.56, 0.77, 1.0, 1.0).into());
 
 const PREVIEW_CORNER_RADIUS: f64 = 12.0;
 const PREVIEW_BLUR_RADIUS: f64 = 6.0;
 const MOTION_DURATION: f64 = 0.12;
 const EXIT_DURATION: f64 = 0.09;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PreviewAppearance {
+    increase_contrast: bool,
+    reduce_transparency: bool,
+    reduce_motion: bool,
+}
+
+impl PreviewAppearance {
+    fn current() -> Self {
+        let workspace = NSWorkspace::sharedWorkspace();
+        Self {
+            increase_contrast: workspace.accessibilityDisplayShouldIncreaseContrast(),
+            reduce_transparency: workspace.accessibilityDisplayShouldReduceTransparency(),
+            reduce_motion: workspace.accessibilityDisplayShouldReduceMotion(),
+        }
+    }
+
+    fn apply(&self, shape: &CALayer, tint: &CALayer, card: &CALayer, backdrop: Option<&CALayer>) {
+        with_disabled_actions(|| {
+            let border = if self.increase_contrast {
+                &*CONTRAST_BORDER
+            } else {
+                &*BORDER
+            };
+            shape.setBorderColor(Some(border));
+            shape.setBorderWidth(if self.increase_contrast { 3.0 } else { 2.0 });
+            card.setBorderColor(Some(border));
+            card.setBorderWidth(if self.increase_contrast { 2.0 } else { 1.0 });
+            tint.setBackgroundColor(Some(if self.reduce_transparency {
+                &OPAQUE_FILL
+            } else if self.increase_contrast {
+                &CONTRAST_FILL
+            } else {
+                &FILL
+            }));
+            card.setBackgroundColor(Some(if self.reduce_transparency || self.increase_contrast {
+                &OPAQUE_STACK_FILL
+            } else {
+                &STACK_FILL
+            }));
+            if let Some(backdrop) = backdrop {
+                backdrop.setHidden(self.reduce_transparency);
+            }
+        });
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PreviewStyle {
@@ -84,6 +139,7 @@ pub struct DragPreview {
     carrier: CGRect,
     frame: CGRect,
     style: PreviewStyle,
+    appearance: PreviewAppearance,
     relative_window: Option<u32>,
     visibility: Visibility,
 }
@@ -93,6 +149,7 @@ unsafe impl Send for DragPreview {}
 
 impl DragPreview {
     pub fn new(target: DropTarget) -> Result<Self, CgsWindowError> {
+        let appearance = PreviewAppearance::current();
         let frame = preview_frame(target);
         let style = Self::style(target);
         let bounds = Self::bounds(frame.size);
@@ -120,14 +177,11 @@ impl DragPreview {
             shape.setContentsScale(2.0);
             shape.setMasksToBounds(true);
             shape.setCornerRadius(PREVIEW_CORNER_RADIUS);
-            shape.setBorderColor(Some(&BORDER));
-            shape.setBorderWidth(2.0);
             if let Some(backdrop) = &backdrop {
                 backdrop.setFrame(bounds);
                 shape.addSublayer(backdrop);
             }
             tint.setFrame(bounds);
-            tint.setBackgroundColor(Some(&FILL));
             shape.addSublayer(&tint);
             card.setOpacity(if style == PreviewStyle::Stack {
                 1.0
@@ -136,11 +190,9 @@ impl DragPreview {
             });
             card.setFrame(Self::card_frame(frame.size));
             card.setCornerRadius(8.0);
-            card.setBackgroundColor(Some(&STACK_FILL));
-            card.setBorderColor(Some(&BORDER));
-            card.setBorderWidth(1.0);
             shape.addSublayer(&card);
         });
+        appearance.apply(&shape, &tint, &card, backdrop.as_deref());
 
         let surface = WindowSurface::new(window.id(), bounds, &stage)?;
         surface.flush();
@@ -155,12 +207,21 @@ impl DragPreview {
             carrier: frame,
             frame,
             style,
+            appearance,
             relative_window: None,
             visibility: Visibility::Hidden,
         })
     }
 
     pub fn show(&mut self, target: DropTarget) -> Result<(), CgsWindowError> {
+        self.show_with_appearance(target, PreviewAppearance::current())
+    }
+
+    fn show_with_appearance(
+        &mut self,
+        target: DropTarget,
+        appearance: PreviewAppearance,
+    ) -> Result<(), CgsWindowError> {
         let frame = preview_frame(target);
         let style = Self::style(target);
         let relative_window = target.intent.window.idx.get();
@@ -168,15 +229,21 @@ impl DragPreview {
         let frame_changed = !self.frame.same_as(frame);
         let style_changed = self.style != style;
         let ordering_changed = !tracking || self.relative_window != Some(relative_window);
-        if !frame_changed && !style_changed && !ordering_changed {
+        let appearance_changed = self.appearance != appearance;
+        let settle_motion = appearance.reduce_motion && !self.appearance.reduce_motion;
+        if !frame_changed && !style_changed && !ordering_changed && !appearance_changed {
             return Ok(());
         }
-        let duration = if NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion() {
+        if appearance_changed {
+            appearance.apply(&self.shape, &self.tint, &self.card, self.backdrop.as_deref());
+            self.appearance = appearance;
+        }
+        let duration = if appearance.reduce_motion {
             0.0
         } else {
             MOTION_DURATION
         };
-        if frame_changed || !tracking {
+        if frame_changed || !tracking || settle_motion {
             let fading = unsafe { self.stage.presentationLayer() }
                 .is_some_and(|layer| layer.opacity() > 0.0);
             let from = if (tracking || fading) && duration > 0.0 {
@@ -198,7 +265,7 @@ impl DragPreview {
             self.window.order_above(Some(relative_window))?;
             self.relative_window = Some(relative_window);
         }
-        if style_changed {
+        if style_changed || settle_motion {
             fade(
                 &self.card,
                 if style == PreviewStyle::Stack {
@@ -210,7 +277,7 @@ impl DragPreview {
             );
             self.style = style;
         }
-        if !tracking {
+        if !tracking || settle_motion {
             fade(&self.stage, 1.0, duration);
         }
         self.visibility = Visibility::Tracking;
@@ -376,5 +443,47 @@ mod tests {
         assert_eq!(forward.carrier, reverse.carrier);
         assert_eq!(forward.from, reverse.to);
         assert_eq!(forward.to, reverse.from);
+    }
+
+    #[test]
+    fn accessibility_appearance_updates_native_layers_without_changing_geometry() {
+        let shape = CALayer::layer();
+        let tint = CALayer::layer();
+        let card = CALayer::layer();
+        let backdrop = CALayer::layer();
+        let frame = rect(20.0, 30.0, 500.0, 300.0);
+        with_disabled_actions(|| shape.setFrame(frame));
+        for increase_contrast in [false, true] {
+            for reduce_transparency in [false, true] {
+                let appearance = PreviewAppearance {
+                    increase_contrast,
+                    reduce_transparency,
+                    reduce_motion: false,
+                };
+                appearance.apply(&shape, &tint, &card, Some(&backdrop));
+                assert_eq!(shape.frame(), frame);
+                assert_eq!(backdrop.isHidden(), reduce_transparency);
+                if reduce_transparency {
+                    assert_eq!(CGColor::alpha(tint.backgroundColor().as_deref()), 1.0);
+                    assert_eq!(CGColor::alpha(card.backgroundColor().as_deref()), 1.0);
+                }
+                if increase_contrast {
+                    assert_eq!(CGColor::alpha(shape.borderColor().as_deref()), 1.0);
+                    assert!(shape.borderWidth() > 2.0);
+                } else {
+                    assert_eq!(shape.borderWidth(), 2.0);
+                }
+            }
+        }
+        PreviewAppearance {
+            increase_contrast: false,
+            reduce_transparency: false,
+            reduce_motion: false,
+        }
+        .apply(&shape, &tint, &card, Some(&backdrop));
+        assert!(!backdrop.isHidden());
+        assert!(CGColor::alpha(tint.backgroundColor().as_deref()) < 1.0);
+        assert_eq!(shape.borderWidth(), 2.0);
+        assert_eq!(card.borderWidth(), 1.0);
     }
 }
