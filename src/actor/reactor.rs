@@ -3371,6 +3371,9 @@ impl Reactor {
             // Publish the menu state once after all affected spaces have been arranged.
             self.maybe_send_menu_update();
         }
+        if outcome.finish_drop_preview {
+            self.drag_manager.finish_preview();
+        }
         if layout_changed && outcome.drop_haptic && !cfg!(test) {
             let _ = crate::sys::haptics::perform_haptic(
                 crate::common::config::HapticPattern::LevelChange,

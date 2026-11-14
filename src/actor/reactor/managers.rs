@@ -126,12 +126,18 @@ impl DragManager {
         }
     }
 
+    pub fn finish_preview(&mut self) {
+        if let Some(preview) = &mut self.preview {
+            preview.finish();
+        }
+    }
+
     pub fn release_preview(&mut self) { drop(self.preview.take()); }
 
     pub fn suppress_preview(&mut self, suppressed: bool) {
         self.preview_suppressed = suppressed;
         if suppressed {
-            self.hide_preview();
+            self.release_preview();
         }
     }
 }

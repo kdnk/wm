@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::time::Instant;
 
 use objc2_core_foundation::{CGPoint, CGRect};
@@ -77,6 +78,7 @@ pub(crate) struct EventOutcome {
     /// A workspace switch landed on this other display; carry the cursor there.
     pub(crate) display_switch_warp: Option<SpaceId>,
     pub(crate) drop_haptic: bool,
+    pub(crate) finish_drop_preview: bool,
     pub(crate) pre_layout_window_frame_writes: Vec<WindowFrameWriteRequest>,
     pub(crate) interactive_window_frame_write: Option<WindowFrameWriteRequest>,
     pub(crate) dispatch_mouse_up: bool,
@@ -136,6 +138,7 @@ impl EventOutcome {
         self.make_key_windows.append(&mut other.make_key_windows);
         self.mouse_warps.append(&mut other.mouse_warps);
         self.drop_haptic |= other.drop_haptic;
+        self.finish_drop_preview |= other.finish_drop_preview;
         self.post_arrange_mouse_warp =
             other.post_arrange_mouse_warp.or(self.post_arrange_mouse_warp);
         self.display_switch_warp = other.display_switch_warp.or(self.display_switch_warp);
