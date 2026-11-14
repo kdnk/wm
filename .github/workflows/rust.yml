@@ -45,7 +45,7 @@ jobs:
       - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
       - name: Compile
-        run: cargo check --locked
+        run: cargo check --locked --workspace
       - name: Verify imported desktop checks
         run: |
           python3 tests/rift-settings-focus-verifier-test.py
@@ -59,4 +59,4 @@ jobs:
       - name: Test exact capture
         run: cargo test --locked --manifest-path cgs/Cargo.toml --lib exact_capture -- --test-threads=1
       - name: Test
-        run: cargo nextest run
+        run: cargo nextest run --locked --workspace --exclude cgs

@@ -16,6 +16,7 @@ python3 scripts/check-fork-notices.py
 cargo test --locked --manifest-path cgs/Cargo.toml --lib exact_capture -- --test-threads=1
 cargo test --locked --lib -- --test-threads=1
 cargo test --locked --test wm_identity -- --test-threads=1
+cargo test --locked -p wm-client -p wm-protocol -- --test-threads=1
 cargo run --locked --example config-check -- "${1:-wm.default.toml}"
 cargo run --locked --example menu-bar-window-list-check
 cargo build --locked --bin wm --bin wm-cli
