@@ -71,7 +71,6 @@ pub fn handle_mouse_up(
     let Some(commit) = drag.actor.finish(payload.button) else {
         return Ok(outcome);
     };
-    drag.release_preview();
     let window = commit.source.window;
     drag.externally_controlled_window = None;
     let mut needs_layout = commit.source.tiled;
@@ -90,7 +89,12 @@ pub fn handle_mouse_up(
         }) {
             needs_layout = true;
             outcome.drop_haptic = drag.haptics_enabled;
+            outcome.finish_drop_preview = true;
         }
+    }
+
+    if !outcome.finish_drop_preview {
+        drag.release_preview();
     }
 
     if commit.source.origin_space != payload.final_space {
@@ -142,4 +146,84 @@ pub fn handle_mouse_up(
     }
 
     Ok(outcome.with_arrange_passes(u8::from(needs_layout)))
+}
+
+#[cfg(test)]
+mod tests {
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+
+    use super::*;
+    use crate::actor::app::WindowId;
+    use crate::actor::drag::{DragMotion, DragScene, DragSceneTarget, DragSource, MouseButton};
+    use crate::actor::reactor::testing::{make_windows, test_context};
+
+    fn drop_outcome(target_exists: bool) -> EventOutcome {
+        let (mut apps, mut reactor) = test_context();
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 1000.0));
+        let space = SpaceId::new(1);
+        apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(2));
+        let source = WindowId::new(1, 1);
+        let target = WindowId::new(1, 2);
+        let source_frame = reactor.state.windows.window(source).unwrap().frame_monotonic;
+        let target_frame = reactor.state.windows.window(target).unwrap().frame_monotonic;
+        let target = if target_exists {
+            target
+        } else {
+            WindowId::new(99, 1)
+        };
+        reactor.drag_manager.haptics_enabled = false;
+        reactor.drag_manager.actor.begin_native(
+            DragSource {
+                window: source,
+                origin_frame: source_frame,
+                last_frame: source_frame,
+                origin_space: Some(space),
+                current_space: Some(space),
+                tiled: true,
+            },
+            DragScene {
+                targets: vec![DragSceneTarget {
+                    window: target,
+                    space,
+                    frame: target_frame,
+                }],
+                ..DragScene::default()
+            },
+        );
+        reactor.drag_manager.actor.motion(DragMotion {
+            point: CGPoint::new(
+                target_frame.origin.x + target_frame.size.width / 2.0,
+                target_frame.origin.y + target_frame.size.height / 2.0,
+            ),
+        });
+        let intent = reactor.drag_manager.actor.intent().unwrap();
+        reactor.drag_manager.actor.set_preview(intent, Some(target_frame));
+        assert_eq!(
+            reactor.drag_manager.actor.target().unwrap().intent.window,
+            target
+        );
+        handle_mouse_up(
+            &mut reactor.state,
+            &mut reactor.layout_manager,
+            &mut reactor.drag_manager,
+            MouseUpPayload {
+                button: MouseButton::Left,
+                final_space: Some(space),
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn accepted_drop_requests_preview_handoff_even_without_haptics() {
+        let outcome = drop_outcome(true);
+        assert!(outcome.finish_drop_preview);
+        assert!(!outcome.drop_haptic);
+        assert_eq!(outcome.arrange.passes, 1);
+    }
+
+    #[test]
+    fn vanished_drop_target_does_not_request_a_success_preview() {
+        assert!(!drop_outcome(false).finish_drop_preview);
+    }
 }

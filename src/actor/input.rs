@@ -26,6 +26,7 @@ use crate::common::config::{
     BindingModeSpecs, Config, DragDropSettings, HorizontalMouseWarp, MouseAction, MouseModifier,
 };
 use crate::sys::event::{self, Hotkey, KeyCode};
+use crate::sys::geometry::CGRectExt;
 use crate::sys::hotkey::{
     Modifiers, is_modifier_key, key_code_from_event, modifier_key_is_active, modifiers_from_flags,
     modifiers_from_flags_with_keys,
@@ -40,6 +41,7 @@ const MOUSE_MOVE_MIN_INTERVAL_NS_LOW_POWER: u64 = 32_000_000; // 32ms ~= 31 Hz
 #[derive(Debug)]
 pub enum Request {
     Warp(CGPoint),
+    FocusPointer(FocusPointer),
     /// Carry the cursor's position within `from` to the same spot in `to`.
     WarpRelative {
         from: Option<CGRect>,
@@ -59,6 +61,42 @@ pub enum Request {
     SetLowPowerMode(bool),
     SetMissionControlActive(bool, Vec<CGRect>),
     ReleaseMissionControl,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct FocusPointer {
+    pub window: Option<window_server::WindowServerId>,
+    pub visible: CGRect,
+    pub retain: CGRect,
+}
+
+impl FocusPointer {
+    pub(crate) fn for_window(
+        window: Option<window_server::WindowServerId>,
+        current: CGRect,
+        destination: CGRect,
+        usable: CGRect,
+    ) -> Option<Self> {
+        let visible = destination.intersection(&usable);
+        (visible.size.width > 0.0 && visible.size.height > 0.0).then_some(Self {
+            window,
+            visible,
+            retain: current.intersection(&visible),
+        })
+    }
+
+    fn warp_point(
+        self,
+        cursor: Option<CGPoint>,
+        under_cursor: Option<window_server::WindowServerId>,
+    ) -> Option<CGPoint> {
+        let retain = self.window.is_some()
+            && under_cursor == self.window
+            && self.retain.size.width > 0.0
+            && self.retain.size.height > 0.0
+            && cursor.is_some_and(|point| self.retain.contains(point));
+        (!retain).then(|| self.visible.mid())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -493,17 +531,35 @@ impl Input {
                 }
                 should_rebuild_mask = true;
             }
-            Request::Warp(_) | Request::WarpRelative { .. } => {
+            Request::Warp(_) | Request::WarpRelative { .. } | Request::FocusPointer(_) => {
                 let point = match request {
                     Request::WarpRelative { from, to } => {
-                        relative_point(event::current_cursor_location().ok(), from, to)
+                        Some(relative_point(event::current_cursor_location().ok(), from, to))
                     }
-                    Request::Warp(point) => point,
+                    Request::Warp(point) => Some(point),
+                    Request::FocusPointer(focus) => {
+                        let cursor = event::current_cursor_location().ok();
+                        let under_cursor = cursor
+                            .filter(|point| {
+                                focus.window.is_some()
+                                    && focus.retain.area() > 0.0
+                                    && focus.retain.contains(*point)
+                            })
+                            .and_then(window_server::get_window_at_point);
+                        focus.warp_point(cursor, under_cursor)
+                    }
                     _ => unreachable!(),
                 };
                 self.mouse_focus_publisher.discard_through(event::hid_event_timestamp_now());
-                if let Err(e) = event::warp_mouse(point) {
-                    warn!("Failed to warp mouse: {e:?}");
+                if let Some(point) = point {
+                    #[cfg(not(test))]
+                    let result = event::warp_mouse(point);
+                    #[cfg(test)]
+                    let result: Result<(), objc2_core_graphics::CGError> = Ok(());
+                    match result {
+                        Ok(()) => self.mouse_location.set(point),
+                        Err(error) => warn!("Failed to warp mouse: {error:?}"),
+                    }
                 }
                 self.mouse_focus_publisher.discard_through(event::hid_event_timestamp_now());
                 if state.mouse_hides_on_focus && state.hide_count == 0 {
@@ -1622,6 +1678,106 @@ mod tests {
     use super::*;
 
     #[test]
+    fn focus_pointer_clips_to_usable_screen_and_current_frame() {
+        use objc2_core_foundation::CGSize;
+        let usable = CGRect::new(CGPoint::new(0., 30.), CGSize::new(1000., 700.));
+        let current = CGRect::new(CGPoint::new(100., 100.), CGSize::new(500., 500.));
+        let destination = CGRect::new(CGPoint::new(-200., -100.), CGSize::new(600., 500.));
+        let focus = FocusPointer::for_window(None, current, destination, usable).unwrap();
+        assert_eq!(
+            focus.visible,
+            CGRect::new(CGPoint::new(0., 30.), CGSize::new(400., 370.))
+        );
+        assert_eq!(
+            focus.retain,
+            CGRect::new(CGPoint::new(100., 100.), CGSize::new(300., 300.))
+        );
+        assert_eq!(focus.warp_point(None, None), Some(CGPoint::new(200., 215.)));
+        assert!(
+            FocusPointer::for_window(
+                None,
+                current,
+                CGRect::new(CGPoint::new(1100., 100.), CGSize::new(200., 200.)),
+                usable,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn focus_pointer_retains_only_the_exposed_destination() {
+        use objc2_core_foundation::CGSize;
+        let window = window_server::WindowServerId::new(41);
+        let visible = CGRect::new(CGPoint::new(100., 20.), CGSize::new(300., 200.));
+        let retain = CGRect::new(CGPoint::new(180., 20.), CGSize::new(100., 200.));
+        let focus = FocusPointer {
+            window: Some(window),
+            visible,
+            retain,
+        };
+        let inside = CGPoint::new(210., 80.);
+        assert_eq!(focus.warp_point(Some(inside), Some(window)), None);
+        for (cursor, exposed) in [
+            (Some(inside), Some(window_server::WindowServerId::new(42))),
+            (Some(inside), None),
+            (Some(CGPoint::new(120., 80.)), Some(window)),
+            (Some(CGPoint::new(500., 80.)), Some(window)),
+            (None, Some(window)),
+        ] {
+            assert_eq!(focus.warp_point(cursor, exposed), Some(visible.mid()));
+        }
+        assert_eq!(
+            FocusPointer { window: None, ..focus }.warp_point(Some(inside), None),
+            Some(visible.mid())
+        );
+        assert_eq!(
+            FocusPointer { retain: CGRect::ZERO, ..focus }
+                .warp_point(Some(CGPoint::ZERO), Some(window)),
+            Some(visible.mid())
+        );
+    }
+
+    #[test]
+    fn focus_pointer_keeps_cursor_and_hidden_state_without_warping() {
+        use objc2_core_foundation::CGSize;
+        let window = window_server::WindowServerId::new(41);
+        let visible = CGRect::new(CGPoint::new(100., 20.), CGSize::new(300., 200.));
+        let cursor = CGPoint::new(140., 70.);
+        let (input, _, mut events) = input();
+        input.mouse_location.set(cursor);
+        {
+            let mut state = input.state.borrow_mut();
+            state.event_processing_enabled = true;
+            state.focus_follows_mouse_config_enabled = true;
+            state.mouse_hides_on_focus = true;
+            state.hide_count = 1;
+        }
+        window_server::set_cursor_location_override(Some(cursor));
+        window_server::set_window_at_point_regions(Some(vec![(visible, window)]));
+        let (recovery_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        input.on_request(
+            Request::FocusPointer(FocusPointer {
+                window: Some(window),
+                visible,
+                retain: visible,
+            }),
+            &recovery_tx,
+        );
+        assert_eq!(input.mouse_location.get(), cursor);
+        assert_eq!(input.state.borrow().hide_count, 1);
+        let motion = CGEvent::new(None).unwrap();
+        CGEvent::set_timestamp(Some(&motion), 1);
+        input.on_event(CGEventType::MouseMoved, &motion, None);
+        assert!(
+            events.try_recv().is_err(),
+            "stale hover must not undo keyboard focus"
+        );
+        window_server::set_cursor_location_override(None);
+        window_server::set_window_at_point_regions(None);
+        input.state.borrow_mut().hide_count = 0;
+    }
+
+    #[test]
     fn relative_warp_keeps_cursor_spot_or_centers() {
         use objc2_core_foundation::CGSize;
         let from = CGRect::new(CGPoint::new(100., 100.), CGSize::new(200., 100.));
@@ -2117,7 +2273,8 @@ mod tests {
                 state.event_processing_enabled = true;
                 state.focus_follows_mouse_config_enabled = true;
             }
-            let point = event::current_cursor_location().unwrap();
+            let point = CGPoint::new(25., 35.);
+            window_server::set_cursor_location_override(Some(point));
             let request = if relative {
                 Request::WarpRelative {
                     from: None,
@@ -2141,6 +2298,7 @@ mod tests {
                 matches!(events.try_recv().unwrap().1, Event::MouseFocusPending(_)),
                 "relative={relative}: first post-warp motion must resume focus following"
             );
+            window_server::set_cursor_location_override(None);
         }
     }
 

@@ -3371,6 +3371,9 @@ impl Reactor {
             // Publish the menu state once after all affected spaces have been arranged.
             self.maybe_send_menu_update();
         }
+        if outcome.finish_drop_preview {
+            self.drag_manager.finish_preview();
+        }
         if layout_changed && outcome.drop_haptic && !cfg!(test) {
             let _ = crate::sys::haptics::perform_haptic(
                 crate::common::config::HapticPattern::LevelChange,
@@ -3525,8 +3528,8 @@ impl Reactor {
                     Some(crate::sys::event::hid_event_timestamp_now());
                 _ = input_tx.send(crate::actor::input::Request::WarpRelative { from, to });
             }
-        } else if let Some(center) = focused.and_then(|wid| self.focus_warp_center(wid)) {
-            self.warp_mouse(center);
+        } else if let Some(window) = focused {
+            self.warp_mouse_for_focus(window);
         }
 
         #[cfg(test)]
@@ -5296,8 +5299,10 @@ impl Reactor {
         self.window_frame_on_known_screen(wid).map(|frame| frame.mid())
     }
 
-    fn focus_warp_center(&self, wid: WindowId) -> Option<CGPoint> {
-        let mut frame = self.state.windows.window(wid)?.frame_monotonic;
+    fn focus_pointer(&self, wid: WindowId) -> Option<crate::actor::input::FocusPointer> {
+        let window = self.state.windows.window(wid)?;
+        let current = window.frame_monotonic;
+        let mut frame = current;
         if let Some(space) = self.assigned_space_for_window_id(wid)
             && let Some(screen) = self.space_state.screen_by_space(space)
             && let Some((workspace, layout)) =
@@ -5315,7 +5320,16 @@ impl Reactor {
                 frame = bounds.apply(frame);
             }
         }
-        self.screen_for_point(frame.mid()).map(|_| frame.mid())
+        let screen = self
+            .assigned_space_for_window_id(wid)
+            .and_then(|space| self.space_state.screen_by_space(space))
+            .or_else(|| self.screen_for_point(frame.mid()))?;
+        crate::actor::input::FocusPointer::for_window(
+            window.info.sys_id,
+            current,
+            frame,
+            screen.frame,
+        )
     }
 
     pub fn warp_mouse(&mut self, point: CGPoint) {
@@ -5324,6 +5338,17 @@ impl Reactor {
         };
         self.mouse_focus_warp_requested_at = Some(crate::sys::event::hid_event_timestamp_now());
         _ = input_tx.send(crate::actor::input::Request::Warp(point));
+    }
+
+    fn warp_mouse_for_focus(&mut self, wid: WindowId) {
+        let Some(pointer) = self.focus_pointer(wid) else {
+            return;
+        };
+        let Some(input_tx) = &self.communication_manager.input_tx else {
+            return;
+        };
+        self.mouse_focus_warp_requested_at = Some(crate::sys::event::hid_event_timestamp_now());
+        _ = input_tx.send(crate::actor::input::Request::FocusPointer(pointer));
     }
 
     fn warp_mouse_to_space_center(&mut self, space: SpaceId) -> bool {

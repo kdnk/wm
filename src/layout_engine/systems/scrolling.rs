@@ -165,6 +165,7 @@ pub(crate) struct CameraSpring {
     current_velocity: f64,
     started: Instant,
     sampled: Instant,
+    omega: f64,
 }
 impl CameraSpring {
     pub(crate) fn new(from: f64, target: f64, velocity: f64, started: Instant) -> Self {
@@ -176,12 +177,33 @@ impl CameraSpring {
             current_velocity: velocity,
             started,
             sampled: started,
+            omega: 800.0_f64.sqrt(),
+        }
+    }
+
+    fn with_duration(
+        from: f64,
+        target: f64,
+        velocity: f64,
+        started: Instant,
+        duration: Duration,
+    ) -> Self {
+        Self {
+            omega: if duration.is_zero() {
+                f64::INFINITY
+            } else {
+                12.0 / duration.as_secs_f64()
+            },
+            ..Self::new(from, target, velocity, started)
         }
     }
 
     pub(crate) fn position_velocity(&self, now: Instant) -> (f64, f64) {
         let t = now.saturating_duration_since(self.started).as_secs_f64();
-        let omega = 800.0_f64.sqrt();
+        let omega = self.omega;
+        if !omega.is_finite() {
+            return (self.target, 0.0);
+        }
         let x0 = self.from - self.target;
         let b = omega * x0 + self.velocity;
         let envelope = (-omega * t).exp();
@@ -199,7 +221,7 @@ impl CameraSpring {
         self.sampled = now;
         // Check both position and speed so crossing the target cannot finish early.
         (self.current - self.target).abs() <= 0.25 / scale
-            && velocity.abs() / 800.0_f64.sqrt() <= 0.25 / scale
+            && velocity.abs() / self.omega <= 0.25 / scale
     }
 }
 
@@ -259,15 +281,27 @@ pub(crate) struct ViewportPresentation {
 #[derive(Clone, Debug)]
 pub(crate) struct PresentedViewport {
     pub offset: f64,
+    pub rendered_offset: f64,
     pub velocity: f64,
     pub target: f64,
     pub gesturing: bool,
     pub timestamp: Instant,
     motion: Arc<Mutex<MotionHistory>>,
+    omega: Option<f64>,
 }
 
 impl ViewportPresentation {
     pub fn offset(&self) -> f64 { self.viewport.start_offset() }
+
+    pub fn rendered_offset(&self) -> f64 {
+        let offset = self.offset();
+        if self.gesturing() {
+            // Workspace handoff still measures raw overflow, independently of this resistance.
+            self.motion.lock().rendered_offset(offset, self.width)
+        } else {
+            offset
+        }
+    }
 
     pub fn gesturing(&self) -> bool { matches!(self.viewport, Viewport::Gesture(_)) }
 
@@ -287,21 +321,26 @@ impl ViewportPresentation {
         }
     }
 
-    pub fn retarget(&mut self, from: f64, velocity: f64, now: Instant) {
+    pub fn retarget(&mut self, from: f64, velocity: f64, now: Instant, duration: Duration) {
         let target = self.target();
-        self.viewport = Viewport::Animation(CameraSpring::new(from, target, velocity, now));
+        self.viewport = Viewport::Animation(CameraSpring::with_duration(
+            from, target, velocity, now, duration,
+        ));
     }
 
     pub fn position_velocity(&self, now: Instant) -> (f64, f64) {
         match &self.viewport {
             Viewport::Animation(s) => s.position_velocity(s.sampled.max(now)),
+            Viewport::Gesture(_) => (self.rendered_offset(), self.motion.lock().visual_velocity()),
             _ => (self.offset(), 0.0),
         }
     }
 
     pub fn update(&mut self, delta: f64, time: Duration) {
         if let Viewport::Gesture(offset) = &mut self.viewport {
-            self.motion.lock().update(offset, self.bounds, delta * self.width, time);
+            self.motion
+                .lock()
+                .update(offset, self.bounds, self.width, delta * self.width, time);
         }
     }
 
@@ -312,6 +351,7 @@ impl ViewportPresentation {
     pub fn snapshot(&self, now: Instant) -> PresentedViewport {
         PresentedViewport {
             offset: self.offset(),
+            rendered_offset: self.rendered_offset(),
             velocity: match &self.viewport {
                 Viewport::Animation(s) => s.current_velocity,
                 _ => 0.0,
@@ -320,6 +360,10 @@ impl ViewportPresentation {
             gesturing: self.gesturing(),
             timestamp: now,
             motion: self.motion.clone(),
+            omega: match &self.viewport {
+                Viewport::Animation(s) => Some(s.omega),
+                _ => None,
+            },
         }
     }
 
@@ -589,68 +633,145 @@ impl Geometry {
 #[derive(Clone, Debug, Default)]
 struct MotionHistory {
     samples: VecDeque<(Duration, f64)>,
-    overscroll: f64,
+    visual_samples: VecDeque<(Duration, f64)>,
+    raw_overscroll: f64,
+    edge_seed: f64,
+    edge_limit: f64,
 }
 impl MotionHistory {
+    fn begin(&mut self, offset: &mut f64, bounds: (f64, f64), width: f64) {
+        self.samples.clear();
+        self.samples.reserve(64);
+        self.visual_samples.clear();
+        self.visual_samples.reserve(64);
+        self.raw_overscroll = 0.0;
+        let bounded = offset.clamp(bounds.0, bounds.1);
+        let visible_excess = *offset - bounded;
+        self.edge_limit = resistance_limit(width).max(2.0 * visible_excess.abs());
+        // A re-grab retains the drawn edge displacement without counting it as a new swipe.
+        self.edge_seed = if visible_excess == 0.0 {
+            0.0
+        } else {
+            self.edge_limit * visible_excess / (self.edge_limit - visible_excess.abs())
+        };
+        self.raw_overscroll = self.edge_seed;
+        *offset = bounded;
+    }
+
+    fn limit(&self, width: f64) -> f64 {
+        if self.edge_limit > 0.0 {
+            self.edge_limit
+        } else {
+            resistance_limit(width)
+        }
+    }
+
+    fn rendered_offset(&self, offset: f64, width: f64) -> f64 {
+        offset + resisted_overflow(self.raw_overscroll, self.limit(width))
+    }
+
+    fn handoff_overscroll(&self) -> f64 {
+        if self.raw_overscroll.signum() == self.edge_seed.signum() {
+            self.raw_overscroll
+                - self.raw_overscroll.signum() * self.edge_seed.abs().min(self.raw_overscroll.abs())
+        } else {
+            self.raw_overscroll
+        }
+    }
+
     fn push(&mut self, delta: f64, time: Duration) -> bool {
+        self.push_movement(delta, delta, time)
+    }
+
+    fn push_movement(&mut self, logical: f64, visual: f64, time: Duration) -> bool {
         if self.samples.back().is_some_and(|(last, _)| time < *last) {
             return false;
         }
+        Self::push_sample(&mut self.samples, logical, time);
+        Self::push_sample(&mut self.visual_samples, visual, time);
+        true
+    }
+
+    fn push_sample(samples: &mut VecDeque<(Duration, f64)>, delta: f64, time: Duration) {
         // macOS reports stationary contacts continuously; retain one fresh idle
         // anchor so that a pause before a new flick does not dilute that flick.
         if delta == 0.0
-            && let Some((last, 0.0)) = self.samples.back_mut()
+            && let Some((last, 0.0)) = samples.back_mut()
         {
             *last = time;
         } else {
-            if self.samples.len() == 64 {
-                self.samples.pop_front();
+            if samples.len() == 64 {
+                samples.pop_front();
             }
-            self.samples.push_back((time, delta));
+            samples.push_back((time, delta));
         }
-        while self
-            .samples
+        while samples
             .front()
             .is_some_and(|(first, _)| time.saturating_sub(*first) > Duration::from_millis(150))
         {
-            self.samples.pop_front();
+            samples.pop_front();
         }
-        true
     }
 
     fn update(
         &mut self,
         offset: &mut f64,
         bounds: (f64, f64),
+        width: f64,
         delta: f64,
         time: Duration,
     ) -> Option<f64> {
         if !delta.is_finite() {
             return None;
         }
-        let raw = *offset + self.overscroll + delta;
+        let raw = *offset + self.raw_overscroll + delta;
         let bounded = raw.clamp(bounds.0, bounds.1);
         let moved = bounded - *offset;
-        if !self.push(moved, time) {
+        let overflow = raw - bounded;
+        let reset_seed = overflow == 0.0 || overflow.signum() != self.edge_seed.signum();
+        let next_limit = if reset_seed {
+            resistance_limit(width)
+        } else {
+            self.limit(width)
+        };
+        let visual_moved = moved + resisted_overflow(overflow, next_limit)
+            - resisted_overflow(self.raw_overscroll, self.limit(width));
+        if !self.push_movement(moved, visual_moved, time) {
             return None;
         }
-        self.overscroll = raw - bounded;
+        if reset_seed {
+            self.edge_seed = 0.0;
+            self.edge_limit = next_limit;
+        }
+        self.raw_overscroll = overflow;
         *offset = bounded;
         Some(moved)
     }
 
-    fn velocity(&self) -> f64 {
-        let (Some(&(first, _)), Some(&(last, _))) = (self.samples.front(), self.samples.back())
-        else {
+    fn velocity(&self) -> f64 { Self::sample_velocity(&self.samples) }
+
+    fn visual_velocity(&self) -> f64 { Self::sample_velocity(&self.visual_samples) }
+
+    fn sample_velocity(samples: &VecDeque<(Duration, f64)>) -> f64 {
+        let (Some(&(first, _)), Some(&(last, _))) = (samples.front(), samples.back()) else {
             return 0.0;
         };
         let dt = last.saturating_sub(first).as_secs_f64();
         if dt > 0.0 {
-            self.samples.iter().map(|(_, delta)| delta).sum::<f64>() / dt
+            samples.iter().map(|(_, delta)| delta).sum::<f64>() / dt
         } else {
             0.0
         }
     }
+}
+
+fn resistance_limit(width: f64) -> f64 { (width * 0.04).min(48.0) }
+
+fn resisted_overflow(raw: f64, limit: f64) -> f64 {
+    if limit <= 0.0 {
+        return 0.0;
+    }
+    limit * raw / (limit + raw.abs())
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]
@@ -1234,6 +1355,9 @@ impl ScrollingLayoutSystem {
         let g = state.geometry.as_ref()?;
         let mut motion = state.motion.clone();
         motion.samples.reserve(64_usize.saturating_sub(motion.samples.len()));
+        motion
+            .visual_samples
+            .reserve(64_usize.saturating_sub(motion.visual_samples.len()));
         let camera = ViewportPresentation {
             viewport: state.viewport.clone(),
             motion: Arc::new(Mutex::new(motion)),
@@ -1263,7 +1387,10 @@ impl ScrollingLayoutSystem {
             state.viewport = if p.gesturing {
                 Viewport::Gesture(p.offset)
             } else if p.offset != p.target {
-                Viewport::Animation(CameraSpring::new(p.offset, p.target, p.velocity, p.timestamp))
+                let mut spring =
+                    CameraSpring::new(p.rendered_offset, p.target, p.velocity, p.timestamp);
+                spring.omega = p.omega.unwrap_or(spring.omega);
+                Viewport::Animation(spring)
             } else {
                 Viewport::Static(p.offset)
             };
@@ -1309,11 +1436,14 @@ impl ScrollingLayoutSystem {
         if matches!(state.viewport, Viewport::Gesture(_)) {
             return false;
         }
-        state.motion.overscroll = 0.0;
-        state.motion.samples.clear();
-        state.motion.samples.reserve(64);
         state.viewport.sample(now, 1.0);
-        state.viewport = Viewport::Gesture(state.viewport.offset());
+        let mut offset = state.viewport.offset();
+        state.motion.begin(
+            &mut offset,
+            state.geometry.as_ref().unwrap().bounds,
+            state.geometry.as_ref().unwrap().tiling.size.width,
+        );
+        state.viewport = Viewport::Gesture(offset);
         true
     }
 
@@ -1332,7 +1462,7 @@ impl ScrollingLayoutSystem {
             return None;
         };
         let g = state.geometry.as_ref()?;
-        state.motion.update(offset, g.bounds, delta, timestamp)
+        state.motion.update(offset, g.bounds, g.tiling.size.width, delta, timestamp)
     }
 
     /// Normalize only at the layout boundary, using cached working geometry.
@@ -1361,8 +1491,13 @@ impl ScrollingLayoutSystem {
             return None;
         }
         let velocity = state.motion.velocity();
+        let visual_velocity = state.motion.visual_velocity();
+        let rendered_offset =
+            state.motion.rendered_offset(offset, state.geometry.as_ref()?.tiling.size.width);
         let projected = offset - velocity / (1000.0 * 0.997_f64.ln());
-        let release = self.settle(layout, projected, velocity, true)?;
+        let mut release = self.settle(layout, projected, velocity, true)?;
+        release.from_offset = rendered_offset;
+        release.velocity = visual_velocity;
         if animate {
             self.layouts[layout].viewport = Viewport::Animation(CameraSpring::new(
                 release.from_offset,
@@ -1393,7 +1528,7 @@ impl ScrollingLayoutSystem {
             .get(layout)
             .and_then(|state| {
                 let g = state.geometry.as_ref()?;
-                Some(state.motion.overscroll / g.tiling.size.width)
+                Some(state.motion.handoff_overscroll() / g.tiling.size.width)
             })
             .unwrap_or(0.0)
     }
@@ -4026,13 +4161,13 @@ pub(crate) mod tests {
         let (mut p, frames) = f.system.presentation(f.layout).unwrap();
         let start = Instant::now();
         p.viewport = Viewport::Static(800.0);
-        p.retarget(100.0, 150.0, start);
+        p.retarget(100.0, 150.0, start, Duration::from_millis(300));
         let now = start + Duration::from_millis(30);
         p.sample(now, 1.0);
         let (position, velocity) = p.position_velocity(now);
         assert!(velocity > 0.0);
         p.viewport = Viewport::Static(900.0);
-        p.retarget(position, velocity, now);
+        p.retarget(position, velocity, now, Duration::from_millis(300));
         let Viewport::Animation(spring) = &p.viewport else {
             panic!("spring")
         };
@@ -4056,6 +4191,204 @@ pub(crate) mod tests {
         assert!((rebased_velocity - velocity).abs() < 1e-9);
         assert!(!p.sample(now + Duration::from_secs(2), 1.0));
         assert_eq!(p.offset(), 940.0);
+    }
+
+    #[test]
+    fn camera_response_follows_duration_without_a_terminal_jump() {
+        let start = Instant::now();
+        for distance in [2.0, 200.0, 4000.0] {
+            let fast =
+                CameraSpring::with_duration(0.0, distance, 0.0, start, Duration::from_millis(150));
+            let slow =
+                CameraSpring::with_duration(0.0, distance, 0.0, start, Duration::from_millis(300));
+            for fraction in [0.0, 0.1, 0.5, 0.9] {
+                let a = fast.position_velocity(start + Duration::from_secs_f64(0.15 * fraction));
+                let b = slow.position_velocity(start + Duration::from_secs_f64(0.3 * fraction));
+                assert!((a.0 - b.0).abs() < 1e-8);
+                assert!((a.1 - 2.0 * b.1).abs() < 1e-7);
+                assert!((0.0..=distance).contains(&a.0));
+            }
+            let f = Fixture::new(4);
+            let (mut p, _) = f.system.presentation(f.layout).unwrap();
+            p.viewport = Viewport::Static(distance);
+            p.retarget(0.0, 0.0, start, Duration::from_millis(300));
+            for tick in 1..120 {
+                let now = start + Duration::from_secs_f64(tick as f64 / 120.0);
+                let before = p.position_velocity(now).0;
+                if !p.sample(now, 2.0) {
+                    assert!((before - distance).abs() <= 0.125);
+                    assert_eq!(p.offset(), distance);
+                    break;
+                }
+                assert!(tick < 119, "camera must settle without an invisible tail");
+            }
+        }
+        let mut instant = CameraSpring::with_duration(20.0, 700.0, 900.0, start, Duration::ZERO);
+        assert_eq!(instant.position_velocity(start), (700.0, 0.0));
+        assert!(instant.sample(start, 2.0));
+    }
+
+    #[test]
+    fn reversing_a_repeated_focus_pan_preserves_its_visible_motion() {
+        let start = Instant::now();
+        let duration = Duration::from_millis(300);
+        let mut spring = CameraSpring::with_duration(0.0, 500.0, 0.0, start, duration);
+        let mut now = start;
+        for target in [1000.0, 1500.0, 0.0] {
+            now += Duration::from_millis(45);
+            let (position, velocity) = spring.position_velocity(now);
+            spring = CameraSpring::with_duration(position, target, velocity, now, duration);
+            let (next_position, next_velocity) = spring.position_velocity(now);
+            assert!((position - next_position).abs() < 1e-8);
+            assert!((velocity - next_velocity).abs() < 1e-8);
+        }
+        let (position, velocity) = spring.position_velocity(now + Duration::from_millis(80));
+        assert!(position >= 0.0);
+        assert!(velocity < 0.0, "reversed input must change direction promptly");
+        assert!(spring.sample(now + Duration::from_secs(1), 2.0));
+    }
+
+    #[test]
+    fn committing_a_camera_keeps_its_configured_response() {
+        let mut f = Fixture::new(4);
+        let (mut p, _) = f.system.presentation(f.layout).unwrap();
+        let start = Instant::now();
+        p.viewport = Viewport::Static(500.0);
+        p.retarget(0.0, 100.0, start, Duration::from_millis(150));
+        let now = start + Duration::from_millis(30);
+        p.sample(now, 2.0);
+        f.system.commit_presented_viewport(f.layout, &p.snapshot(now));
+        let (restored, _) = f.system.presentation(f.layout).unwrap();
+        let later = now + Duration::from_millis(20);
+        let expected = p.position_velocity(later);
+        let actual = restored.position_velocity(later);
+        assert!((expected.0 - actual.0).abs() < 1e-8);
+        assert!((expected.1 - actual.1).abs() < 1e-8);
+    }
+
+    #[test]
+    fn saving_during_edge_resistance_restores_the_logical_resting_position() {
+        let mut f = Fixture::new(4);
+        f.system.begin_viewport_gesture(f.layout, Instant::now());
+        f.system.update_viewport_gesture(f.layout, -200.0, Duration::from_millis(20));
+        let (p, _) = f.system.presentation(f.layout).unwrap();
+        assert!(p.rendered_offset() < p.offset());
+        let mut restored: ScrollingLayoutSystem =
+            ron::from_str(&ron::to_string(&f.system).unwrap()).unwrap();
+        restored.prepare_layout(f.layout, f.screen, &f.constraints, &f.gaps);
+        let (restored, _) = restored.presentation(f.layout).unwrap();
+        assert_eq!(restored.offset(), p.offset());
+        assert_eq!(restored.rendered_offset(), p.offset());
+    }
+
+    #[test]
+    fn resisted_edges_preserve_logical_travel_and_release_from_visible_position() {
+        for direction in [-1.0, 1.0] {
+            let mut f = Fixture::new(4);
+            let bounds = f.system.layouts[f.layout].geometry.as_ref().unwrap().bounds;
+            let edge = if direction < 0.0 { bounds.0 } else { bounds.1 };
+            f.system.layouts[f.layout].viewport = Viewport::Static(edge);
+            f.system.begin_viewport_gesture(f.layout, Instant::now());
+            f.system.update_viewport_gesture(f.layout, 0.0, Duration::ZERO);
+            f.system.update_viewport_gesture(
+                f.layout,
+                direction * 200.0,
+                Duration::from_millis(20),
+            );
+            let (mut p, frames) = f.system.presentation(f.layout).unwrap();
+            let visual = p.rendered_offset();
+            assert_eq!(p.offset(), edge);
+            assert!((visual - edge) * direction > 0.0);
+            assert!((visual - edge).abs() < 40.0);
+            let (window, world, fixed) = frames
+                .iter()
+                .find(|(id, _, _)| *id == if direction < 0.0 { wid(1) } else { wid(4) })
+                .copied()
+                .unwrap();
+            let drawn = p.frame_at_offset(world, fixed, 2.0, visual);
+            assert_ne!(drawn, p.frame_at_offset(world, fixed, 2.0, edge));
+            p.update(-direction * 0.075, Duration::from_millis(30));
+            assert!((p.rendered_offset() - edge).abs() < (visual - edge).abs());
+            f.system.commit_presented_viewport(f.layout, &p.snapshot(Instant::now()));
+            assert!((f.system.gesture_overscroll(f.layout) - direction * 0.125).abs() < 1e-9);
+            let (before_release, _) = f.system.presentation(f.layout).unwrap();
+            let presented = before_release.rendered_offset();
+            let release = f
+                .system
+                .end_viewport_gesture(f.layout, Duration::from_millis(30), true)
+                .unwrap();
+            assert_eq!(release.from_offset, presented);
+            let (mut returning, frames) = f.system.presentation(f.layout).unwrap();
+            let (_, world, fixed) =
+                frames.iter().find(|(id, _, _)| *id == window).copied().unwrap();
+            assert_eq!(returning.rendered_offset(), presented);
+            assert_eq!(
+                returning.frame_at_offset(world, fixed, 2.0, returning.rendered_offset()),
+                before_release.frame_at_offset(world, fixed, 2.0, presented)
+            );
+            assert!(!returning.sample(Instant::now() + Duration::from_secs(2), 2.0));
+            assert_eq!(returning.offset(), release.offset);
+            assert_eq!(release.offset, edge);
+        }
+        for width in [200.0, 1000.0, 10000.0] {
+            let limit = (width * 0.04_f64).min(48.0);
+            for raw in [1.0, 100.0, 10000.0] {
+                let visual = resisted_overflow(raw, limit);
+                assert!(visual > 0.0 && visual < limit && visual < raw);
+                assert_eq!(resisted_overflow(-raw, limit), -visual);
+            }
+        }
+    }
+
+    #[test]
+    fn regrabbing_an_edge_return_preserves_position_without_inheriting_a_workspace_swipe() {
+        for direction in [-1.0, 1.0] {
+            let mut f = Fixture::new(4);
+            let bounds = f.system.layouts[f.layout].geometry.as_ref().unwrap().bounds;
+            let edge = if direction < 0.0 { bounds.0 } else { bounds.1 };
+            f.system.layouts[f.layout].viewport = Viewport::Static(edge);
+            f.system.begin_viewport_gesture(f.layout, Instant::now());
+            f.system.update_viewport_gesture(f.layout, 0.0, Duration::ZERO);
+            f.system.update_viewport_gesture(
+                f.layout,
+                direction * 300.0,
+                Duration::from_millis(30),
+            );
+            f.system
+                .end_viewport_gesture(f.layout, Duration::from_millis(30), true)
+                .unwrap();
+            let Viewport::Animation(spring) = &f.system.layouts[f.layout].viewport else {
+                panic!("release spring");
+            };
+            let now = spring.started + Duration::from_millis(20);
+            let (mut previous, _) = f.system.presentation(f.layout).unwrap();
+            previous.sample(now, 2.0);
+            let visible = previous.rendered_offset();
+            f.system.commit_presented_viewport(f.layout, &previous.snapshot(now));
+            assert!(f.system.begin_viewport_gesture(f.layout, now));
+            let (mut grabbed, _) = f.system.presentation(f.layout).unwrap();
+            assert!((grabbed.rendered_offset() - visible).abs() < 1e-8);
+            assert_eq!(grabbed.offset(), edge);
+            assert_eq!(f.system.gesture_overscroll(f.layout), 0.0);
+            grabbed.update(0.0, Duration::ZERO);
+            assert!((grabbed.rendered_offset() - visible).abs() < 1e-8);
+            grabbed.update(-direction * 0.01, Duration::from_millis(10));
+            assert!((grabbed.rendered_offset() - edge).abs() < (visible - edge).abs());
+            f.system.commit_presented_viewport(f.layout, &grabbed.snapshot(now));
+            assert_eq!(f.system.gesture_overscroll(f.layout), 0.0);
+            grabbed.update(direction * 0.21, Duration::from_millis(20));
+            f.system.commit_presented_viewport(f.layout, &grabbed.snapshot(now));
+            assert!((f.system.gesture_overscroll(f.layout) - direction * 0.2).abs() < 1e-8);
+            grabbed.update(-direction * 0.7, Duration::from_millis(30));
+            let return_distance = (grabbed.offset() - edge).abs() + 200.0;
+            grabbed.update(direction * return_distance / 1000.0, Duration::from_millis(40));
+            f.system.commit_presented_viewport(f.layout, &grabbed.snapshot(now));
+            assert!((f.system.gesture_overscroll(f.layout) - direction * 0.2).abs() < 1e-8);
+            f.system.cancel_viewport_gesture(f.layout);
+            let (cancelled, _) = f.system.presentation(f.layout).unwrap();
+            assert_eq!(cancelled.rendered_offset(), cancelled.offset());
+            assert_eq!(f.system.gesture_overscroll(f.layout), 0.0);
+        }
     }
 
     #[test]
@@ -4087,7 +4420,7 @@ pub(crate) mod tests {
         let start = Instant::now();
         presentation.bounds = (0.0, 300.0);
         presentation.viewport = Viewport::Static(700.0);
-        presentation.retarget(700.0, 0.0, start);
+        presentation.retarget(700.0, 0.0, start, Duration::from_millis(300));
         // Closing a column leaves the displayed camera outside the new bounds.
         if let Viewport::Animation(spring) = &mut presentation.viewport {
             spring.target = 300.0;
@@ -4106,14 +4439,14 @@ pub(crate) mod tests {
             let (mut p, _) = f.system.presentation(f.layout).unwrap();
             let start = Instant::now();
             p.viewport = Viewport::Static(700.0);
-            p.retarget(100.0, 250.0, start);
+            p.retarget(100.0, 250.0, start, Duration::from_millis(300));
             let mut finished = None;
             for tick in 1..120 {
                 let now = start + Duration::from_secs_f64(tick as f64 / 120.0);
                 let (position, velocity) = p.position_velocity(now);
                 if !p.sample(now, scale) {
                     assert!((position - 700.0).abs() * scale <= 0.25);
-                    assert!(velocity.abs() / 800.0_f64.sqrt() * scale <= 0.25);
+                    assert!(velocity.abs() / 40.0 * scale <= 0.25);
                     assert_eq!(p.offset(), 700.0);
                     finished = Some(tick);
                     break;

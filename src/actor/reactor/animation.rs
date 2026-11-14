@@ -381,7 +381,7 @@ impl CameraAnimation {
             &mut self.windows,
             Sample::Viewport {
                 presentation: &self.presentation,
-                offset: self.presentation.offset(),
+                offset: self.presentation.rendered_offset(),
                 scale,
                 bound: self.bound,
                 progress,
@@ -423,7 +423,7 @@ impl CameraAnimation {
                 // retains its own starting position when a target changes.
                 (self.presentation.offset(), 0.0)
             };
-            self.presentation.retarget(from, velocity, now);
+            self.presentation.retarget(from, velocity, now, self.duration);
         }
         if let Some(mut old) = previous {
             for window in &mut self.windows {
@@ -446,7 +446,7 @@ impl CameraAnimation {
                     window.to,
                     window.fixed,
                     self.scale,
-                    self.presentation.offset(),
+                    self.presentation.rendered_offset(),
                 );
                 let mut velocity = window.velocity;
                 velocity.origin.x += camera_velocity;
@@ -1870,6 +1870,48 @@ mod tests {
     }
 
     #[test]
+    fn resisted_edge_motion_reaches_native_frames_and_release_has_no_jump() {
+        use crate::common::config::{ScrollingAlignment, ScrollingLayoutSettings};
+        use crate::layout_engine::systems::ScrollingLayoutSystem;
+        let (handle, mut rx) = AppThreadHandle::channel();
+        let wid = WindowId::new(1, 1);
+        let mut system = ScrollingLayoutSystem::new(&ScrollingLayoutSettings {
+            column_width_ratio: 0.5,
+            preserve_window_sizes: false,
+            alignment: ScrollingAlignment::Left,
+            ..Default::default()
+        });
+        let layout = system.create_layout();
+        for index in 1..=4 {
+            system.add_window_after_selection(layout, WindowId::new(1, index));
+        }
+        system.select_window(layout, wid);
+        let screen = rect(0.0, 0.0, 1000.0, 800.0);
+        system.prepare_layout(layout, screen, &Default::default(), &Default::default());
+        let rest = rect(0.0, 0.0, 500.0, 800.0);
+        let mut camera = motion_camera(&handle, rest, rest);
+        camera.bound = super::super::managers::ScrollingDisplayBounds::for_screen(screen, &[]);
+        system.begin_viewport_gesture(layout, Instant::now());
+        system.update_viewport_gesture(layout, 0.0, Duration::ZERO);
+        system.update_viewport_gesture(layout, -200.0, Duration::from_millis(20));
+        camera.presentation = system.presentation(layout).unwrap().0;
+        camera.sample(Instant::now());
+        let published = camera.windows[0].frame;
+        assert!(published.origin.x > rest.origin.x && published.origin.x < 40.0);
+        assert_eq!(published.size, rest.size);
+        assert_eq!(camera.state.lock().viewport.offset, 0.0);
+        collect_requests(&mut rx);
+        system.end_viewport_gesture(layout, Duration::from_millis(20), true).unwrap();
+        camera.presentation = system.presentation(layout).unwrap().0;
+        let release_started = camera.presentation.snapshot(Instant::now()).timestamp;
+        let first = camera.presentation.position_velocity(release_started).0;
+        assert!((first + published.origin.x).abs() < 1.0);
+        camera.sample(Instant::now() + Duration::from_secs(2));
+        assert_eq!(camera.windows[0].frame, rest);
+        assert!(!camera.active);
+    }
+
+    #[test]
     fn macos_motion_viewport_resize_has_no_eager_jump_or_stale_rewind() {
         let (handle, mut rx) = AppThreadHandle::channel();
         let from = rect(0., 0., 400., 400.);
@@ -1942,7 +1984,7 @@ mod tests {
         let (handle, mut rx) = AppThreadHandle::channel();
         let mut old = motion_camera(&handle, rect(0., 0., 400., 400.), rect(0., 0., 800., 600.));
         let now = Instant::now();
-        old.presentation.retarget(-500., 1200., now);
+        old.presentation.retarget(-500., 1200., now, old.duration);
         old.replace(None);
         old.begin();
         old.sample(old.geometry_started + Duration::from_millis(50));

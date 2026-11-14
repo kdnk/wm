@@ -161,6 +161,7 @@ fn menu_column_icon_click_warps_to_revealed_window_and_repeated_click_still_warp
                     let warps: Vec<_> = std::iter::from_fn(|| input_rx.try_recv().ok())
                         .filter_map(|(_, request)| match request {
                             input::Request::Warp(point) => Some(point),
+                            input::Request::FocusPointer(focus) => Some(focus.visible.mid()),
                             _ => None,
                         })
                         .collect();
