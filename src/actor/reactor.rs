@@ -500,6 +500,7 @@ pub struct Reactor {
     topology_guard: crate::actor::spaces::TopologyGuard,
     main_window_tracker: MainWindowTracker,
     pending_mouse_focus: Option<(WindowId, Instant)>,
+    overview_focus: Option<(SpaceId, WindowId, Instant)>,
     mouse_focus_warp_requested_at: Option<u64>,
     pointer_focus_intent: Option<(WindowServerId, Instant)>,
     hover_focus_intents: HashMap<WindowId, Instant>,
@@ -600,6 +601,7 @@ impl Reactor {
             space_activation_policy: SpaceActivationPolicy::new(),
             main_window_tracker: MainWindowTracker::default(),
             pending_mouse_focus: None,
+            overview_focus: None,
             mouse_focus_warp_requested_at: None,
             pointer_focus_intent: None,
             hover_focus_intents: HashMap::default(),
@@ -2438,7 +2440,10 @@ impl Reactor {
                 let changed =
                     self.layout_manager.layout_engine.workspaces().active_workspace(space)
                         != Some(workspace);
-                if transition.is_some() {
+                if let Some(stamp) = transition {
+                    self.overview_focus = window.map(|window| (space, window, stamp));
+                }
+                if transition.is_some() || self.overview_focus.is_some() {
                     self.stop_camera(space);
                 }
                 self.store_current_floating_positions(space);
@@ -2466,7 +2471,7 @@ impl Reactor {
                     EventOutcome::focus_changed(None, false)
                 };
                 outcome.overview_activation = transition.map(|stamp| (workspace, window, stamp));
-                outcome.arrange.instant = transition.is_some();
+                outcome.arrange.instant = transition.is_some() || self.overview_focus.is_some();
                 // The cursor is already on the overview's display; follow only a
                 // workspace that lives on another one.
                 if self
@@ -2475,6 +2480,12 @@ impl Reactor {
                     .is_some_and(|screen| screen.display_uuid != display)
                 {
                     outcome.display_switch_warp = Some(space);
+                }
+                if transition.is_some() {
+                    if let Some(window) = response.focus_window {
+                        outcome.layout_events.push(LayoutEvent::WindowFocused(space, window));
+                    }
+                    return Ok(outcome);
                 }
                 if let Some(window) = window.filter(|&window| response.focus_window == Some(window))
                 {
@@ -2704,12 +2715,29 @@ impl Reactor {
                 if self.pending_mouse_focus.is_some_and(|(window, _)| window == window_id) {
                     self.pending_mouse_focus = None;
                 }
-                return Ok(system_workflow::handle_raise_completed(
+                let mut outcome = system_workflow::handle_raise_completed(
                     system_workflow::RaiseCompletedPayload {
                         window: window_id,
                         sequence: sequence_id,
                     },
-                )?);
+                )?;
+                if let Some((space, selected, _)) =
+                    self.overview_focus.filter(|(_, selected, _)| *selected == window_id)
+                {
+                    self.overview_focus = None;
+                    #[cfg(not(test))]
+                    let selected = window_server::key_focused_window(space)
+                        .filter(|window| self.state.windows.contains_window(*window))
+                        .unwrap_or(selected);
+                    self.stop_camera(space);
+                    outcome.absorb(
+                        EventOutcome::layout_changed(false)
+                            .with_layout_event(LayoutEvent::WindowFocused(space, selected))
+                            .with_arrange_space_scope(Some(space)),
+                    );
+                    outcome.arrange.instant = true;
+                }
+                return Ok(outcome);
             }
             Event::RaiseTimeout { sequence_id } => {
                 return Ok(system_workflow::handle_raise_timeout(sequence_id)?);
@@ -3133,7 +3161,17 @@ impl Reactor {
     /// writes, then UI/platform presentation state is refreshed. Broadcast and
     /// discovery requests made directly by a workflow are consequently observed
     /// only after its model mutation is complete.
-    fn apply_event_outcome(&mut self, outcome: EventOutcome) {
+    fn apply_event_outcome(&mut self, mut outcome: EventOutcome) {
+        // AX activation and inventory replies can arrive after overview preparation.
+        // Until its focus completes, native layout work remains covered and instant.
+        if let Some((space, _, _)) = self
+            .overview_focus
+            .filter(|(_, _, started)| started.elapsed() < Duration::from_secs(1))
+        {
+            if outcome.arrange.space_scope.is_none_or(|scope| scope == space) {
+                outcome.arrange.instant = true;
+            }
+        }
         let overview_notified =
             outcome.wm_events.iter().any(|e| matches!(e, WmEvent::OverviewChanged));
         let overview_inventory_changed = outcome.refresh_window_notifications

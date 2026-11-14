@@ -2,7 +2,7 @@
 
 This fork includes the Rift changes previously built from patches in [kdnk/dot](https://github.com/kdnk/dot/tree/f502e0bdaac397f7ede56e2b4b384c018d8a4126/tools/rift). The changes are integrated into the source and require no patch step during a normal Cargo build.
 
-The patches used Rift 0.8.1 at `b5cf5c7f7b9ffe7364377808df1ab1a4ecd24637`. This port retains the fork's newer upstream changes through `6101a78`. Upstream already preserves the current animation frame when replacing an animation. The port also preserves its velocity.
+The patches used Rift 0.8.1 at `b5cf5c7f7b9ffe7364377808df1ab1a4ecd24637`. The original port retained the fork's newer upstream changes through `6101a78`. Later changes through `b571fe7` are recorded in the [upstream integration notes](upstream-sync.md). Upstream already preserves the current animation frame when replacing an animation. The port also preserves its velocity.
 
 ## Imported behavior
 

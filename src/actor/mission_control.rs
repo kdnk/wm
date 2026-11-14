@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use objc2_core_foundation::CGPoint;
 use objc2_core_graphics::{
     CGEventFlags, CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess,
@@ -336,7 +337,16 @@ impl MissionControlActor {
                 if let Some(session) = self.session.as_mut() {
                     session.pump_previews();
                     if session.handoff_ready() {
+                        let activation = session.completed_activation();
                         self.close();
+                        if let Some((display, workspace, window)) = activation {
+                            self.reactor.send(reactor::Event::OverviewSelectWorkspace {
+                                display,
+                                workspace,
+                                window,
+                                transition: None,
+                            });
+                        }
                     }
                 }
             }
