@@ -159,9 +159,6 @@ impl Config {
 
                 let mut binding_mode_specs = Vec::with_capacity(binding_sets.len());
                 let mut keys = Vec::new();
-                let mode_names: HashSet<String> =
-                    binding_sets.iter().map(|(name, _)| name.clone()).collect();
-                let mode_names = mode_names.iter().map(String::as_str).collect();
                 for (mode, bindings) in binding_sets {
                     let mut specs = Vec::with_capacity(bindings.len());
                     let mut assigned = HashSet::default();
@@ -178,7 +175,6 @@ impl Config {
                                 );
                             }
                         }
-                        validate_binding_command(&cmd, &key, &mode, &mode_names)?;
                         if mode == "default" {
                             keys.push((hotkey, cmd.clone()));
                         }
@@ -186,12 +182,15 @@ impl Config {
                     }
                     binding_mode_specs.push((mode, specs));
                 }
-                Ok(Config {
+                let config = Config {
                     settings: c.settings,
                     keys,
                     binding_mode_specs,
                     virtual_workspaces: c.virtual_workspaces,
-                })
+                };
+                let issues = config.validate();
+                anyhow::ensure!(issues.is_empty(), "{}", issues.join("; "));
+                Ok(config)
             }
             Err(error) => {
                 let message = error.to_string();

@@ -96,15 +96,8 @@ impl ConfigDocument {
             "",
             None,
         )?;
-        let config = document.validated()?;
+        let config = document.runtime()?;
         Ok(Edited { document, config, source })
-    }
-
-    fn validated(&self) -> anyhow::Result<Config> {
-        let config = self.runtime()?;
-        let issues = config.validate();
-        anyhow::ensure!(issues.is_empty(), "{}", issues.join("; "));
-        Ok(config)
     }
 
     /// Apply a CLI setting addressed by its dotted TOML key.
@@ -134,7 +127,7 @@ impl ConfigDocument {
                 .and_then(Item::as_table_like_mut)
                 .ok_or_else(|| anyhow::anyhow!("Invalid config path: {key}"))?;
         }
-        let runtime = candidate.validated()?;
+        let runtime = candidate.runtime()?;
         *self = candidate;
         Ok(runtime)
     }

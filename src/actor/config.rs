@@ -122,7 +122,7 @@ impl ConfigActor {
 
     /// Adopts a newer valid file so callers resynchronize; an invalid file is left untouched.
     fn reject_stale(&mut self, text: String) -> String {
-        match parse_valid(&text) {
+        match ConfigDocument::load(&text) {
             Ok((document, config)) => {
                 self.document = document;
                 self.config = config;
@@ -159,7 +159,8 @@ impl ConfigActor {
                 if self.disk.as_ref() == Some(&text) && self.document.to_string() == text {
                     return Ok(());
                 }
-                (self.document, self.config) = parse_valid(&text)?;
+                (self.document, self.config) =
+                    ConfigDocument::load(&text).map_err(|error| error.to_string())?;
                 self.disk = Some(text);
             }
             ConfigCommand::Set { key, value } => {
@@ -238,15 +239,6 @@ fn read_disk(path: &Path) -> std::io::Result<Option<String>> {
     }
 }
 
-fn parse_valid(text: &str) -> Result<(ConfigDocument, Config), String> {
-    let (document, config) = ConfigDocument::load(text).map_err(|e| e.to_string())?;
-    let issues = config.validate();
-    if !issues.is_empty() {
-        return Err(issues.join("; "));
-    }
-    Ok((document, config))
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc::sync_channel;
@@ -270,7 +262,10 @@ mod tests {
         let original = serde_json::to_value(&actor.config).unwrap();
         for (invalid, field) in [
             ("[settings]\nanimation_fps = 0\n[keys]\n", "animation_fps"),
-            ("[settings]\nanimation_duration = -1\n[keys]\n", "animation_duration"),
+            (
+                "[settings]\nanimation_duration = -1\n[keys]\n",
+                "animation_duration",
+            ),
             (
                 "[settings]\n[virtual_workspaces]\ndefault_workspace_count = 0\n[keys]\n",
                 "default_workspace_count",

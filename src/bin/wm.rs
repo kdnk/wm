@@ -171,7 +171,16 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Wm."
 
     let config_path = opt.config.clone().unwrap_or_else(|| config_file());
     let mut config = if config_path.exists() {
-        Config::read(&config_path).unwrap()
+        match Config::read(&config_path) {
+            Ok(config) => config,
+            Err(error) => {
+                eprintln!(
+                    "Could not load config file at {}: {error:#}",
+                    config_path.display()
+                );
+                process::exit(1);
+            }
+        }
     } else {
         Config::default()
     };

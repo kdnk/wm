@@ -17,7 +17,10 @@ fn config_read_rejects_semantically_invalid_files() {
     let path = directory.path().join("config.toml");
     for (text, field) in [
         ("[settings]\nanimation_fps = 0\n[keys]\n", "animation_fps"),
-        ("[settings]\nanimation_duration = -1\n[keys]\n", "animation_duration"),
+        (
+            "[settings]\nanimation_duration = -1\n[keys]\n",
+            "animation_duration",
+        ),
         (
             "[settings]\n[virtual_workspaces]\ndefault_workspace_count = 0\n[keys]\n",
             "default_workspace_count",
@@ -33,7 +36,10 @@ fn config_read_rejects_semantically_invalid_files() {
 fn config_document_load_rejects_semantically_invalid_files() {
     for (text, field) in [
         ("[settings]\nanimation_fps = 0\n[keys]\n", "animation_fps"),
-        ("[settings]\nanimation_duration = -1\n[keys]\n", "animation_duration"),
+        (
+            "[settings]\nanimation_duration = -1\n[keys]\n",
+            "animation_duration",
+        ),
         (
             "[settings]\n[virtual_workspaces]\ndefault_workspace_count = 0\n[keys]\n",
             "default_workspace_count",
@@ -56,7 +62,10 @@ fn config_read_and_document_load_accept_defaults_and_valid_overrides() {
         let config = Config::read(&path).unwrap();
         let (document, loaded) = ConfigDocument::load(text).unwrap();
         assert_eq!(document.to_string(), text);
-        assert_eq!(serde_json::to_value(config).unwrap(), serde_json::to_value(loaded).unwrap());
+        assert_eq!(
+            serde_json::to_value(config).unwrap(),
+            serde_json::to_value(loaded).unwrap()
+        );
     }
 }
 
