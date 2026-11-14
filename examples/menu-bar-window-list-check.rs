@@ -242,6 +242,241 @@ mod window_list {
     use objc2_app_kit::NSStatusBarButton;
     include!("../src/ui/menu_bar/window_list.rs");
 
+    pub fn interactive() {
+        use objc2_app_kit::{NSBackingStoreType, NSWindow, NSWindowStyleMask};
+        use slotmap::SlotMap;
+
+        let mtm = MainThreadMarker::new().unwrap();
+        let ui = Ui::new(mtm);
+        let window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                NSRect::new(NSPoint::new(200.0, 200.0), NSSize::new(640.0, 160.0)),
+                NSWindowStyleMask::Titled | NSWindowStyleMask::Closable,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        };
+        unsafe { window.setReleasedWhenClosed(false) };
+        window.setTitle(&NSString::from_str("wm Menu Interaction"));
+        let parent = window.contentView().unwrap();
+        let (action_tx, action_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (reactor_tx, _reactor_rx) = crate::actor::channel();
+        let handler = Rc::new(super::MenuActionHandler {
+            action_tx,
+            reactor_tx,
+            space: Some(crate::sys::screen::SpaceId::new(1)),
+        });
+        let mut keys = SlotMap::<crate::layout_engine::VirtualWorkspaceId, ()>::with_key();
+        let workspaces = Rc::new(RefCell::new(
+            (0..3)
+                .map(|index| WorkspaceWindows {
+                    id: format!("fixture-{index}"),
+                    key: keys.insert(()),
+                    columns: Vec::new(),
+                    index,
+                    name: format!("{}", index + 1),
+                    active: index == 0,
+                    windows: if index == 2 {
+                        Vec::new()
+                    } else {
+                        (1..=3)
+                            .map(|idx| MenuWindow {
+                                id: crate::actor::app::WindowId::new(999_990 + idx as i32, idx),
+                                app_name: "Fixture".into(),
+                                bundle_id: Some(
+                                    if idx == 3 {
+                                        "com.apple.finder"
+                                    } else {
+                                        "com.apple.TextEdit"
+                                    }
+                                    .into(),
+                                ),
+                                title: format!("Document {idx}"),
+                                focused: index == 0 && idx == 1,
+                                layout_position: None,
+                            })
+                            .collect()
+                    },
+                })
+                .collect::<Vec<_>>(),
+        ));
+        let view = Rc::new(RefCell::new(WindowListView::new(mtm)));
+        view.borrow_mut().update(
+            &workspaces.borrow(),
+            true,
+            StripPresentation::Combined,
+            &parent,
+            &handler,
+        );
+        view.borrow().position_after(12.0, CAPSULE_HEIGHT);
+        let probe = Button::new(&ui, "Move focus and open menu").on_click({
+            let view = view.clone();
+            let workspaces = workspaces.clone();
+            let parent = parent.clone();
+            let handler = handler.clone();
+            move || {
+                {
+                    let mut workspaces = workspaces.borrow_mut();
+                    let active = workspaces.iter_mut().find(|workspace| workspace.active).unwrap();
+                    if active.windows.is_empty() {
+                        return;
+                    }
+                    let target = if active.windows[2].focused { 0 } else { 2 };
+                    for (index, window) in active.windows.iter_mut().enumerate() {
+                        window.focused = index == target;
+                    }
+                    view.borrow_mut().update(
+                        &workspaces,
+                        true,
+                        StripPresentation::Combined,
+                        &parent,
+                        &handler,
+                    );
+                    view.borrow().position_after(12.0, CAPSULE_HEIGHT);
+                }
+                let menu =
+                    view.borrow_mut().window_menu(workspaces.borrow()[0].windows.iter(), &handler);
+                let view_for_probe = view.clone();
+                let probe = block2::RcBlock::new(move |_: std::ptr::NonNull<NSTimer>| {
+                    let view = view_for_probe.borrow();
+                    let capsule =
+                        view.capsules.iter().find(|capsule| capsule.workspace.active).unwrap();
+                    println!(
+                        "TRACKING focus_settled={}",
+                        capsule.focus.target.get() == Some(capsule.focus.layer.frame())
+                    );
+                });
+                let timer =
+                    unsafe { NSTimer::timerWithTimeInterval_repeats_block(0.35, false, &probe) };
+                unsafe {
+                    objc2_foundation::NSRunLoop::mainRunLoop()
+                        .addTimer_forMode(&timer, objc2_foundation::NSRunLoopCommonModes)
+                };
+                menu.ns_menu().popUpMenuPositioningItem_atLocation_inView(
+                    None,
+                    NSPoint::new(18.0, 30.0),
+                    Some(&parent),
+                );
+            }
+        });
+        probe
+            .ns_button()
+            .setFrame(NSRect::new(NSPoint::new(18.0, 65.0), NSSize::new(260.0, 32.0)));
+        parent.addSubview(probe.ns_button());
+        let action_rx = RefCell::new(action_rx);
+        let update = block2::RcBlock::new(move |_: std::ptr::NonNull<NSTimer>| {
+            while let Ok(action) = action_rx.borrow_mut().try_recv() {
+                let mut workspaces = workspaces.borrow_mut();
+                match action {
+                    MenuAction::SwitchToWorkspace(index) => {
+                        for workspace in workspaces.iter_mut() {
+                            workspace.active = workspace.index == index;
+                        }
+                    }
+                    MenuAction::FocusWindow(id) => {
+                        for workspace in workspaces.iter_mut() {
+                            for window in &mut workspace.windows {
+                                window.focused = window.id == id && workspace.active;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                view.borrow_mut().update(
+                    &workspaces,
+                    true,
+                    StripPresentation::Combined,
+                    &parent,
+                    &handler,
+                );
+                view.borrow().position_after(12.0, CAPSULE_HEIGHT);
+            }
+        });
+        let timer = unsafe {
+            NSTimer::scheduledTimerWithTimeInterval_repeats_block(1.0 / 60.0, true, &update)
+        };
+        window.center();
+        window.makeKeyAndOrderFront(None);
+        let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+        app.setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Regular);
+        app.run();
+        timer.invalidate();
+    }
+
+    fn verify_tracking_motion(parent: &NSView) {
+        use objc2_core_foundation::{CFRunLoop, CFString};
+        use objc2_foundation::{NSRunLoop, NSRunLoopCommonModes};
+
+        let mode = CFString::from_str("NSEventTrackingRunLoopMode");
+        CFRunLoop::current().unwrap().add_common_mode(Some(&mode));
+        let default_fired = Rc::new(Cell::new(false));
+        let sentinel = block2::RcBlock::new({
+            let default_fired = default_fired.clone();
+            move |_: std::ptr::NonNull<NSTimer>| default_fired.set(true)
+        });
+        let sentinel =
+            unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.01, true, &sentinel) };
+        let keepalive = block2::RcBlock::new(|_: std::ptr::NonNull<NSTimer>| {});
+        let keepalive =
+            unsafe { NSTimer::timerWithTimeInterval_repeats_block(0.01, true, &keepalive) };
+        unsafe { NSRunLoop::mainRunLoop().addTimer_forMode(&keepalive, NSRunLoopCommonModes) };
+
+        let focus = FocusIndicator::new();
+        let from = NSRect::new(NSPoint::ZERO, NSSize::new(24.0, 22.0));
+        let to = NSRect::new(NSPoint::new(80.0, 0.0), from.size);
+        focus.present(Some(from), false);
+        focus.present(Some(to), true);
+        let host = NSView::new(parent.mtm());
+        host.setFrame(from);
+        parent.addSubview(&host);
+        let mut geometry = GeometryMotion::default();
+        geometry.present(
+            vec![GeometryFrame {
+                host: host.clone(),
+                material: NSView::new(parent.mtm()),
+                content: NSView::new(parent.mtm()),
+                outline: CAShapeLayer::new(),
+                from,
+                to,
+            }],
+            GeometryChange::Navigate,
+        );
+
+        CFRunLoop::run_in_mode(Some(&mode), 0.06, false);
+        assert!(
+            !default_fired.get(),
+            "the probe must remain in menu tracking mode"
+        );
+        assert!(
+            focus.layer.frame().origin.x > from.origin.x
+                && focus.layer.frame().origin.x < to.origin.x,
+            "focus feedback must visibly advance while a menu tracks"
+        );
+        assert!(
+            host.frame().origin.x > from.origin.x && host.frame().origin.x < to.origin.x,
+            "workspace geometry must visibly advance while a menu tracks"
+        );
+        CFRunLoop::run_in_mode(Some(&mode), 0.3, false);
+        assert_eq!(
+            focus.layer.frame(),
+            to,
+            "focus feedback must finish before the menu closes"
+        );
+        assert_eq!(
+            host.frame(),
+            to,
+            "workspace motion must finish before the menu closes"
+        );
+        assert!(!default_fired.get());
+        focus.stop();
+        geometry.cancel(true);
+        host.removeFromSuperview();
+        sentinel.invalidate();
+        keepalive.invalidate();
+        println!("PASS: focus and workspace motion advance and finish during native menu tracking");
+    }
+
     fn active_width(workspaces: &[WorkspaceWindows], grouped: bool) -> f64 {
         total_width(
             workspaces
@@ -639,6 +874,9 @@ mod window_list {
         let native_window = parent.window().unwrap();
         native_window.setAlphaValue(0.0);
         assert_eq!(native_window.alphaValue(), 0.0);
+        if !NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion() {
+            verify_tracking_motion(&parent);
+        }
         super::drag::verify(&parent);
         verify_icon_representations(&ui, &parent);
         let (action_tx, mut action_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2170,6 +2408,10 @@ fn main() {
     let mtm = MainThreadMarker::new().unwrap();
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    if std::env::args().any(|arg| arg == "--interactive") {
+        window_list::interactive();
+        return;
+    }
     status_mode::verify();
     window_list::verify();
 }
