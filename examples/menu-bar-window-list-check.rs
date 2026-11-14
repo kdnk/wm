@@ -243,21 +243,24 @@ mod window_list {
     include!("../src/ui/menu_bar/window_list.rs");
 
     pub fn interactive() {
-        use objc2_app_kit::{NSBackingStoreType, NSWindow, NSWindowStyleMask};
+        use objc2_app_kit::{NSBackingStoreType, NSPanel, NSWindowStyleMask};
         use slotmap::SlotMap;
 
         let mtm = MainThreadMarker::new().unwrap();
         let ui = Ui::new(mtm);
-        let window = unsafe {
-            NSWindow::initWithContentRect_styleMask_backing_defer(
-                NSWindow::alloc(mtm),
-                NSRect::new(NSPoint::new(200.0, 200.0), NSSize::new(640.0, 160.0)),
-                NSWindowStyleMask::Titled | NSWindowStyleMask::Closable,
-                NSBackingStoreType::Buffered,
-                false,
-            )
-        };
+        let window = NSPanel::initWithContentRect_styleMask_backing_defer(
+            NSPanel::alloc(mtm),
+            NSRect::new(NSPoint::new(200.0, 200.0), NSSize::new(640.0, 160.0)),
+            NSWindowStyleMask::Titled
+                | NSWindowStyleMask::Closable
+                | NSWindowStyleMask::NonactivatingPanel,
+            NSBackingStoreType::Buffered,
+            false,
+        );
         unsafe { window.setReleasedWhenClosed(false) };
+        window.setFloatingPanel(true);
+        window.setHidesOnDeactivate(false);
+        window.setLevel(26);
         window.setTitle(&NSString::from_str("wm Menu Interaction"));
         let parent = window.contentView().unwrap();
         let (action_tx, action_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -400,6 +403,15 @@ mod window_list {
         window.makeKeyAndOrderFront(None);
         let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
         app.setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Regular);
+        let menu = Menu::new(&ui).item(
+            MenuItem::new(&ui, "Quit")
+                .shortcut("q", objc2_app_kit::NSEventModifierFlags::Command)
+                .on_click(move || {
+                    objc2_app_kit::NSApplication::sharedApplication(mtm).terminate(None)
+                }),
+        );
+        let main = Menu::new(&ui).item(MenuItem::new(&ui, "wm Menu Interaction").submenu(menu));
+        app.setMainMenu(Some(main.ns_menu()));
         app.run();
         timer.invalidate();
     }

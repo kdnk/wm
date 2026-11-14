@@ -6,6 +6,7 @@
 - Run `bash scripts/verify-dot-port.sh` after changing the imported Rift features. Pass a configuration file as the optional argument to validate additional app rules.
 - The verification script tests LaunchAgent serialization with an isolated HOME. It must not start or stop the user's service, change signing identities, or install the daemon.
 - Desktop tests under `tests/rift-*-live-test.py` require a running matching daemon and macOS permissions. Native geometry tests alone do not prove composited content rendering; retain display video and daemon traces for live resize verification.
+- Use `cargo run --locked --example menu-bar-window-list-check -- --interactive` for isolated native menu interaction checks without controlling the running daemon.
 - Live motion tests must verify that synthetic drags commit a layout change, target fixture windows by PID and title, and restore runtime settings, workspace, and cursor position on failure.
 - Unit tests must isolate mouse-state reads from the real WindowServer. Synthetic frame-change events must specify the mouse state needed by the case.
 - Configuration watcher tests must use temporary paths and observe actual filesystem notifications and `ConfigUpdated` events. Do not use the user's configuration or start a daemon for these tests.
