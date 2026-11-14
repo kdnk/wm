@@ -20,7 +20,7 @@ use objc2_app_kit::{
 use objc2_core_graphics::CGPath;
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSAttributedString, NSCopying, NSDictionary, NSNumber, NSPoint,
-    NSRect, NSSize, NSString, NSTimer,
+    NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString, NSTimer,
 };
 use objc2_quartz_core::{
     CALayer, CAMediaTiming, CAMediaTimingFunction, CAShapeLayer, CATransaction, CATransition,
@@ -322,6 +322,14 @@ enum WorkspaceMaterial {
     Visual(Retained<NSVisualEffectView>),
 }
 
+fn motion_timer(tick: &block2::RcBlock<dyn Fn(std::ptr::NonNull<NSTimer>)>) -> Retained<NSTimer> {
+    unsafe {
+        let timer = NSTimer::timerWithTimeInterval_repeats_block(1.0 / 120.0, true, tick);
+        NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes);
+        timer
+    }
+}
+
 struct FocusIndicator {
     layer: Retained<CALayer>,
     target: Cell<Option<NSRect>>,
@@ -399,9 +407,7 @@ impl FocusIndicator {
                 unsafe { timer.as_ref() }.invalidate();
             }
         });
-        *self.timer.borrow_mut() = Some(unsafe {
-            NSTimer::scheduledTimerWithTimeInterval_repeats_block(1.0 / 120.0, true, &tick)
-        });
+        *self.timer.borrow_mut() = Some(motion_timer(&tick));
     }
 }
 
@@ -723,9 +729,7 @@ impl GeometryMotion {
                 unsafe { timer.as_ref() }.invalidate();
             }
         });
-        self.timer = Some(unsafe {
-            NSTimer::scheduledTimerWithTimeInterval_repeats_block(1.0 / 120.0, true, &tick)
-        });
+        self.timer = Some(motion_timer(&tick));
     }
 }
 

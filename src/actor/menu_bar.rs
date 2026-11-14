@@ -91,14 +91,34 @@ pub enum Event {
 const LAYOUT_REFRESH_DELAY: Duration = Duration::from_millis(150);
 const MENU_UPDATE_DELAY: Duration = Duration::from_millis(150);
 
-fn focused_window(update: &Update) -> Option<WindowId> {
-    update
-        .displays
-        .iter()
-        .flat_map(|display| &display.workspaces)
-        .flat_map(|workspace| &workspace.window_list)
-        .find(|window| window.focused)
-        .map(|window| window.id)
+fn same_interaction(a: &Update, b: &Update) -> bool {
+    a.active_space_is_activated == b.active_space_is_activated
+        && a.displays.len() == b.displays.len()
+        && a.displays.iter().zip(&b.displays).all(|(a, b)| {
+            a.display_uuid == b.display_uuid
+                && a.screen_id == b.screen_id
+                && a.is_builtin == b.is_builtin
+                && a.space == b.space
+                && a.is_active_context == b.is_active_context
+                && a.space_is_activated == b.space_is_activated
+                && a.workspaces.len() == b.workspaces.len()
+                && a.workspaces.iter().zip(&b.workspaces).all(|(a, b)| {
+                    a.key == b.key
+                        && a.id == b.id
+                        && a.index == b.index
+                        && a.is_active == b.is_active
+                        && a.layout_mode == b.layout_mode
+                        && a.has_fullscreen == b.has_fullscreen
+                        && a.window_count == b.window_count
+                        && a.columns == b.columns
+                        && a.windows.len() == b.windows.len()
+                        && a.window_list.len() == b.window_list.len()
+                        && a.window_list.iter().zip(&b.window_list).all(|(a, b)| {
+                            (a.id, &a.bundle_id, a.focused, a.layout_position)
+                                == (b.id, &b.bundle_id, b.focused, b.layout_position)
+                        })
+                })
+        })
 }
 
 fn queue_update(
@@ -107,7 +127,7 @@ fn queue_update(
     timer: &Timer,
     update: Update,
 ) -> Option<Update> {
-    if last.is_none_or(|last| focused_window(last) != focused_window(&update)) {
+    if last.is_none_or(|last| !same_interaction(last, &update)) {
         *pending = None;
         timer.set_next_fire(Duration::MAX);
         return Some(update);
@@ -446,6 +466,16 @@ pub(crate) fn sig(update: &Update) -> u64 {
 mod tests {
     use super::*;
 
+    fn focused_window(update: &Update) -> Option<WindowId> {
+        update
+            .displays
+            .iter()
+            .flat_map(|display| &display.workspaces)
+            .flat_map(|workspace| &workspace.window_list)
+            .find(|window| window.focused)
+            .map(|window| window.id)
+    }
+
     fn workspace(layout_mode: &str) -> Workspace {
         Workspace {
             key: Default::default(),
@@ -608,6 +638,163 @@ mod tests {
                 );
                 last = shown;
             }
+        });
+    }
+
+    #[test]
+    fn menu_bar_actions_with_unchanged_focus_publish_the_latest_state_immediately() {
+        use crate::sys::executor::Executor;
+        Executor::run(async {
+            let mut last = update(vec![workspace("scrolling"), workspace("bsp")]);
+            last.displays[0].workspaces[1].is_active = false;
+            last.displays[0].workspaces[1].id = "second".into();
+            last.displays[0].workspaces[1].index = 1;
+            last.displays[0].workspaces[0].window_list = (1..=2)
+                .map(|idx| MenuWindow {
+                    id: WindowId::new(1, idx),
+                    app_name: "Editor".into(),
+                    bundle_id: Some("app.editor".into()),
+                    title: format!("window {idx}"),
+                    focused: idx == 1,
+                    layout_position: None,
+                })
+                .collect();
+            let cases: &[(&str, fn(&mut Update))] = &[
+                ("layout mode", |u| {
+                    u.displays[0].workspaces[0].layout_mode = "bsp".into()
+                }),
+                ("fullscreen", |u| {
+                    u.displays[0].workspaces[0].has_fullscreen = true
+                }),
+                ("window order", |u| {
+                    u.displays[0].workspaces[0].window_list.reverse()
+                }),
+                ("window replacement", |u| {
+                    u.displays[0].workspaces[0].window_list[1].id = WindowId::new(2, 1)
+                }),
+                ("application grouping", |u| {
+                    u.displays[0].workspaces[0].window_list[1].bundle_id = None
+                }),
+                ("column assignment", |u| {
+                    u.displays[0].workspaces[0].window_list[1].layout_position =
+                        Some(MenuLayoutPosition {
+                            column_id: crate::layout_engine::ColumnId(1),
+                            column: 1,
+                            row: 0,
+                        })
+                }),
+                ("empty column", |u| {
+                    u.displays[0].workspaces[0].columns.push(MenuColumn {
+                        id: crate::layout_engine::ColumnId(1),
+                        members: Vec::new(),
+                    })
+                }),
+                ("window removal", |u| {
+                    let workspace = &mut u.displays[0].workspaces[0];
+                    workspace.window_list.pop();
+                    workspace.window_count = 1;
+                }),
+                ("preview membership", |u| {
+                    u.displays[0].workspaces[0].windows.push(CGRect::ZERO)
+                }),
+                ("workspace order", |u| u.displays[0].workspaces.reverse()),
+                ("workspace removal", |u| {
+                    u.displays[0].workspaces.pop();
+                }),
+                ("display attachment", |u| {
+                    let mut display = u.displays[0].clone();
+                    display.display_uuid = "b".into();
+                    display.screen_id = crate::sys::screen::ScreenId::new(1);
+                    display.is_active_context = false;
+                    u.displays.push(display);
+                }),
+                ("native space change", |u| u.displays[0].space = SpaceId::new(2)),
+                ("active context", |u| u.displays[0].is_active_context = false),
+            ];
+            for (name, mutate) in cases {
+                let timer = Timer::manual();
+                let mut pending = None;
+                let mut changed = last.clone();
+                changed.displays[0].workspaces[0].window_list[0].title = "latest title".into();
+                assert!(queue_update(Some(&last), &mut pending, &timer, changed.clone()).is_none());
+                mutate(&mut changed);
+                let expected = sig(&changed);
+                let shown = queue_update(Some(&last), &mut pending, &timer, changed)
+                    .unwrap_or_else(|| panic!("{name} waited for metadata timer"));
+                assert_eq!(
+                    sig(&shown),
+                    expected,
+                    "{name} must publish the complete latest update"
+                );
+                assert_eq!(focused_window(&shown), focused_window(&last), "{name}");
+                assert!(pending.is_none(), "{name} left stale metadata queued");
+            }
+        });
+    }
+
+    #[test]
+    fn menu_bar_empty_workspace_navigation_and_activation_publish_immediately() {
+        use crate::sys::executor::Executor;
+        Executor::run(async {
+            let mut last = update(vec![workspace("bsp"), workspace("bsp")]);
+            last.displays[0].workspaces[0].window_count = 0;
+            last.displays[0].workspaces[1].window_count = 0;
+            last.displays[0].workspaces[1].is_active = false;
+            let cases: &[(&str, fn(&mut Update))] = &[
+                ("empty workspace navigation", |u| {
+                    u.displays[0].workspaces[0].is_active = false;
+                    u.displays[0].workspaces[1].is_active = true;
+                }),
+                ("active space activation", |u| {
+                    u.active_space_is_activated = false
+                }),
+                ("display space activation", |u| {
+                    u.displays[0].space_is_activated = false
+                }),
+            ];
+            for (name, mutate) in cases {
+                let timer = Timer::manual();
+                let mut pending = None;
+                let mut changed = last.clone();
+                changed.displays[0].workspaces[0].name = "renamed".into();
+                assert!(queue_update(Some(&last), &mut pending, &timer, changed.clone()).is_none());
+                mutate(&mut changed);
+                let expected = sig(&changed);
+                let shown = queue_update(Some(&last), &mut pending, &timer, changed)
+                    .unwrap_or_else(|| panic!("{name} waited for metadata timer"));
+                assert_eq!(sig(&shown), expected, "{name}");
+                assert!(focused_window(&shown).is_none());
+                assert!(pending.is_none(), "{name} left stale metadata queued");
+            }
+        });
+    }
+
+    #[test]
+    fn menu_bar_metadata_changes_still_coalesce() {
+        use crate::sys::executor::Executor;
+        Executor::run(async {
+            let timer = Timer::manual();
+            let mut pending = None;
+            let mut last = update(vec![workspace("bsp")]);
+            last.displays[0].workspaces[0].windows.push(CGRect::ZERO);
+            last.displays[0].workspaces[0].window_list.push(MenuWindow {
+                id: WindowId::new(1, 1),
+                app_name: "Editor".into(),
+                bundle_id: None,
+                title: "initial".into(),
+                focused: true,
+                layout_position: None,
+            });
+            let mut changed = last.clone();
+            let workspace = &mut changed.displays[0].workspaces[0];
+            workspace.name = "renamed".into();
+            workspace.window_list[0].app_name = "renamed app".into();
+            workspace.window_list[0].title = "latest title".into();
+            workspace.windows[0].origin.x = 42.0;
+            workspace.windows[0].size.width = 500.0;
+            let expected = sig(&changed);
+            assert!(queue_update(Some(&last), &mut pending, &timer, changed).is_none());
+            assert_eq!(sig(pending.as_ref().unwrap()), expected);
         });
     }
 
