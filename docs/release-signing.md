@@ -47,7 +47,15 @@ Self-signing does not make the developer identity trusted by Apple. Users may ne
 
 ## Install a signed release
 
-Run `python3 scripts/install-release.py` from this checkout to download the latest release through GitHub CLI. Use `--version TAG` for a selected release or pass a local release archive. The installer compares the bundled certificate with `assets/release-signing.pem` and requires both binary identifiers and signatures to match the pinned certificate. It verifies every architecture before replacing installed files.
+On macOS with Python 3.8 or later and curl, run:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kdnk/wm/main/install.sh | sh
+```
+
+The bootstrap downloads the standalone Python installer to a temporary directory and forwards its arguments. No repository checkout or GitHub CLI is required. Use `sh -s -- --version TAG` after the pipe to select a release. From a checkout, `python3 scripts/install-release.py` also accepts a local release archive for offline installation.
+
+The installer downloads public releases over HTTPS and checks the bundled certificate against its embedded SHA-256 pin before verifying both binary identifiers and signatures. A test checks that the pin matches `assets/release-signing.pem`. The installer verifies every architecture before replacing installed files.
 
 The default prefix is `~/.local`. Executables go in `bin`, and the default configuration, public certificate, and licenses go in `share/wm/release`. The installer preserves user configuration and `share/wm/release-signing`. Failed replacements roll back to the previous files. If rollback also fails, the installer reports the retained backup directory. It does not change certificate trust, sign binaries, or operate the service. Stop wm before updating, then start wm with the installed executable.
 

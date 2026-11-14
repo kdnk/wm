@@ -6,15 +6,20 @@ import argparse
 import hashlib
 import os
 from pathlib import Path
+import re
 import shutil
 import ssl
 import subprocess
 import sys
 import tarfile
 import tempfile
+from urllib.parse import unquote
 
-ROOT = Path(__file__).resolve().parents[1]
-REPOSITORY = "kdnk/wm"
+RELEASES_URL = "https://github.com/kdnk/wm/releases"
+PINNED_CERTIFICATE_SHA256 = "a5dcf5cd43ec7c6569673d71e3d91ed7f78b38766cdd3b1297cce9940cc9b9fc"
+VERSION_TAG = r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+CURL = ("curl", "--fail", "--location", "--silent", "--show-error",
+        "--proto", "=https", "--proto-redir", "=https")
 FILES = {
     "wm", "wm-cli", "wm.default.toml", "release-signing.pem",
     "licenses/wm-LICENSE", "licenses/wm-NOTICE", "licenses/cgs/LICENSE",
@@ -39,6 +44,24 @@ def certificate_der(path):
         return ssl.PEM_cert_to_DER_cert(path.read_text())
     except (OSError, ValueError) as error:
         raise InstallError(f"Invalid signing certificate: {path}") from error
+
+
+def download_release(tag, directory):
+    if shutil.which("curl") is None:
+        raise InstallError("curl is required to download a release; a local archive can be installed offline.")
+    if tag is None:
+        latest = run(*CURL, "--head", "--output", os.devnull, "--write-out", "%{url_effective}",
+                     RELEASES_URL + "/latest").strip()
+        prefix = RELEASES_URL + "/tag/"
+        if not latest.startswith(prefix):
+            raise InstallError("GitHub did not redirect to a versioned release.")
+        tag = unquote(latest[len(prefix):])
+    if not re.fullmatch(VERSION_TAG, tag):
+        raise InstallError("Release version must be a tag such as v0.8.2.")
+    name = f"wm-universal-macos-{tag[1:]}.tar.gz"
+    archive = directory / name
+    run(*CURL, "--output", str(archive), f"{RELEASES_URL}/download/{tag}/{name}")
+    return archive
 
 
 def extract_archive(archive, destination):
@@ -69,9 +92,9 @@ def extract_archive(archive, destination):
 
 
 def verify_release(directory):
-    pinned = certificate_der(ROOT / "assets/release-signing.pem")
-    if certificate_der(directory / "release-signing.pem") != pinned:
-        raise InstallError("Release certificate differs from assets/release-signing.pem")
+    pinned = certificate_der(directory / "release-signing.pem")
+    if hashlib.sha256(pinned).hexdigest() != PINNED_CERTIFICATE_SHA256:
+        raise InstallError("Release certificate differs from the pinned signing certificate")
     fingerprint = hashlib.sha1(pinned).hexdigest()
     for name, identifier in (("wm", "git.kdnk.wm"), ("wm-cli", "git.kdnk.wm.cli")):
         requirement = f'=identifier "{identifier}" and certificate leaf = H"{fingerprint}"'
@@ -140,22 +163,14 @@ def main():
     args = parser.parse_args()
     if args.archive and args.version:
         parser.error("archive and --version cannot be used together")
-    if args.version and args.version.startswith("-"):
-        parser.error("--version must be a release tag")
+    if args.version and not re.fullmatch(VERSION_TAG, args.version):
+        parser.error("--version must be a release tag such as v0.8.2")
     prefix = Path(os.path.abspath(args.prefix.expanduser()))
     with tempfile.TemporaryDirectory(prefix="wm-release-") as temporary:
         scratch = Path(temporary)
         archive = args.archive
         if archive is None:
-            command = ["gh", "release", "download"]
-            if args.version:
-                command.append(args.version)
-            run(*command, "--repo", REPOSITORY, "--pattern", "wm-universal-macos-*.tar.gz",
-                "--dir", str(scratch))
-            archives = list(scratch.glob("wm-universal-macos-*.tar.gz"))
-            if len(archives) != 1:
-                raise InstallError("Expected exactly one universal macOS release archive")
-            archive = archives[0]
+            archive = download_release(args.version, scratch)
         extracted = scratch / "extracted"
         extracted.mkdir()
         extract_archive(archive, extracted)
@@ -163,7 +178,9 @@ def main():
         install(extracted, prefix)
     print(f"Installed wm and wm-cli in {prefix / 'bin'}")
     print(f"Default configuration and licenses: {prefix / 'share/wm/release'}")
-    print("Add the bin directory to PATH, then use wm service start or wm service restart.")
+    print("Add the bin directory to PATH and configure ~/.config/wm/config.toml.")
+    print("For the first start, run wm service install, then wm service start.")
+    print("Stop other window managers before starting wm.")
 
 
 if __name__ == "__main__":

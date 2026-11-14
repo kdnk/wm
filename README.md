@@ -4,21 +4,27 @@ wm is a tiling window manager for macOS, forked from [Rift](https://github.com/a
 
 ## Install a release
 
-Run from this checkout with Python 3 and an authenticated GitHub CLI:
+On macOS with Python 3.8 or later and curl, run:
 
 ```sh
-python3 scripts/install-release.py
+curl -fsSL https://raw.githubusercontent.com/kdnk/wm/main/install.sh | sh
 ```
 
-The installer downloads the latest universal macOS release and verifies both executables against the pinned signing certificate. It installs `wm` and `wm-cli` in `~/.local/bin`. Add that directory to PATH.
+The installer downloads the latest universal macOS release and verifies both executables against the pinned signing certificate. A repository checkout, GitHub CLI, and Rust toolchain are not required. It installs `wm` and `wm-cli` in `~/.local/bin`. Add that directory to PATH.
 
-Use `--version v0.8.2` to select a release, pass a local `.tar.gz` archive to install offline, or use `--prefix PATH` to change the installation prefix. The installer preserves the release signatures and your configuration. Service control remains explicit.
+To select a version or installation prefix, pass options to the script:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kdnk/wm/main/install.sh | sh -s -- --version v0.8.2 --prefix "$HOME/.local"
+```
+
+From a checkout, `python3 scripts/install-release.py` accepts the same options and a local `.tar.gz` archive for offline installation. The installer preserves the release signatures and your configuration. Service control remains explicit.
 
 To update a running installation, stop wm, run the installer, then start wm again:
 
 ```sh
 wm service stop
-python3 scripts/install-release.py
+curl -fsSL https://raw.githubusercontent.com/kdnk/wm/main/install.sh | sh
 wm service start
 wm-cli query windows
 ```
@@ -37,10 +43,10 @@ Put `target/release/wm` and `target/release/wm-cli` in a stable location on PATH
 
 ```sh
 mkdir -p ~/.config/wm
-test -e ~/.config/wm/config.toml || cp wm.default.toml ~/.config/wm/config.toml
+test -e ~/.config/wm/config.toml || cp ~/.local/share/wm/release/wm.default.toml ~/.config/wm/config.toml
 ```
 
-The release also installs its default configuration and licenses in `~/.local/share/wm/release`.
+The release installs its default configuration and licenses in `~/.local/share/wm/release`. Adjust the source path if you used a different prefix. When building from source, use `wm.default.toml` from the checkout.
 
 Edit `~/.config/wm/config.toml` to configure wm. Changes reload automatically while
 `[settings].hot_reload` is enabled, which is the default. To reload manually, run
