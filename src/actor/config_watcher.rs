@@ -40,11 +40,15 @@ impl ConfigWatcher {
         file: PathBuf,
     ) -> notify::Result<(Self, RecommendedWatcher, Receiver<Event>)> {
         // FSEvents reports absolute paths; preserve the final symlink itself.
+        let file = std::path::absolute(file)?;
         let file = file
-            .parent()
-            .and_then(|p| fs::canonicalize(p).ok())
-            .zip(file.file_name())
-            .map(|(parent, name)| parent.join(name))
+            .ancestors()
+            .skip(1)
+            .find_map(|parent| {
+                fs::canonicalize(parent)
+                    .ok()
+                    .map(|parent_path| parent_path.join(file.strip_prefix(parent).unwrap()))
+            })
             .unwrap_or(file);
         let mut actor = Self {
             file,
@@ -83,7 +87,6 @@ impl ConfigWatcher {
         self.settle(rx);
         // Watch parents rather than files: atomic saves replace the inode, and a
         // deleted file must remain discoverable. Retargeted symlinks need new parents.
-        // A failed refresh must not end hot reload; keep the existing watches.
         if let Err(error) = self.refresh_watches(watcher) {
             warn!("config-watcher: failed to refresh watches: {error}");
         }
@@ -111,16 +114,18 @@ impl ConfigWatcher {
             .parent()
             .into_iter()
             .chain(real_file.as_deref().and_then(|p| p.parent()))
+            .filter_map(|parent| parent.ancestors().find(|ancestor| ancestor.is_dir()))
             .map(PathBuf::from)
             .collect();
-        for dir in parents.difference(&self.parents) {
-            watcher.watch(dir, RecursiveMode::NonRecursive)?;
+        for dir in parents.difference(&self.parents).cloned().collect::<Vec<_>>() {
+            watcher.watch(&dir, RecursiveMode::NonRecursive)?;
             info!("watching {:?}", dir);
+            self.parents.insert(dir);
         }
-        for dir in self.parents.difference(&parents) {
-            watcher.unwatch(dir)?;
+        for dir in self.parents.difference(&parents).cloned().collect::<Vec<_>>() {
+            watcher.unwatch(&dir)?;
+            self.parents.remove(&dir);
         }
-        self.parents = parents;
         self.real_file_id = real_file
             .as_ref()
             .and_then(|p| fs::metadata(p).ok())
@@ -131,8 +136,8 @@ impl ConfigWatcher {
 
     fn is_relevant(&self, event: &Event) -> bool {
         event.paths.iter().any(|path| {
-            path == &self.file
-                || self.real_file.as_ref() == Some(path)
+            self.file.starts_with(path)
+                || self.real_file.as_ref().is_some_and(|file| file.starts_with(path))
                 || self.parents.contains(path)
                 || self
                     .real_file_id
@@ -220,7 +225,12 @@ mod tests {
             let (actor, watcher, events) =
                 ConfigWatcher::watch(config_tx, path.to_path_buf()).unwrap();
             actor.query_config().unwrap();
-            Self { actor, watcher, events, updates }
+            Self {
+                actor,
+                watcher,
+                events,
+                updates,
+            }
         }
 
         fn await_animate(&mut self, expected: bool) {
