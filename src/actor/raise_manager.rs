@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
@@ -57,6 +58,22 @@ struct ActiveSequence {
     raise_token: CancellationToken,
     started_at: Instant,
     timed_out: bool,
+    focusing: bool,
+    focus_grace: bool,
+}
+
+impl ActiveSequence {
+    fn remaining_timeout(&self) -> Duration {
+        if self.timed_out {
+            return Duration::MAX;
+        }
+        let deadline = if self.focus_grace {
+            Duration::from_secs(1)
+        } else {
+            TIMEOUT_DURATION
+        };
+        deadline.saturating_sub(self.started_at.elapsed())
+    }
 }
 
 pub type Sender = actor::Sender<Event>;
@@ -75,19 +92,10 @@ impl RaiseManager {
         raise_manager.input_tx = input_tx;
         let mut timeout_timer = Timer::manual();
 
-        let sequence_timeout = |sequence: &ActiveSequence| {
-            if !sequence.timed_out {
-                let elapsed = sequence.started_at.elapsed();
-                TIMEOUT_DURATION.saturating_sub(elapsed)
-            } else {
-                Duration::MAX
-            }
-        };
-
         loop {
             // Calculate next timeout timer if we have an active sequence.
             let timeout = if let Some(sequence) = &raise_manager.active_sequence {
-                sequence_timeout(sequence)
+                sequence.remaining_timeout()
             } else {
                 Duration::MAX
             };
@@ -104,7 +112,7 @@ impl RaiseManager {
                 _ = timeout_timer.next() => {
                     // Send timeout event for the active sequence
                     if let Some(sequence) = &mut raise_manager.active_sequence {
-                        if sequence_timeout(sequence) <= Duration::ZERO {
+                        if sequence.remaining_timeout() <= Duration::ZERO {
                             // Send timeout event to reactor; this will get
                             // relayed back to us. We send these events through
                             // the reactor so that we can record/replay them.
@@ -129,6 +137,18 @@ impl RaiseManager {
     fn handle_message(&mut self, msg: Event) {
         if self.active_sequence.as_ref().is_some_and(|s| s.raise_token.is_cancelled()) {
             self.active_sequence = None;
+        }
+        let new_focus = match &msg {
+            Event::RaiseRequest(request) => request.focus_window.is_some(),
+            Event::MouseRaiseRequest(request, token) => {
+                !token.is_cancelled()
+                    && request.focus_window.is_some()
+                    && self.active_sequence.as_ref().is_some_and(|s| s.focus_grace)
+            }
+            _ => false,
+        };
+        if new_focus && self.active_sequence.as_ref().is_some_and(|s| s.focusing) {
+            self.active_sequence.take().unwrap().raise_token.cancel();
         }
         match msg {
             Event::MouseRaisesCancelled => {}
@@ -158,6 +178,22 @@ impl RaiseManager {
                 // Clear pending raises for the active sequence if it matches
                 if let Some(sequence) = &mut self.active_sequence {
                     if sequence.sequence_id == sequence_id {
+                        if sequence.focusing
+                            && !sequence.focus_grace
+                            && !self
+                                .queued_sequences
+                                .iter()
+                                .any(|(request, _)| request.focus_window.is_some())
+                        {
+                            // This is the final focus request. Geometry ahead of it
+                            // on the app actor can take longer than 250 ms. Keep its
+                            // token live for one additional bounded grace period.
+                            debug!(sequence_id, "Final focus delayed; preserving latest intent");
+                            sequence.focus_grace = true;
+                            sequence.started_at = Instant::now();
+                            sequence.timed_out = false;
+                            return;
+                        }
                         warn!(
                             "Sequence {} timed out, clearing pending raises: {:?}",
                             sequence_id, sequence.pending_raises
@@ -268,6 +304,8 @@ impl RaiseManager {
                 raise_token,
                 started_at: Instant::now(),
                 timed_out: false,
+                focusing: false,
+                focus_grace: false,
             });
         }
     }
@@ -289,6 +327,7 @@ impl RaiseManager {
             && let Some((pid, wids, warp, quiet)) = sequence.focus_batch.take()
         {
             changed = true;
+            sequence.focusing = true;
             debug!(focus_window = ?wids);
             let app_handle = sequence.app_handles.get(&pid);
             if let Some(handle) = app_handle {
@@ -543,6 +582,160 @@ mod tests {
 
             // Verify that the sequence was completed and removed
             assert!(raise_manager.active_sequence.is_none());
+        });
+    }
+
+    #[test]
+    fn rapid_focus_supersedes_before_timeout_and_ignores_stale_events() {
+        let mut manager = RaiseManager::new();
+        let (handles, mut rx) = create_test_app_handles();
+        let mut previous: Option<(WindowId, CancellationToken, u64)> = None;
+        for index in [1, 2, 3, 1] {
+            let window = WindowId::new(1, index);
+            manager.handle_message(create_layout_response(
+                vec![],
+                Some((window, None)),
+                handles.clone(),
+                Quiet::No,
+            ));
+            if let Some((old_window, token, sequence_id)) = previous.take() {
+                assert!(
+                    token.is_cancelled(),
+                    "new focus must not wait for the old timeout"
+                );
+                manager.handle_message(Event::RaiseTimeout { sequence_id });
+                manager.handle_message(Event::RaiseCompleted {
+                    window_id: old_window,
+                    sequence_id,
+                });
+            }
+            let requests = collect_requests(&mut rx);
+            let [Request::Raise(windows, token, sequence_id, Quiet::No)] = &requests[..] else {
+                panic!("latest focus should be dispatched immediately");
+            };
+            assert_eq!(windows, &[window]);
+            assert!(!token.is_cancelled());
+            assert_eq!(
+                manager.active_sequence.as_ref().unwrap().sequence_id,
+                *sequence_id
+            );
+            previous = Some((window, token.clone(), *sequence_id));
+        }
+        let (window_id, token, sequence_id) = previous.unwrap();
+        manager.handle_message(Event::RaiseCompleted { window_id, sequence_id });
+        assert!(!token.is_cancelled());
+        assert!(manager.active_sequence.is_none());
+        assert!(manager.queued_sequences.is_empty());
+    }
+
+    #[test]
+    fn slow_final_focus_survives_timeout_until_completed_or_superseded() {
+        Executor::run(async {
+            for supersede in [false, true] {
+                let mut manager = RaiseManager::new();
+                let (handles, mut rx) = create_test_app_handles();
+                let selected = WindowId::new(1, 3);
+                manager.handle_message(create_layout_response(
+                    vec![],
+                    Some((selected, None)),
+                    handles.clone(),
+                    Quiet::Yes,
+                ));
+                manager.handle_message(Event::RaiseTimeout { sequence_id: 1 });
+                let (_, request) = rx.try_recv().unwrap();
+                let Request::Raise(windows, token, sequence, _) = request else {
+                    panic!("expected focus");
+                };
+                assert_eq!(windows, vec![selected]);
+                assert!(
+                    !token.is_cancelled(),
+                    "slow geometry must not discard the selected focus"
+                );
+                if supersede {
+                    let next = WindowId::new(1, 4);
+                    manager.handle_message(create_layout_response(
+                        vec![],
+                        Some((next, None)),
+                        handles,
+                        Quiet::Yes,
+                    ));
+                    assert!(token.is_cancelled(), "new intent must cancel the delayed focus");
+                    let requests = collect_requests(&mut rx);
+                    assert_raise_request(&requests[0], next, 2, Quiet::Yes);
+                    manager.handle_message(Event::RaiseCompleted {
+                        window_id: selected,
+                        sequence_id: sequence,
+                    });
+                    manager.handle_message(Event::RaiseCompleted {
+                        window_id: next,
+                        sequence_id: 2,
+                    });
+                } else {
+                    manager.handle_message(Event::RaiseCompleted {
+                        window_id: selected,
+                        sequence_id: sequence,
+                    });
+                }
+                assert!(manager.active_sequence.is_none());
+            }
+        });
+    }
+
+    #[test]
+    fn delayed_focus_has_finite_grace_and_survives_stacking_only_requests() {
+        Executor::run(async {
+            for stacking in [false, true] {
+                let mut manager = RaiseManager::new();
+                let (handles, mut rx) = create_test_app_handles();
+                let selected = WindowId::new(1, 3);
+                manager.handle_message(create_layout_response(
+                    vec![],
+                    Some((selected, None)),
+                    handles.clone(),
+                    Quiet::Yes,
+                ));
+                let (_, Request::Raise(_, token, _, _)) = rx.try_recv().unwrap() else {
+                    panic!("focus request");
+                };
+                manager.handle_message(Event::RaiseTimeout { sequence_id: 1 });
+                if stacking {
+                    manager.handle_message(create_layout_response(
+                        vec![WindowId::new(1, 4)],
+                        None,
+                        handles,
+                        Quiet::Yes,
+                    ));
+                }
+                assert!(
+                    !token.is_cancelled(),
+                    "stacking must not supersede the selected focus"
+                );
+                let sequence = manager.active_sequence.as_mut().unwrap();
+                sequence.started_at = Instant::now() - Duration::from_secs(2);
+                assert_eq!(
+                    sequence.remaining_timeout(),
+                    Duration::ZERO,
+                    "the grace must rearm the existing deadline"
+                );
+                manager.handle_message(Event::RaiseTimeout { sequence_id: 1 });
+                assert!(
+                    token.is_cancelled(),
+                    "an unresponsive app must eventually release the global raise lock"
+                );
+                if stacking {
+                    assert_raise_request(
+                        &collect_requests(&mut rx)[0],
+                        WindowId::new(1, 4),
+                        2,
+                        Quiet::Yes,
+                    );
+                    manager.handle_message(Event::RaiseCompleted {
+                        window_id: WindowId::new(1, 4),
+                        sequence_id: 2,
+                    });
+                }
+                assert!(manager.active_sequence.is_none());
+            }
         });
     }
 
