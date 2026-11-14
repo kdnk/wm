@@ -59,7 +59,7 @@ Summarize the version rationale, release contents, verification results, and exa
 
 ## Publish through the existing workflow
 
-An explicit `$release` invocation or direct request to release or publish authorizes the necessary version preparation, local commit, merge into local `main`, push of `main`, existing workflow dispatch when needed, and confirmation of publication. Carry that authorization through the release without asking again after the candidate summary. Respect narrower preparation-only, commit-only, or other explicit limits. Creating or editing this skill, a version-bump request alone, and automatic skill selection do not authorize publication.
+An explicit `$release` invocation or direct request to release or publish authorizes the necessary version preparation, local commit, merge into local `main`, push of `main`, existing workflow dispatch when needed, confirmation of publication, and local installation of the published version. Carry that authorization through the release without asking again after the candidate summary. Respect narrower preparation-only, commit-only, publication-only, or other explicit limits. Creating or editing this skill, a version-bump request alone, and automatic skill selection do not authorize publication or installation.
 
 For sandbox approval justifications, quote the actual user request and name the exact candidate SHA and intended side effects, including the local `main` merge, remote `main` push, and resulting release workflow. Do not substitute a generic claim that the skill authorizes publication. If tool approval review denies an action, report the denied action and stated reason honestly. Do not bypass the denial or retry unchanged without new authorization or evidence that addresses the denial. Ask only for authorization still required by that denial or an explicit user limit.
 
@@ -83,6 +83,12 @@ Preserve the fixed identity pinned in `assets/release-signing.pem`. Ordinary rel
 
 Confirm workflow success, a published release, and a version tag pointing to the intended source SHA. Inspect the release with `gh release view` and the tag with `gh api`. Resolve annotated tags to their commit when necessary.
 
-Check for the nonempty `wm-universal-macos-VERSION.tar.gz` asset. Confirm that the workflow verified the packaged binary version and the pinned certificate. Do not install the release or operate the local daemon unless requested.
+Check for the nonempty `wm-universal-macos-VERSION.tar.gz` asset. Confirm that the workflow verified the packaged binary version and the pinned certificate.
 
 Report the version and rationale, source commit, checks, and descriptive links to the release and workflow run. For local preparation, report the branch and changed files instead. State remaining failures or required publication actions explicitly.
+
+## Install the published version
+
+After confirming publication, install the exact published version unless the user limited the task to publication. Download `wm-universal-macos-VERSION.tar.gz` from `vVERSION` with `gh release download` into a temporary directory. Run `python3 scripts/install-release.py PATH_TO_ARCHIVE` so the existing installer verifies the pinned certificate and signature before replacing installed files. Preserve the existing installation prefix with `--prefix` when needed. The default prefix is `~/.local`.
+
+Follow the stop, update, and start sequence in `docs/release-signing.md` for an already running wm service. Restore its prior running state if installation fails. Do not install or enable a new service as part of the update. Run the installed binary by its absolute path with `--version` and confirm that it matches the published version. Include the installed path and version in the final report. Report installation failures separately from successful publication, without republishing the release.
