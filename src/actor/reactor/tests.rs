@@ -948,8 +948,10 @@ fn scrolling_focus_warps_to_revealed_window() {
         let center = CGPoint::new(if ratio == 1.0 { 450.0 } else { 250.0 }, 500.0);
         let mut warps: Vec<_> = warp.into_iter().collect();
         while let Ok((_, request)) = input_rx.try_recv() {
-            if let crate::actor::input::Request::Warp(point) = request {
-                warps.push(point);
+            match request {
+                input::Request::Warp(point) => warps.push(point),
+                input::Request::FocusPointer(pointer) => warps.push(pointer.visible.mid()),
+                _ => {}
             }
         }
         assert_eq!(
@@ -995,7 +997,9 @@ fn cross_display_workspace_focus_keeps_relative_warp() {
 
             let warps: Vec<_> = std::iter::from_fn(|| input_rx.try_recv().ok())
                 .filter_map(|(_, request)| match request {
-                    input::Request::Warp(_) | input::Request::WarpRelative { .. } => Some(request),
+                    input::Request::Warp(_)
+                    | input::Request::FocusPointer(_)
+                    | input::Request::WarpRelative { .. } => Some(request),
                     _ => None,
                 })
                 .collect();
@@ -11615,7 +11619,9 @@ fn excluded_tooltip_focus_does_not_raise_or_warp_its_document() {
             assert!(
                 !std::iter::from_fn(|| input_rx.try_recv().ok()).any(|(_, request)| matches!(
                     request,
-                    input::Request::Warp(_) | input::Request::WarpRelative { .. }
+                    input::Request::Warp(_)
+                        | input::Request::FocusPointer(_)
+                        | input::Request::WarpRelative { .. }
                 )),
                 "mode={mode:?}, mouse_moved={mouse_moved}, native_parent={native_parent}: a tooltip must not move the cursor"
             );
@@ -11690,7 +11696,10 @@ fn nonstandard_focus_preserves_admission_claims_and_native_modals() {
             .collect();
         if case == "admitted" {
             assert!(
-                requests.iter().any(|request| matches!(request, input::Request::Warp(_))),
+                requests.iter().any(|request| matches!(
+                    request,
+                    input::Request::Warp(_) | input::Request::FocusPointer(_)
+                )),
                 "explicitly admitted nonstandard windows must retain cursor following"
             );
         } else if case == "claimed" {
@@ -11766,6 +11775,7 @@ fn external_application_activation_warps_to_destination() {
             let warps: Vec<_> = std::iter::from_fn(|| input_rx.try_recv().ok())
                 .filter_map(|(_, request)| match request {
                     input::Request::Warp(point) => Some(point),
+                    input::Request::FocusPointer(pointer) => Some(pointer.visible.mid()),
                     _ => None,
                 })
                 .collect();
@@ -11834,6 +11844,7 @@ fn same_application_native_focus_warps_to_destination() {
                 let warps: Vec<_> = std::iter::from_fn(|| input_rx.try_recv().ok())
                     .filter_map(|(_, request)| match request {
                         input::Request::Warp(point) => Some(point),
+                        input::Request::FocusPointer(pointer) => Some(pointer.visible.mid()),
                         _ => None,
                     })
                     .collect();
@@ -11853,8 +11864,10 @@ fn same_application_native_focus_warps_to_destination() {
                 );
                 reactor.handle_event(Event::WindowServerFocusChanged(target, space));
                 assert!(
-                    !std::iter::from_fn(|| input_rx.try_recv().ok())
-                        .any(|(_, request)| matches!(request, input::Request::Warp(_))),
+                    !std::iter::from_fn(|| input_rx.try_recv().ok()).any(|(_, request)| matches!(
+                        request,
+                        input::Request::Warp(_) | input::Request::FocusPointer(_)
+                    )),
                     "duplicate native focus must not warp"
                 );
                 crate::sys::window_server::set_window_under_cursor_override(None);
@@ -11895,6 +11908,7 @@ fn url_link_activation_warps_when_browser_covers_click_source() {
     let warps: Vec<_> = std::iter::from_fn(|| input_rx.try_recv().ok())
         .filter_map(|(_, request)| match request {
             input::Request::Warp(point) => Some(point),
+            input::Request::FocusPointer(pointer) => Some(pointer.visible.mid()),
             _ => None,
         })
         .collect();
@@ -11959,6 +11973,7 @@ fn external_focus_uses_recent_input_instead_of_raised_window_hit_test() {
             let warps: Vec<_> = std::iter::from_fn(|| input_rx.try_recv().ok())
                 .filter_map(|(_, request)| match request {
                     input::Request::Warp(point) => Some(point),
+                    input::Request::FocusPointer(pointer) => Some(pointer.visible.mid()),
                     _ => None,
                 })
                 .collect();
@@ -12037,6 +12052,7 @@ fn external_focus_warp_uses_animated_destination_after_native_focus() {
                 let warps: Vec<_> = std::iter::from_fn(|| input_rx.try_recv().ok())
                     .filter_map(|(_, request)| match request {
                         input::Request::Warp(point) => Some(point),
+                        input::Request::FocusPointer(pointer) => Some(pointer.visible.mid()),
                         _ => None,
                     })
                     .collect();
@@ -12100,6 +12116,7 @@ fn hover_focus_preserves_pointer_on_boundary() {
             let warps: Vec<_> = std::iter::from_fn(|| input_rx.try_recv().ok())
                 .filter_map(|(_, request)| match request {
                     input::Request::Warp(point) => Some(point),
+                    input::Request::FocusPointer(pointer) => Some(pointer.visible.mid()),
                     input::Request::WarpRelative { .. } => {
                         panic!("hover focus must not request a relative warp")
                     }
@@ -12159,6 +12176,7 @@ fn hover_focus_preserves_pointer_after_raise_completion_unless_keyboard_interven
             let warps: Vec<_> = std::iter::from_fn(|| input_rx.try_recv().ok())
                 .filter_map(|(_, request)| match request {
                     input::Request::Warp(point) => Some(point),
+                    input::Request::FocusPointer(pointer) => Some(pointer.visible.mid()),
                     input::Request::WarpRelative { .. } => {
                         panic!("hover focus must not request a relative warp")
                     }
@@ -12215,6 +12233,7 @@ fn rapid_hover_focus_notifications_preserve_pointer() {
         let warps: Vec<_> = std::iter::from_fn(|| input_rx.try_recv().ok())
             .filter_map(|(_, request)| match request {
                 input::Request::Warp(point) => Some(point),
+                input::Request::FocusPointer(pointer) => Some(pointer.visible.mid()),
                 input::Request::WarpRelative { .. } => {
                     panic!("hover focus must not request a relative warp")
                 }
@@ -12274,6 +12293,7 @@ fn hover_focus_layout_response_preserves_pointer() {
         let warps: Vec<_> = std::iter::from_fn(|| input_rx.try_recv().ok())
             .filter_map(|(_, request)| match request {
                 input::Request::Warp(point) => Some(point),
+                input::Request::FocusPointer(pointer) => Some(pointer.visible.mid()),
                 input::Request::WarpRelative { .. } => {
                     panic!("hover focus must not request a relative warp")
                 }
@@ -12329,6 +12349,7 @@ fn explicit_focus_after_hover_follows_the_pointer() {
         let mut warps: Vec<_> = std::iter::from_fn(|| input_rx.try_recv().ok())
             .filter_map(|(_, request)| match request {
                 input::Request::Warp(point) => Some(point),
+                input::Request::FocusPointer(pointer) => Some(pointer.visible.mid()),
                 input::Request::WarpRelative { .. } => {
                     panic!("document focus must not warp between displays")
                 }
@@ -12371,8 +12392,10 @@ fn expired_hover_intent_does_not_suppress_native_focus() {
         .insert(target, Instant::now() - Duration::from_secs(2));
     reactor.handle_event(Event::WindowServerFocusChanged(target, space));
     assert!(
-        std::iter::from_fn(|| input_rx.try_recv().ok())
-            .any(|(_, request)| matches!(request, input::Request::Warp(_))),
+        std::iter::from_fn(|| input_rx.try_recv().ok()).any(|(_, request)| matches!(
+            request,
+            input::Request::Warp(_) | input::Request::FocusPointer(_)
+        )),
         "expired hover intent must allow native cursor following"
     );
 }

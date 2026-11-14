@@ -574,9 +574,7 @@ impl LayoutManager {
                 && layout.iter().any(|(wid, _)| *wid == window)
             {
                 reactor.workspace_switch_manager.pending_focus_mouse_warp = None;
-                if let Some(center) = reactor.focus_warp_center(window) {
-                    reactor.warp_mouse(center);
-                }
+                reactor.warp_mouse_for_focus(window);
             }
         }
 
