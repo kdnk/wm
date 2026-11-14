@@ -467,12 +467,23 @@ pub struct UiSettings {
     pub mission_control: MissionControlSettings,
 }
 
+#[derive(Serialize, Deserialize, Debug, Default, PartialEq, Eq, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum SwipeAxis {
+    #[default]
+    Horizontal,
+    Vertical,
+}
+
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct GestureSettings {
-    /// Enable horizontal swipes to switch virtual workspaces
+    /// Enable swipes to switch virtual workspaces
     #[serde(default)]
     pub enabled: bool,
+    /// Axis used for workspace swipes. Horizontal preserves older configurations.
+    #[serde(default)]
+    pub swipe_axis: SwipeAxis,
     /// If true, consume horizontal swipe events owned by Wm so macOS and the
     /// foreground app do not also handle them.
     #[serde(default = "yes")]
@@ -480,7 +491,10 @@ pub struct GestureSettings {
     /// Invert horizontal direction (swap next/prev)
     #[serde(default)]
     pub invert_horizontal_swipe: bool,
-    /// Maximum absolute Y delta allowed for the gesture to count as horizontal
+    /// Invert vertical direction. By default, up moves to the next workspace.
+    #[serde(default)]
+    pub invert_vertical_swipe: bool,
+    /// Maximum travel perpendicular to the selected swipe axis before recognition
     #[serde(default = "default_swipe_vertical_tolerance")]
     pub swipe_vertical_tolerance: f64,
     /// If true, attempt to skip empty workspaces on swipe (if supported)
@@ -489,7 +503,7 @@ pub struct GestureSettings {
     /// Number of fingers required for swipe (default = 3)
     #[serde(default = "default_swipe_fingers")]
     pub fingers: usize,
-    /// Normalized horizontal distance (0..1) required to fire a swipe
+    /// Normalized distance (0..1) along the selected axis required to fire a swipe
     #[serde(default = "default_distance_pct")]
     pub distance_pct: f64,
     /// Enable haptic feedback when a swipe commits
@@ -504,8 +518,10 @@ impl Default for GestureSettings {
     fn default() -> Self {
         Self {
             enabled: false,
+            swipe_axis: SwipeAxis::Horizontal,
             consume_dock_swipe: true,
             invert_horizontal_swipe: false,
+            invert_vertical_swipe: false,
             swipe_vertical_tolerance: default_swipe_vertical_tolerance(),
             skip_empty: true,
             fingers: default_swipe_fingers(),

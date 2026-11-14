@@ -10,7 +10,7 @@ use objc2_core_graphics::CGEvent;
 use parking_lot::Mutex;
 
 use crate::actor::reactor::{Event, Sender};
-use crate::common::config::{Config, HapticPattern};
+use crate::common::config::{Config, HapticPattern, SwipeAxis};
 use crate::sys::dispatch::{DispatchExt, gesture_deadline_queue};
 use crate::sys::geometry::CGRectExt;
 use crate::sys::gesture::{Owner, Ownership};
@@ -26,6 +26,7 @@ pub struct Motion {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ActionConfig {
     fingers: usize,
+    axis: SwipeAxis,
     pub invert: bool,
     tolerance: f64,
     threshold: f64,
@@ -56,7 +57,11 @@ impl Settings {
             haptic: g.haptics_enabled.then_some(g.haptic_pattern),
             workspace: g.enabled.then_some(ActionConfig {
                 fingers: g.fingers.max(1),
-                invert: g.invert_horizontal_swipe,
+                axis: g.swipe_axis,
+                invert: match g.swipe_axis {
+                    SwipeAxis::Horizontal => g.invert_horizontal_swipe,
+                    SwipeAxis::Vertical => g.invert_vertical_swipe,
+                },
                 tolerance: tolerance(g.swipe_vertical_tolerance),
                 threshold: g.distance_pct.clamp(0.01, 1.0),
                 scrolling: false,
@@ -66,6 +71,7 @@ impl Settings {
             }),
             scroll: s.enabled.then_some(ActionConfig {
                 fingers: s.fingers.max(1),
+                axis: SwipeAxis::Horizontal,
                 invert: s.invert_horizontal,
                 tolerance: tolerance(s.vertical_tolerance),
                 threshold: 0.0,
@@ -84,9 +90,34 @@ impl Settings {
     }
 
     fn action_for(self, scrolling_available: bool, fingers: usize) -> Option<ActionConfig> {
-        self.scroll
-            .filter(|a| scrolling_available && a.fingers == fingers)
-            .or_else(|| self.workspace.filter(|a| a.fingers == fingers))
+        self.routes_for(scrolling_available, fingers).first()
+    }
+
+    fn routes_for(self, scrolling_available: bool, fingers: usize) -> Routes {
+        let workspace = self.workspace.filter(|a| a.fingers == fingers);
+        Routes {
+            horizontal: self
+                .scroll
+                .filter(|a| scrolling_available && a.fingers == fingers)
+                .or_else(|| workspace.filter(|a| a.axis == SwipeAxis::Horizontal)),
+            vertical: workspace.filter(|a| a.axis == SwipeAxis::Vertical),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Routes {
+    horizontal: Option<ActionConfig>,
+    vertical: Option<ActionConfig>,
+}
+impl Routes {
+    fn first(self) -> Option<ActionConfig> { self.horizontal.or(self.vertical) }
+
+    fn action(self, axis: SwipeAxis) -> Option<ActionConfig> {
+        match axis {
+            SwipeAxis::Horizontal => self.horizontal,
+            SwipeAxis::Vertical => self.vertical,
+        }
     }
 }
 #[derive(Clone, Debug)]
@@ -299,7 +330,8 @@ fn swipe_recognizer(fingers: usize) -> GestureRecognizer {
 }
 struct DeviceSession {
     context: Context,
-    alternate: Option<ActionConfig>,
+    routes: Routes,
+    alternate: Option<Routes>,
     max_fingers: usize,
     recognizer: GestureRecognizer,
     owner: Owner,
@@ -321,9 +353,11 @@ impl DeviceSession {
         } else {
             settings.scroll.filter(|_| scrolling_available)
         }
-        .filter(|a| a.fingers != context.action.fingers);
+        .filter(|a| a.fingers != context.action.fingers)
+        .map(|a| settings.routes_for(scrolling_available, a.fingers));
         Self {
             recognizer: swipe_recognizer(context.action.fingers),
+            routes: settings.routes_for(scrolling_available, context.action.fingers),
             sample: Motion {
                 session: context.session,
                 total_x: 0.0,
@@ -381,7 +415,7 @@ impl DeviceSession {
         if self.blocked || self.owner == Owner::System {
             return;
         }
-        if self.active && count < self.recognizer.required_finger_count {
+        if self.owner == Owner::Wm && count < self.recognizer.required_finger_count {
             // Real lifts are staggered. Freeze the last complete frame while
             // waiting briefly for full lift; persistent topology changes cancel.
             self.blocked = true;
@@ -395,8 +429,10 @@ impl DeviceSession {
                 return;
             }
             self.max_contacts = count;
-            if let Some(action) = self.alternate.filter(|a| a.fingers == count) {
+            if let Some(routes) = self.alternate.filter(|r| r.first().unwrap().fingers == count) {
                 self.alternate = None;
+                self.routes = routes;
+                let action = routes.first().unwrap();
                 self.context.action = action;
                 self.recognizer = swipe_recognizer(action.fingers);
             }
@@ -408,20 +444,39 @@ impl DeviceSession {
         let Some(event) = self.recognizer.process(contacts) else {
             return;
         };
-        let c = &self.context;
         if let GestureEvent::Swipe(swipe) = event {
             match swipe.phase {
                 GesturePhase::Began | GesturePhase::Changed => {
                     let x = f64::from(swipe.translation.x);
-                    let y = f64::from(swipe.translation.y).abs();
+                    let y = f64::from(swipe.translation.y);
                     if self.owner == Owner::Undecided {
-                        if y > c.action.tolerance || (y >= VERTICAL_INTENT_DISTANCE && y >= x.abs())
-                        {
-                            self.owner = Owner::System;
-                        } else if y >= x.abs() {
-                            // Like the old armed swipe handler, allow initial
-                            // placement noise to resolve into horizontal intent.
+                        let distance = x.abs().max(y.abs());
+                        if self.routes.vertical.is_some_and(|action| {
+                            distance < VERTICAL_INTENT_DISTANCE.min(action.threshold)
+                        }) {
                             return;
+                        }
+                        let axis = if x.abs() > y.abs() {
+                            SwipeAxis::Horizontal
+                        } else if y.abs() > x.abs() {
+                            SwipeAxis::Vertical
+                        } else {
+                            return;
+                        };
+                        let Some(action) = self.routes.action(axis) else {
+                            if distance >= VERTICAL_INTENT_DISTANCE {
+                                self.owner = Owner::System;
+                            }
+                            return;
+                        };
+                        let perpendicular = match axis {
+                            SwipeAxis::Horizontal => y,
+                            SwipeAxis::Vertical => x,
+                        };
+                        self.context.action = action;
+                        let c = &self.context;
+                        if perpendicular.abs() > action.tolerance {
+                            self.owner = Owner::System;
                         } else if control.claim(c) {
                             self.owner = Owner::Wm;
                             tracing::debug!(session = c.session, space = ?c.space, scrolling = c.action.scrolling, fingers = c.action.fingers, "gesture claimed");
@@ -442,6 +497,7 @@ impl DeviceSession {
                     if self.owner != Owner::Wm {
                         return;
                     }
+                    let c = &self.context;
                     let total_x = (x - if c.action.scrolling {
                         self.claim_x
                     } else {
@@ -456,13 +512,19 @@ impl DeviceSession {
                     self.sample.timestamp = time;
                     if c.action.scrolling {
                         control.publish(self.sample);
-                    } else if x.abs() >= c.action.threshold {
-                        self.blocked = true;
-                        tx.send(Event::Gesture(Lifecycle::Workspace {
-                            context: c.clone(),
-                            next: (x < 0.0) != c.action.invert,
-                            control: control.clone(),
-                        }));
+                    } else {
+                        let travel = match c.action.axis {
+                            SwipeAxis::Horizontal => -x,
+                            SwipeAxis::Vertical => y,
+                        };
+                        if travel.abs() >= c.action.threshold {
+                            self.blocked = true;
+                            tx.send(Event::Gesture(Lifecycle::Workspace {
+                                context: c.clone(),
+                                next: (travel > 0.0) != c.action.invert,
+                                control: control.clone(),
+                            }));
+                        }
                     }
                 }
                 GesturePhase::Ended(reason) => self.end(
@@ -927,24 +989,35 @@ mod tests {
     fn setup_settings(scrolling: bool, workspace_fingers: usize, invert: bool) -> Fixture {
         let mut config = Config::default();
         config.settings.gestures.enabled = true;
+        config.settings.gestures.swipe_axis = SwipeAxis::Horizontal;
         config.settings.gestures.fingers = workspace_fingers;
         config.settings.gestures.invert_horizontal_swipe = invert;
         config.settings.gestures.distance_pct = 0.08;
         config.settings.gestures.haptics_enabled = false;
         config.settings.layout.scrolling.gestures.enabled = scrolling;
         config.settings.layout.scrolling.gestures.fingers = 3;
+        setup_config(config, scrolling, if scrolling { 3 } else { workspace_fingers })
+    }
+
+    fn setup_vertical(scrolling: bool, invert: bool) -> Fixture {
+        let mut config = Config::default();
+        config.settings.gestures.enabled = true;
+        config.settings.gestures.swipe_axis = SwipeAxis::Vertical;
+        config.settings.gestures.invert_horizontal_swipe = !invert;
+        config.settings.gestures.invert_vertical_swipe = invert;
+        config.settings.layout.scrolling.gestures.enabled = scrolling;
+        setup_config(config, scrolling, 3)
+    }
+
+    fn setup_config(config: Config, scrolling_available: bool, fingers: usize) -> Fixture {
         let settings = Settings::new(&config);
         let control = Control::new(&config);
-        let scrolling_available = scrolling;
         control.configure(settings, true, Vec::new());
         let c = Context::new(
             1,
             0,
             SpaceId::new(10),
-            (
-                scrolling_available,
-                if scrolling { 3 } else { workspace_fingers },
-            ),
+            (scrolling_available, fingers),
             settings,
             Duration::ZERO,
         )
@@ -957,6 +1030,198 @@ mod tests {
             rx,
         )
     }
+
+    #[test]
+    fn vertical_workspace_directions_and_inversion_fire_once_after_threshold() {
+        for scrolling in [false, true] {
+            for invert in [false, true] {
+                for up in [false, true] {
+                    let (mut s, c, tx, mut rx) = setup_vertical(scrolling, invert);
+                    let sign = if up { 1.0 } else { -1.0 };
+                    for (i, travel) in [0.0, 0.01, 0.05, 0.1, 0.2, -0.2].into_iter().enumerate() {
+                        s.frame(
+                            &frame(3, 0.5, 0.5 + sign * travel),
+                            3,
+                            Duration::from_millis(i as u64 * 10),
+                            &tx,
+                            &c,
+                        );
+                        if i < 3 {
+                            assert!(rx.try_recv().is_err());
+                        }
+                    }
+                    let Event::Gesture(Lifecycle::Workspace { next, context, .. }) =
+                        rx.try_recv().unwrap().1
+                    else {
+                        panic!("vertical workspace action");
+                    };
+                    assert_eq!(next, up != invert);
+                    assert_eq!(context.space, SpaceId::new(10));
+                    assert!(!context.action.scrolling);
+                    assert!(rx.try_recv().is_err());
+                    assert!(c.latest(1).is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn vertical_workspace_respects_thresholds_below_intent_floor() {
+        for scrolling in [false, true] {
+            for threshold in [0.01, 0.02] {
+                let mut config = Config::default();
+                config.settings.gestures.enabled = true;
+                config.settings.gestures.swipe_axis = SwipeAxis::Vertical;
+                config.settings.gestures.distance_pct = threshold;
+                config.settings.layout.scrolling.gestures.enabled = scrolling;
+                let (mut s, c, tx, mut rx) = setup_config(config, scrolling, 3);
+                for (i, travel) in [0.0, threshold / 2.0].into_iter().enumerate() {
+                    s.frame(
+                        &frame(3, 0.5, 0.5 + travel as f32),
+                        3,
+                        Duration::from_millis(i as u64 * 10),
+                        &tx,
+                        &c,
+                    );
+                    assert!(rx.try_recv().is_err());
+                }
+                s.frame(
+                    &frame(3, 0.5, 0.5 + threshold as f32 + 0.001),
+                    3,
+                    Duration::from_millis(20),
+                    &tx,
+                    &c,
+                );
+                assert!(matches!(
+                    rx.try_recv().expect("configured vertical threshold must commit").1,
+                    Event::Gesture(Lifecycle::Workspace { next: true, .. })
+                ));
+                s.frame(&frame(3, 0.5, 0.8), 3, Duration::from_millis(30), &tx, &c);
+                assert!(rx.try_recv().is_err());
+                assert!(c.latest(1).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn same_finger_count_routes_lock_before_cross_axis_movement() {
+        for vertical in [false, true] {
+            let (mut s, c, tx, mut rx) = setup_vertical(true, false);
+            for (i, (along, across)) in
+                [(0.0, 0.0), (0.04, 0.001), (0.05, 0.3), (0.1, 0.3)].into_iter().enumerate()
+            {
+                let (x, y) = if vertical {
+                    (across, along)
+                } else {
+                    (along, across)
+                };
+                s.frame(
+                    &frame(3, 0.5 + x, 0.5 + y),
+                    3,
+                    Duration::from_millis(i as u64 * 10),
+                    &tx,
+                    &c,
+                );
+            }
+            let event = rx.try_recv().unwrap().1;
+            if vertical {
+                assert!(matches!(
+                    event,
+                    Event::Gesture(Lifecycle::Workspace { next: true, .. })
+                ));
+                assert!(c.latest(1).is_none());
+            } else {
+                assert!(matches!(event, Event::Gesture(Lifecycle::Begin { .. })));
+                assert!((c.latest(1).unwrap().total_x - 0.24).abs() < 1e-6);
+            }
+            assert!(rx.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn vertical_workspace_ignores_placement_noise_and_diagonal_ties() {
+        let (mut s, c, tx, mut rx) = setup_vertical(true, false);
+        for (i, (x, y)) in [(0.5, 0.5), (0.505, 0.501), (0.5625, 0.5625)].into_iter().enumerate() {
+            let mut contacts = frame(3, x, y);
+            for contact in &mut contacts {
+                contact.normalized.position.x = x;
+            }
+            s.frame(&contacts, 3, Duration::from_millis(i as u64 * 10), &tx, &c);
+            assert!(rx.try_recv().is_err());
+            assert!(c.latest(1).is_none());
+        }
+        let mut contacts = frame(3, 0.6, 0.5625);
+        for contact in &mut contacts {
+            contact.normalized.position.x = 0.6;
+        }
+        s.frame(&contacts, 3, Duration::from_millis(30), &tx, &c);
+        assert!(matches!(
+            rx.try_recv().unwrap().1,
+            Event::Gesture(Lifecycle::Begin { .. })
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn four_finger_vertical_gestures_and_later_three_fingers_stay_native() {
+        let (mut s, c, tx, mut rx) = setup_vertical(true, false);
+        for (i, (count, y)) in
+            [(3, 0.5), (4, 0.5), (4, 0.7), (3, 0.8), (3, 0.2)].into_iter().enumerate()
+        {
+            s.frame(
+                &frame(count, 0.5, y),
+                count,
+                Duration::from_millis(i as u64 * 10),
+                &tx,
+                &c,
+            );
+        }
+        assert!(rx.try_recv().is_err());
+        assert!(c.latest(1).is_none());
+        assert_eq!(s.owner, Owner::System);
+    }
+
+    #[test]
+    fn disabled_vertical_workspace_and_reset_do_not_rearm_as_horizontal_scrolls() {
+        for reset in [false, true] {
+            let mut config = Config::default();
+            config.settings.gestures.swipe_axis = SwipeAxis::Vertical;
+            config.settings.gestures.enabled = reset;
+            config.settings.layout.scrolling.gestures.enabled = true;
+            let (mut s, c, tx, mut rx) = setup_config(config, true, 3);
+            s.frame(&frame(3, 0.5, 0.5), 3, Duration::ZERO, &tx, &c);
+            if reset {
+                c.reset(&tx);
+                assert!(matches!(
+                    rx.try_recv().unwrap().1,
+                    Event::Gesture(Lifecycle::Reset)
+                ));
+            }
+            s.frame(&frame(3, 0.5, 0.6), 3, Duration::from_millis(10), &tx, &c);
+            s.frame(&frame(3, 0.8, 0.6), 3, Duration::from_millis(20), &tx, &c);
+            assert!(rx.try_recv().is_err());
+            assert!(c.latest(1).is_none());
+        }
+    }
+
+    #[test]
+    fn vertical_workspace_partial_lift_cannot_commit_without_full_lift() {
+        let (mut s, c, tx, mut rx) = setup_vertical(true, false);
+        for (i, (count, y)) in
+            [(3, 0.5), (3, 0.54), (2, 0.55), (3, 0.7), (0, 0.7)].into_iter().enumerate()
+        {
+            s.frame(
+                &frame(count, 0.5, y),
+                count,
+                Duration::from_millis(i as u64 * 10),
+                &tx,
+                &c,
+            );
+        }
+        assert!(rx.try_recv().is_err());
+        assert!(c.latest(1).is_none());
+    }
+
     #[test]
     fn continuous_motion_commits_once_and_topology_requires_full_lift() {
         let (mut s, c, tx, mut rx) = setup(true);

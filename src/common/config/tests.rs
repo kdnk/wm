@@ -12,6 +12,27 @@ use crate::layout_engine::{LayoutCommand, ResizeOrientation};
 use crate::sys::hotkey::Modifiers;
 
 #[test]
+fn workspace_swipe_axis_defaults_to_horizontal_and_round_trips() {
+    let defaults: GestureSettings = toml::from_str("").unwrap();
+    assert_eq!(defaults.swipe_axis, SwipeAxis::Horizontal);
+    assert!(!defaults.invert_vertical_swipe);
+    for (axis, expected) in [
+        ("horizontal", SwipeAxis::Horizontal),
+        ("vertical", SwipeAxis::Vertical),
+    ] {
+        let settings: GestureSettings = toml::from_str(&format!(
+            "enabled = true\nswipe_axis = \"{axis}\"\ninvert_vertical_swipe = true"
+        ))
+        .unwrap();
+        assert_eq!(settings.swipe_axis, expected);
+        assert!(settings.invert_vertical_swipe);
+        let encoded = toml::to_string(&settings).unwrap();
+        assert_eq!(toml::from_str::<GestureSettings>(&encoded).unwrap(), settings);
+    }
+    assert!(toml::from_str::<GestureSettings>("swipe_axis = \"diagonal\"").is_err());
+}
+
+#[test]
 fn config_read_rejects_semantically_invalid_files() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");

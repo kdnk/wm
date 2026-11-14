@@ -197,21 +197,27 @@ spacing = 0.0
 
 # Trackpad gestures
 [settings.gestures]
-# Enable horizontal swipes to switch virtual workspaces
+# Enable swipes to switch virtual workspaces
 enabled = false
+# Use up for next workspace and down for previous, alongside horizontal column scrolling.
+# Set macOS Mission Control and App Exposé gestures to four fingers.
+# Use "horizontal" to retain horizontal workspace swipes.
+swipe_axis = "vertical"
 # If true, Wm consumes horizontal swipes handled by its trackpad gesture handlers
 # so macOS and the foreground app do not also handle them
 consume_dock_swipe = true
 # Invert horizontal direction (swap next/prev)
 invert_horizontal_swipe = false
-# Maximum vertical travel allowed for the horizontal swipe to register.
+# Invert vertical direction (swap up/down)
+invert_vertical_swipe = false
+# Maximum travel perpendicular to the selected swipe axis before recognition.
 # Accepts normalized fraction (0..1) or percent (0..100). Example: 0.4 or 40.0
 swipe_vertical_tolerance = 0.4
 # Skip empty workspaces when swiping
 skip_empty = true
 # Number of fingers required for swipe
 fingers = 3
-# Normalized horizontal distance (0..1) to trigger swipe for NSTouch-based detection
+# Normalized distance (0..1) along the selected axis required to trigger a swipe
 distance_pct = 0.08
 # Haptic feedback on swipe
 haptics_enabled = true
