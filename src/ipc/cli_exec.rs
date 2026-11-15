@@ -302,3 +302,46 @@ pub(crate) fn execute_serialized_cli_subscription(
     let exec = DefaultCliExecutor::new();
     let _ = exec.execute_serialized(event, event_json, subscription);
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_nul_event_values_without_panicking() {
+        let directory = tempfile::tempdir().unwrap();
+        let subscription = CliSubscription {
+            command: directory.path().join("missing-command").to_str().unwrap().into(),
+            args: Vec::new(),
+        };
+        let executor = DefaultCliExecutor::new();
+        for (workspace_name, new_title, variable) in [
+            ("Main", "private\0title", "WM_WINDOW_TITLE"),
+            ("private\0workspace", "Title", "WM_WORKSPACE_NAME"),
+        ] {
+            let event = BroadcastEvent::WindowTitleChanged {
+                window_id: wm_protocol::WindowId::new(123, 1).unwrap(),
+                workspace_id: wm_protocol::WorkspaceId { idx: 1, version: 1 },
+                workspace_index: Some(0),
+                workspace_name: workspace_name.into(),
+                previous_title: "Old title".into(),
+                new_title: new_title.into(),
+                space_id: 1,
+                display_uuid: None,
+            };
+            let error = executor.execute(&event, &subscription).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(error.to_string().contains(variable));
+            assert!(!error.to_string().contains("private"));
+            execute_cli_subscription(&event, &subscription);
+            execute_serialized_cli_subscription(
+                &event,
+                &serde_json::to_string(&event).unwrap(),
+                &subscription,
+            );
+        }
+        let error = executor
+            .execute(&BroadcastEvent::ConfigChanged { revision: 1 }, &subscription)
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    }
+}
