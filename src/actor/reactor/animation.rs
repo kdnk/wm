@@ -498,7 +498,7 @@ impl CameraAnimation {
         let camera_velocity = self.presentation.position_velocity(now).1;
         for window in &mut self.windows {
             window.motion = None;
-            if self.animate && !window.fixed {
+            if self.animate {
                 let base = self.presentation.frame_at_offset(
                     window.to,
                     window.fixed,
@@ -506,7 +506,9 @@ impl CameraAnimation {
                     self.presentation.rendered_offset(),
                 );
                 let mut velocity = window.velocity;
-                velocity.origin.x += camera_velocity;
+                if !window.fixed {
+                    velocity.origin.x += camera_velocity;
+                }
                 let residual = subtract_frame(window.frame, base);
                 if !residual.same_as(CGRect::ZERO) || !velocity.is_zero() {
                     window.motion = Some(FrameSpring::new(residual, CGRect::ZERO, velocity));
@@ -1979,6 +1981,173 @@ mod tests {
             store: WindowTxStore::new(),
             cadence: FrameCadence::DisplayLinked,
             bound: None,
+        }
+    }
+
+    fn fullscreen_camera(handle: &AppThreadHandle, within_gaps: bool) -> CameraAnimation {
+        use crate::common::config::{GapSettings, OuterGaps, ScrollingLayoutSettings};
+        use crate::layout_engine::systems::ScrollingLayoutSystem;
+
+        let mut system = ScrollingLayoutSystem::new(&ScrollingLayoutSettings {
+            column_width_ratio: 0.5,
+            preserve_window_sizes: false,
+            alignment: crate::common::config::ScrollingAlignment::Left,
+            ..Default::default()
+        });
+        let layout = system.create_layout();
+        let wid = WindowId::new(1, 1);
+        system.add_window_after_selection(layout, wid);
+        system.prepare_layout(
+            layout,
+            rect(0., 0., 1000., 800.),
+            &Default::default(),
+            &GapSettings {
+                outer: OuterGaps {
+                    top: 20.,
+                    right: 20.,
+                    bottom: 20.,
+                    left: 20.,
+                },
+                ..Default::default()
+            },
+        );
+        let (presentation, frames) = system.presentation(layout).unwrap();
+        let tiled = presentation.target_frame(frames[0].1, false, 1.);
+        if within_gaps {
+            system.toggle_fullscreen_within_gaps_of_selection(layout);
+        } else {
+            system.toggle_fullscreen_of_selection(layout);
+        }
+        let (presentation, frames) = system.presentation(layout).unwrap();
+        assert!(frames[0].2);
+        let mut camera = motion_camera(handle, tiled, frames[0].1);
+        camera.presentation = presentation;
+        camera.identity.layout = layout;
+        camera.windows[0].fixed = frames[0].2;
+        camera
+    }
+
+    #[test]
+    fn fullscreen_motion_enters_from_the_published_frame_and_finishes_exactly() {
+        for within_gaps in [false, true] {
+            let (handle, mut rx) = AppThreadHandle::channel();
+            let mut camera = fullscreen_camera(&handle, within_gaps);
+            let from = camera.windows[0].frame;
+            let target = if within_gaps {
+                rect(20., 20., 960., 760.)
+            } else {
+                rect(0., 0., 1000., 800.)
+            };
+            assert_eq!(camera.windows[0].to, target);
+            camera.replace(None);
+            camera.begin();
+            collect_requests(&mut rx);
+            let start = camera.geometry_started;
+            camera.sample(start);
+            assert!(matches!(collect_requests(&mut rx)[0],
+                Observed::Frame { frame, .. } if frame == from));
+            camera.sample(start + Duration::from_millis(50));
+            let requests = collect_requests(&mut rx);
+            let Observed::Frame { frame, set_size, .. } = requests[0] else {
+                panic!("frame")
+            };
+            assert!(set_size);
+            assert!(frame.size.width > from.size.width && frame.size.width < target.size.width);
+            if !within_gaps {
+                assert!(frame.origin.y < from.origin.y && frame.origin.y > target.origin.y);
+                assert!(
+                    frame.size.height > from.size.height && frame.size.height < target.size.height
+                );
+            }
+            camera.sample(start + camera.duration);
+            let requests = collect_requests(&mut rx);
+            assert_animation_frame(&requests[0], camera.windows[0].wid, target);
+            assert!(requests.iter().any(|request| matches!(
+                request,
+                Observed::Request(Request::EndWindowAnimation(..))
+            )));
+            assert!(!camera.active);
+        }
+    }
+
+    #[test]
+    fn fullscreen_motion_reverses_without_losing_screen_velocity() {
+        for within_gaps in [false, true] {
+            let (handle, mut rx) = AppThreadHandle::channel();
+            let fullscreen = fullscreen_camera(&handle, within_gaps);
+            let tiled = fullscreen.windows[0].frame;
+            let mut previous = motion_camera(&handle, tiled, rect(100., 50., 600., 700.));
+            previous.presentation.retarget(-500., 1200., Instant::now(), previous.duration);
+            previous.replace(None);
+            previous.begin();
+            previous.sample(previous.geometry_started + Duration::from_millis(50));
+            collect_requests(&mut rx);
+            for fixed in [true, false, true] {
+                let published = previous.windows[0].frame;
+                let velocity = previous.windows[0].velocity;
+                if !fixed {
+                    previous.presentation.finish();
+                }
+                let mut next = if fixed {
+                    fullscreen_camera(&handle, within_gaps)
+                } else {
+                    motion_camera(&handle, tiled, tiled)
+                };
+                next.replace(Some(previous));
+                next.begin();
+                let start = next.geometry_started;
+                next.sample(start);
+                assert_eq!(next.windows[0].frame, published);
+                assert!((next.windows[0].velocity.origin.x - velocity.origin.x).abs() < 1e-6);
+                assert!((next.windows[0].velocity.size.width - velocity.size.width).abs() < 1e-6);
+                next.sample(start + Duration::from_nanos(100));
+                let frame = next.windows[0].frame;
+                assert!(
+                    ((frame.origin.x - published.origin.x) * 1e7 - velocity.origin.x).abs() < 0.2
+                );
+                assert!(
+                    ((frame.size.width - published.size.width) * 1e7 - velocity.size.width).abs()
+                        < 0.5
+                );
+                next.sample(start + Duration::from_millis(40));
+                previous = next;
+            }
+            previous.sample(previous.geometry_started + Duration::from_secs(2));
+            assert_eq!(previous.windows[0].frame, previous.windows[0].to);
+            assert!(!previous.active);
+            assert!(!previous.windows[0].leased);
+        }
+    }
+
+    #[test]
+    fn fullscreen_motion_stays_screen_anchored_and_honors_immediate_updates() {
+        for within_gaps in [false, true] {
+            let (handle, mut rx) = AppThreadHandle::channel();
+            let mut camera = fullscreen_camera(&handle, within_gaps);
+            let target = camera.windows[0].to;
+            camera.windows[0].frame = target;
+            camera.presentation.retarget(-500., 1200., Instant::now(), camera.duration);
+            camera.replace(None);
+            camera.begin();
+            for ms in [0, 30, 100, 300, 1000] {
+                camera.sample(camera.geometry_started + Duration::from_millis(ms));
+                assert_eq!(camera.windows[0].frame, target);
+            }
+            collect_requests(&mut rx);
+            for disabled in [false, true] {
+                let mut camera = fullscreen_camera(&handle, within_gaps);
+                if disabled {
+                    camera.animate = false;
+                } else {
+                    camera.duration = Duration::ZERO;
+                }
+                camera.replace(None);
+                camera.begin();
+                camera.sample(camera.geometry_started);
+                assert_eq!(camera.windows[0].frame, target);
+                assert!(!camera.active);
+                assert!(!camera.windows[0].leased);
+            }
         }
     }
 

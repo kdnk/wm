@@ -185,6 +185,33 @@ def run(args):
             focus(targets[index])
             time.sleep(0.7)
 
+        if args.fullscreen_only:
+            prepare(1)
+            title = targets[1]["title"]
+            for command_name in ["toggle-fullscreen", "toggle-fullscreen-within-gaps"]:
+                for direction in ["enter", "exit"]:
+                    before = next(w for w in windows() if w["title"] == title)["frame"]["size"]["width"]
+                    scene(command_name + "-" + direction,
+                          lambda: execute("window", command_name))
+                    after = next(w for w in windows() if w["title"] == title)["frame"]["size"]["width"]
+                    assert abs(after - before) > 10, "Fullscreen fixture must change width"
+                    widths = [sample["frames"][title][2]
+                              for sample in report["scenes"][-1]["samples"]
+                              if sample["kind"] == "sample" and title in sample["frames"]]
+                    assert any(min(before, after) + 1 < width < max(before, after) - 1
+                               for width in widths), (
+                        f"{command_name} {direction} snapped from {before} to {after}")
+                before_reverse = next(w for w in windows() if w["title"] == title)["frame"]
+
+                def reverse_fullscreen():
+                    execute("window", command_name)
+                    time.sleep(0.045)
+                    execute("window", command_name)
+                scene(command_name + "-reverse", reverse_fullscreen)
+                assert next(w for w in windows() if w["title"] == title)["frame"] == before_reverse, (
+                    f"{command_name} reversal did not restore the tiled frame")
+            return
+
         prepare(0)
         scene("short-pan", lambda: focus(targets[1]))
         prepare(0)
@@ -284,6 +311,8 @@ if __name__ == "__main__":
     parser.add_argument("--qt-python", type=Path, default=Path("/Applications/Anki.app/Contents/Frameworks/Python.framework/Versions/3.13/bin/python3.13"))
     parser.add_argument("--qt-packages", type=Path, default=Path("/Applications/Anki.app/Contents/Resources/app_packages"))
     parser.add_argument("--expect-cursor-retention", action="store_true")
+    parser.add_argument("--fullscreen-only", action="store_true",
+                        help="Record fullscreen entry, exit, and interrupted toggles")
     parser.add_argument("--animation-fps", type=float, default=0.0,
                         help="Animation FPS cap; 0 follows the display refresh rate")
     run(parser.parse_args())
