@@ -194,6 +194,225 @@ fn menu_column_icon_click_warps_to_revealed_window_and_repeated_click_still_warp
 }
 
 #[test]
+fn menu_focus_transition_ignores_passing_windows_until_motion_finishes() {
+    let (_apps, mut reactor, _space) = active_menu_windows(LayoutMode::Scrolling, true);
+    let target = WindowId::new(1, 1);
+    let passing = WindowId::new(1, 2);
+    let (animation_tx, animation_rx) = super::animation::AnimationSender::channel();
+    reactor.animation_tx = Some(animation_tx);
+    let (input_tx, _input_rx) = crate::actor::channel();
+    reactor.communication_manager.input_tx = Some(input_tx);
+    let (raise_tx, mut raise_rx) = crate::actor::channel();
+    reactor.communication_manager.raise_manager_tx = raise_tx;
+
+    reactor.handle_event(Event::MenuBarFocusWindow(target));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        Some(target)
+    );
+    let mut camera = animation_rx
+        .commands
+        .try_iter()
+        .find_map(|message| match message {
+            super::animation::Message::Camera(camera) => Some(camera),
+            _ => None,
+        })
+        .expect("menu focus must animate the viewport");
+    while raise_rx.try_recv().is_ok() {}
+    reactor.handle_loop_event(Event::MouseMoved(reactor.test_window_server_id(passing)));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        Some(target),
+        "motion over a passing window must not replace the menu destination"
+    );
+    assert!(
+        raise_rx.try_recv().is_err(),
+        "passing windows must not request focus"
+    );
+
+    camera.sample(Instant::now() + Duration::from_secs(1));
+    reactor.handle_loop_event(Event::CameraFinished);
+    reactor.handle_loop_event(Event::MouseMoved(reactor.test_window_server_id(passing)));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        Some(passing),
+        "fresh motion must resume hover after the presentation completes"
+    );
+}
+
+#[test]
+fn menu_focus_transition_rejects_motion_queued_before_completion() {
+    let (_apps, mut reactor, _space) = active_menu_windows(LayoutMode::Scrolling, true);
+    let target = WindowId::new(1, 1);
+    let passing = WindowId::new(1, 2);
+    let (animation_tx, animation_rx) = super::animation::AnimationSender::channel();
+    reactor.animation_tx = Some(animation_tx);
+    let (input_tx, _input_rx) = crate::actor::channel();
+    reactor.communication_manager.input_tx = Some(input_tx);
+    let (raise_tx, mut raise_rx) = crate::actor::channel();
+    reactor.communication_manager.raise_manager_tx = raise_tx;
+    reactor.handle_event(Event::MenuBarFocusWindow(target));
+    let mut camera = animation_rx
+        .commands
+        .try_iter()
+        .find_map(|message| match message {
+            super::animation::Message::Camera(camera) => Some(camera),
+            _ => None,
+        })
+        .unwrap();
+    while raise_rx.try_recv().is_ok() {}
+    let publisher = MouseFocusPublisher::default();
+    let (sender, mut receiver) = crate::actor::channel();
+    publisher
+        .publish(&sender, crate::sys::event::hid_event_timestamp_now())
+        .unwrap();
+    let reactor = Rc::new(RefCell::new(reactor));
+    Reactor::handle_thread_event(&reactor, receiver.try_recv().unwrap().1);
+    assert_eq!(
+        publisher.take_latest(),
+        None,
+        "motion during travel must be consumed"
+    );
+
+    publisher
+        .publish(&sender, crate::sys::event::hid_event_timestamp_now())
+        .unwrap();
+    camera.sample(Instant::now() + Duration::from_secs(1));
+    Reactor::handle_thread_event(&reactor, Event::CameraFinished);
+    window_server::set_window_under_cursor_override(Some(Some(
+        reactor.borrow().test_window_server_id(passing),
+    )));
+    Reactor::handle_thread_event(&reactor, receiver.try_recv().unwrap().1);
+    assert_eq!(
+        reactor.borrow().layout_manager.layout_engine.focused_window(),
+        Some(target)
+    );
+    assert!(raise_rx.try_recv().is_err());
+
+    let after_completion = reactor.borrow().mouse_focus_warp_requested_at.unwrap() + 1;
+    publisher.publish(&sender, after_completion).unwrap();
+    Reactor::handle_thread_event(&reactor, receiver.try_recv().unwrap().1);
+    window_server::set_window_under_cursor_override(None);
+    assert_eq!(
+        reactor.borrow().layout_manager.layout_engine.focused_window(),
+        Some(passing)
+    );
+}
+
+#[test]
+fn menu_focus_transition_survives_retarget_and_releases_on_cancellation() {
+    let (_apps, mut reactor, space) = active_menu_windows(LayoutMode::Scrolling, true);
+    let target = WindowId::new(1, 1);
+    let retarget = WindowId::new(1, 3);
+    let passing = WindowId::new(1, 2);
+    let (animation_tx, animation_rx) = super::animation::AnimationSender::channel();
+    reactor.animation_tx = Some(animation_tx);
+    let (input_tx, mut input_rx) = crate::actor::channel();
+    reactor.communication_manager.input_tx = Some(input_tx);
+    let (raise_tx, mut raise_rx) = crate::actor::channel();
+    reactor.communication_manager.raise_manager_tx = raise_tx;
+    let old_hover = reactor.mouse_raise_token.clone();
+    reactor.handle_event(Event::MenuBarFocusWindow(target));
+    assert!(
+        old_hover.is_cancelled(),
+        "focus travel must revoke older hover work"
+    );
+    let mut old_camera = animation_rx
+        .commands
+        .try_iter()
+        .find_map(|message| match message {
+            super::animation::Message::Camera(camera) => Some(camera),
+            _ => None,
+        })
+        .unwrap();
+    reactor.handle_event(Event::MenuBarFocusWindow(retarget));
+    old_camera.sample(Instant::now() + Duration::from_secs(1));
+    reactor.handle_loop_event(Event::CameraFinished);
+    while raise_rx.try_recv().is_ok() {}
+    reactor.handle_loop_event(Event::MouseMoved(reactor.test_window_server_id(passing)));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        Some(retarget)
+    );
+    assert!(
+        raise_rx.try_recv().is_err(),
+        "old completion cannot unlock a replacement camera"
+    );
+    assert!(reactor.presentations_hold_hover());
+    assert!(
+        std::iter::from_fn(|| input_rx.try_recv().ok()).any(|(_, request)| {
+            matches!(request, input::Request::SetFocusFollowsMouseEnabled(false))
+        }),
+        "focus travel must pause hover sampling"
+    );
+
+    reactor.stop_camera(space);
+    assert!(!reactor.presentations_hold_hover());
+    assert!(
+        std::iter::from_fn(|| input_rx.try_recv().ok()).any(|(_, request)| {
+            matches!(request, input::Request::SetFocusFollowsMouseEnabled(true))
+        }),
+        "cancelling the presentation must restore hover sampling"
+    );
+    reactor.handle_loop_event(Event::MouseMoved(reactor.test_window_server_id(passing)));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        Some(passing)
+    );
+}
+
+#[test]
+fn menu_focus_transition_has_no_cooldown_when_animation_is_disabled() {
+    for reduce_motion in [false, true] {
+        let (_apps, mut reactor, _space) =
+            active_menu_windows(LayoutMode::Scrolling, reduce_motion);
+        reactor.reduce_motion = reduce_motion;
+        let target = WindowId::new(1, 1);
+        let passing = WindowId::new(1, 2);
+        let (animation_tx, animation_rx) = super::animation::AnimationSender::channel();
+        reactor.animation_tx = Some(animation_tx);
+        let (input_tx, _input_rx) = crate::actor::channel();
+        reactor.communication_manager.input_tx = Some(input_tx);
+        reactor.handle_event(Event::MenuBarFocusWindow(target));
+        let mut camera = animation_rx
+            .commands
+            .try_iter()
+            .find_map(|message| match message {
+                super::animation::Message::Camera(camera) => Some(camera),
+                _ => None,
+            })
+            .unwrap();
+        camera.sample(Instant::now());
+        reactor.handle_loop_event(Event::CameraFinished);
+        assert!(!reactor.presentations_hold_hover());
+        reactor.handle_loop_event(Event::MouseMoved(reactor.test_window_server_id(passing)));
+        assert_eq!(
+            reactor.layout_manager.layout_engine.focused_window(),
+            Some(passing)
+        );
+    }
+}
+
+#[test]
+fn pointer_driven_focus_does_not_hold_hover_during_its_animation() {
+    let (_apps, mut reactor, _space) = active_menu_windows(LayoutMode::Scrolling, true);
+    let target = WindowId::new(1, 1);
+    reactor.config.settings.mouse_follows_focus = true;
+    let (animation_tx, _animation_rx) = super::animation::AnimationSender::channel();
+    reactor.animation_tx = Some(animation_tx);
+    let (input_tx, mut input_rx) = crate::actor::channel();
+    reactor.communication_manager.input_tx = Some(input_tx);
+    reactor.handle_loop_event(Event::MouseMoved(reactor.test_window_server_id(target)));
+    assert!(!reactor.presentations_hold_hover());
+    assert!(
+        !std::iter::from_fn(|| input_rx.try_recv().ok()).any(|(_, request)| {
+            matches!(request, input::Request::SetFocusFollowsMouseEnabled(false))
+        }),
+        "ordinary pointer focus must remain responsive"
+    );
+}
+
+#[test]
 fn menu_column_stale_icon_click_does_not_focus_or_warp() {
     for hidden_workspace in [false, true] {
         let (_apps, mut reactor, _space) = active_menu_windows(LayoutMode::Scrolling, false);

@@ -1036,7 +1036,10 @@ fn scrolling_focus_warps_to_revealed_window() {
             if enabled { vec![center] } else { vec![] },
             "ratio={ratio}, animated={animated}, enabled={enabled}"
         );
-        assert!(raise_rx.try_recv().is_err());
+        assert!(
+            std::iter::from_fn(|| raise_rx.try_recv().ok())
+                .all(|(_, event)| matches!(event, raise_manager::Event::MouseRaisesCancelled))
+        );
     }
 }
 

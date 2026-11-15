@@ -85,6 +85,9 @@ def run(args):
         "settings.layout.scrolling.preset_column_widths": [0.5, 1.0],
         "settings.drag_drop.modifier": "alt",
     }
+    if args.focus_transition_check:
+        overrides["settings.mouse_follows_focus"] = True
+        overrides["settings.animation_duration"] = 0.8
     if args.settling_only:
         overrides["settings.layout.scrolling.column_width_ratio"] = 0.5
     original_settings = {}
@@ -139,7 +142,8 @@ def run(args):
         return reply()
 
     def windows():
-        return sorted((w for w in query("windows") if w["id"]["pid"] == fixture.pid),
+        return sorted((w for w in query("windows") if w["id"]["pid"] == fixture.pid
+                       and w["title"].startswith(report["label"])),
                       key=lambda w: w["title"])
 
     def scene(name, action):
@@ -199,6 +203,52 @@ def run(args):
         def prepare(index):
             focus(targets[index])
             time.sleep(0.7)
+
+        if args.focus_transition_check:
+            prepare(0)
+            time.sleep(0.4)
+            setting("settings.focus_follows_mouse", True)
+            target = targets[3]
+
+            def move_during_focus():
+                focus(target)
+                until = time.monotonic() + 0.4
+                index = 0
+                while time.monotonic() < until:
+                    point = [screen_left + display["frame"]["size"]["width"] * 0.2 + index % 2,
+                             display["frame"]["origin"]["y"] + display["frame"]["size"]["height"] * 0.5]
+                    pointer.mouse(5, point)
+                    index += 1
+                    time.sleep(0.012)
+                return {"destination": target["title"], "mouse_events": index}
+
+            record = scene("focus-transition-hover-hold", move_during_focus)
+            samples = [sample for sample in record["samples"] if sample["kind"] == "sample"]
+            acquired = next((index for index, sample in enumerate(samples)
+                             if sample["focused_window"] == target["title"]), None)
+            assert acquired is not None, "Native focus never reached the requested fixture window"
+            assert all(sample["focused_window"] == target["title"] for sample in samples[acquired:]), (
+                "Mouse motion stole native focus during the explicit transition")
+            assert next(w for w in windows() if w["is_focused"])["id"] == target["id"], (
+                "wm lost the explicit focus destination")
+            positions = {round(sample["frames"][target["title"]][0]) for sample in samples[acquired:]}
+            assert len(positions) >= 3, "Fixture did not animate while native focus was protected"
+            candidate = next((w for w in windows() if w["id"] != target["id"]
+                              and min(screen_right, w["frame"]["origin"]["x"] + w["frame"]["size"]["width"])
+                              - max(screen_left, w["frame"]["origin"]["x"]) > 80), None)
+            assert candidate is not None, "No exposed fixture window available to verify hover recovery"
+            frame = candidate["frame"]
+            point = [(max(screen_left, frame["origin"]["x"])
+                      + min(screen_right, frame["origin"]["x"] + frame["size"]["width"])) / 2,
+                     frame["origin"]["y"] + frame["size"]["height"] * 0.5]
+            pointer.mouse(5, point)
+            deadline = time.monotonic() + 3
+            while command("snapshot")["focused_window"] != candidate["title"]:
+                assert time.monotonic() < deadline, "Fresh motion did not restore native hover focus"
+                time.sleep(0.025)
+            report["hover_recovery"] = {"title": candidate["title"], "point": point}
+            print("PASS native focus remains protected during motion and fresh hover resumes", flush=True)
+            return
 
         if args.interaction_check:
             if args.interaction_check in ["all", "focus"]:
@@ -426,6 +476,8 @@ if __name__ == "__main__":
     parser.add_argument("--qt-packages", type=Path, default=Path("/Applications/Anki.app/Contents/Resources/app_packages"))
     parser.add_argument("--expect-cursor-retention", action="store_true")
     scenes = parser.add_mutually_exclusive_group()
+    scenes.add_argument("--focus-transition-check", action="store_true",
+                        help="Verify native focus survives mouse motion during an explicit animated switch")
     scenes.add_argument("--fullscreen-only", action="store_true",
                         help="Record fullscreen entry, exit, and interrupted toggles")
     scenes.add_argument("--settling-only", action="store_true",

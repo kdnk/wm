@@ -230,6 +230,14 @@ pub(super) struct ViewportHandle {
     pub state: Arc<Mutex<PresentedCamera>>,
     windows: Vec<WindowId>,
     pub headless: Option<CameraAnimation>,
+    hover: HoverPolicy,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum HoverPolicy {
+    #[default]
+    FollowPointer,
+    HoldUntilSettled,
 }
 
 #[derive(Debug)]
@@ -589,6 +597,36 @@ impl CameraAnimation {
 }
 
 impl Reactor {
+    pub(super) fn presentations_hold_hover(&self) -> bool {
+        self.presentations
+            .values()
+            .any(|camera| camera.hover == HoverPolicy::HoldUntilSettled)
+    }
+
+    pub(super) fn hold_hover_for_presentation(&mut self, space: SpaceId) {
+        let Some(camera) = self.presentations.get_mut(&space) else {
+            return;
+        };
+        if camera.hover == HoverPolicy::HoldUntilSettled {
+            return;
+        }
+        camera.hover = HoverPolicy::HoldUntilSettled;
+        self.pending_mouse_focus = None;
+        if !self.mouse_raise_token.is_cancelled() {
+            self.mouse_raise_token.cancel();
+            let _ = self
+                .communication_manager
+                .raise_manager_tx
+                .try_send(super::raise_manager::Event::MouseRaisesCancelled);
+        }
+        self.update_focus_follows_mouse_state();
+    }
+
+    fn finish_presentation_hover_hold(&mut self) {
+        self.mouse_focus_warp_requested_at = Some(crate::sys::event::hid_event_timestamp_now());
+        self.update_focus_follows_mouse_state();
+    }
+
     pub(super) fn settle_motion(&mut self) {
         let now = Instant::now();
         let mut frames = FrameBatch::default();
@@ -688,8 +726,12 @@ impl Reactor {
                 completed.push(*space);
             }
         }
+        let mut released_hover = false;
         for space in completed {
-            self.presentations.remove(&space);
+            released_hover |= self
+                .presentations
+                .remove(&space)
+                .is_some_and(|camera| camera.hover == HoverPolicy::HoldUntilSettled);
             if self
                 .viewport_gesture
                 .as_ref()
@@ -698,10 +740,15 @@ impl Reactor {
                 self.retire_viewport_session();
             }
         }
+        drop(control);
+        if released_hover {
+            self.finish_presentation_hover_hold();
+        }
     }
 
     pub(super) fn stop_camera(&mut self, space: SpaceId) {
         if let Some(mut camera) = self.presentations.remove(&space) {
+            let held_hover = camera.hover == HoverPolicy::HoldUntilSettled;
             camera.state.lock().stopped = true;
             let frames = if let Some(headless) = &mut camera.headless {
                 let frames = headless.windows.iter().map(|w| (w.wid, w.frame)).collect();
@@ -719,6 +766,9 @@ impl Reactor {
             }
             if let Some(tx) = &self.animation_tx {
                 let _ = tx.send(Message::StopCamera(space));
+            }
+            if held_hover {
+                self.finish_presentation_hover_hold();
             }
         }
     }
@@ -762,7 +812,9 @@ impl Reactor {
         let LayoutSystemKind::Scrolling(system) =
             &self.layout_manager.layout_engine.workspaces()[workspace].layout_system;
         let (mut presentation, frames) = system.presentation(layout)?;
-        let previous = self.presentations.remove(&space).and_then(|p| p.headless);
+        let previous = self.presentations.remove(&space);
+        let hover = previous.as_ref().map_or_default(|camera| camera.hover);
+        let previous = previous.and_then(|camera| camera.headless);
         let gesture = gesture.or_else(|| {
             self.viewport_gesture
                 .as_ref()
@@ -843,6 +895,7 @@ impl Reactor {
             state,
             windows: ids,
             headless: None,
+            hover,
         });
         if let Some(tx) = &self.animation_tx {
             let _ = tx.send(Message::Camera(Box::new(next)));
@@ -3958,6 +4011,7 @@ mod tests {
                 state: camera.state,
                 windows: vec![wid],
                 headless: None,
+                hover: HoverPolicy::FollowPointer,
             });
             let mut changed = reactor.state.windows.window(panel).unwrap().frame_monotonic;
             changed.size.width += 1.;

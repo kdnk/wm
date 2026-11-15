@@ -186,6 +186,10 @@ def fixture(label):
     def frames():
         return {w.windowTitle(): native_frame(w) for w, _ in windows}
 
+    def focused_window():
+        return next((w.windowTitle() for w, _ in windows
+                     if message(w.native, "isKeyWindow", ctypes.c_bool)), None)
+
     def content_states():
         return {w.windowTitle(): {"generation": c.generation, "painted_size": c.painted_size,
                                   "size": [c.width(), c.height()]} for w, c in windows}
@@ -194,7 +198,7 @@ def fixture(label):
         nonlocal recording
         if recording:
             trace.append({"kind": "sample", "time_ns": time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW), "frames": frames(),
-                          "content": content_states()})
+                          "content": content_states(), "focused_window": focused_window()})
         if not select.select([sys.stdin], [], [], 0)[0]:
             return
         line = sys.stdin.readline()
@@ -213,7 +217,7 @@ def fixture(label):
             print(json.dumps(trace), flush=True)
         else:
             print(json.dumps({"time_ns": time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW), "frames": frames(),
-                              "content": content_states()}), flush=True)
+                              "content": content_states(), "focused_window": focused_window()}), flush=True)
 
     timer = QTimer()
     timer.timeout.connect(poll)

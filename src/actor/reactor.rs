@@ -1154,7 +1154,9 @@ impl Reactor {
             Event::InstallIpc(request) => crate::ipc::install_mach_server(reactor.clone(), request),
             Event::ReleaseClaims(release) => release.apply(&mut reactor.borrow_mut()),
             Event::MouseFocusPending(publisher) => {
-                if reactor.borrow().transient_blocks_mouse_focus() {
+                if reactor.borrow().presentations_hold_hover()
+                    || reactor.borrow().transient_blocks_mouse_focus()
+                {
                     publisher.take_latest();
                     return;
                 }
@@ -1236,6 +1238,9 @@ impl Reactor {
                 return;
             }
             Event::MouseMoved(wsid) => {
+                if self.presentations_hold_hover() {
+                    return;
+                }
                 self.suppress_auto_workspace_switch_until_input = false;
                 if let Some(window) = self.state.windows.tracked_window_id(wsid)
                     && (self.main_window() == Some(window)
@@ -2621,7 +2626,7 @@ impl Reactor {
                 return Ok(system_workflow::handle_menu_closed(&mut self.menu_manager, pid)?);
             }
             Event::MouseMoved(wsid) => {
-                if self.transient_blocks_mouse_focus() {
+                if self.presentations_hold_hover() || self.transient_blocks_mouse_focus() {
                     return Ok(EventOutcome::default());
                 }
                 let window = self.state.windows.tracked_window_id(wsid);
@@ -3534,8 +3539,9 @@ impl Reactor {
                 .and_then(|wid| self.state.windows.window(wid))
                 .map(|window| window.frame_monotonic);
             if let Some(to) = to
-                && let Some(input_tx) = &self.communication_manager.input_tx
+                && let Some(input_tx) = self.communication_manager.input_tx.clone()
             {
+                self.hold_hover_for_presentation(space);
                 self.mouse_focus_warp_requested_at =
                     Some(crate::sys::event::hid_event_timestamp_now());
                 _ = input_tx.send(crate::actor::input::Request::WarpRelative { from, to });
@@ -5356,9 +5362,12 @@ impl Reactor {
         let Some(pointer) = self.focus_pointer(wid) else {
             return;
         };
-        let Some(input_tx) = &self.communication_manager.input_tx else {
+        let Some(input_tx) = self.communication_manager.input_tx.clone() else {
             return;
         };
+        if let Some(space) = self.assigned_space_for_window_id(wid) {
+            self.hold_hover_for_presentation(space);
+        }
         self.mouse_focus_warp_requested_at = Some(crate::sys::event::hid_event_timestamp_now());
         _ = input_tx.send(crate::actor::input::Request::FocusPointer(pointer));
     }
@@ -6491,6 +6500,7 @@ impl Reactor {
 
     fn update_focus_follows_mouse_state(&mut self) {
         let should_enable = self.config.settings.focus_follows_mouse
+            && !self.presentations_hold_hover()
             && matches!(self.menu_manager.menu_state, MenuState::Closed)
             && !self.is_mission_control_active()
             && !self.state.windows.suppresses_focus_follows_mouse(self.main_window());
