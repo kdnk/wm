@@ -1377,8 +1377,10 @@ impl OuterGaps {
             ("right", self.right),
         ]
         .into_iter()
-        .filter(|(_, value)| *value < 0.0)
-        .map(|(name, value)| format!("outer.{name} gap must be non-negative, got {value}"))
+        .filter(|(_, value)| !value.is_finite() || *value < 0.0)
+        .map(|(name, value)| {
+            format!("outer.{name} gap must be finite and non-negative, got {value}")
+        })
         .collect()
     }
 }
@@ -1387,8 +1389,10 @@ impl InnerGaps {
     pub fn validate(&self) -> Vec<String> {
         [("horizontal", self.horizontal), ("vertical", self.vertical)]
             .into_iter()
-            .filter(|(_, value)| *value < 0.0)
-            .map(|(name, value)| format!("inner.{name} gap must be non-negative, got {value}"))
+            .filter(|(_, value)| !value.is_finite() || *value < 0.0)
+            .map(|(name, value)| {
+                format!("inner.{name} gap must be finite and non-negative, got {value}")
+            })
             .collect()
     }
 }
