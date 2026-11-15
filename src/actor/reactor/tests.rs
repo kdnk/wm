@@ -2368,7 +2368,10 @@ fn modifier_drag_handoff_starts_from_last_commanded_frame_without_an_ax_echo() {
         }));
         let echoes = apps.simulate_events();
         let dragged = apps.windows[&wid].frame;
-        assert_eq!(dragged.origin, CGPoint::new(tile.origin.x + 100., tile.origin.y + 30.));
+        assert_eq!(
+            dragged.origin,
+            CGPoint::new(tile.origin.x + 100., tile.origin.y + 30.)
+        );
         assert!(echoes.iter().any(|event| matches!(event, Event::WindowFrameChanged(..))));
         if stale_echo {
             reactor.handle_event(Event::WindowFrameChanged(
