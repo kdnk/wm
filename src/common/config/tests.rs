@@ -84,6 +84,64 @@ fn animation_settings_reject_nonfinite_values_and_negative_frame_rates() {
 }
 
 #[test]
+fn gap_config_rejects_nonfinite_and_negative_values() {
+    for prefix in [
+        "settings.layout.gaps",
+        "settings.layout.gaps.per_display.\"display-a\"",
+    ] {
+        for (group, fields) in [
+            ("outer", &["top", "left", "bottom", "right"][..]),
+            ("inner", &["horizontal", "vertical"][..]),
+        ] {
+            for field in fields {
+                for value in ["nan", "inf", "-inf", "-1.0"] {
+                    let text = format!("[{prefix}.{group}]\n{field} = {value}\n[keys]\n");
+                    let error = ConfigDocument::load(&text)
+                        .err()
+                        .unwrap_or_else(|| panic!("invalid gap config was accepted: {text}"));
+                    let error = error.to_string();
+                    assert!(error.contains(&format!("{group}.{field}")), "{error}");
+                    if prefix.contains("per_display") {
+                        assert!(error.contains("per_display[display-a]"), "{error}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn gap_config_accepts_zero_and_finite_positive_values() {
+    let text = r#"
+        [settings.layout.gaps.outer]
+        top = 0.0
+        left = 2.5
+        bottom = 3.0
+        right = 4.0
+        [settings.layout.gaps.inner]
+        horizontal = 0.0
+        vertical = 1.5
+        [settings.layout.gaps.per_display."display-a".outer]
+        top = 1.0
+        left = 0.0
+        bottom = 2.0
+        right = 3.0
+        [settings.layout.gaps.per_display."display-a".inner]
+        horizontal = 2.5
+        vertical = 0.0
+        [keys]
+    "#;
+    let (document, config) = ConfigDocument::load(text).unwrap();
+    assert_eq!(document.to_string(), text);
+    let gaps = config.settings.layout.gaps;
+    assert_eq!(gaps.outer.top, 0.0);
+    assert_eq!(gaps.inner.vertical, 1.5);
+    let display_gaps = gaps.effective_for_display(Some("display-a"));
+    assert_eq!(display_gaps.outer.top, 1.0);
+    assert_eq!(display_gaps.inner.horizontal, 2.5);
+}
+
+#[test]
 fn config_read_and_document_load_accept_defaults_and_valid_overrides() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
