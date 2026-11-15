@@ -10,6 +10,7 @@
 - Desktop tests under `tests/rift-*-live-test.py` require a running matching daemon and macOS permissions. Native geometry tests alone do not prove composited content rendering; retain display video and daemon traces for live resize verification.
 - Use `cargo run --locked --example menu-bar-window-list-check -- --interactive` for isolated native menu interaction checks without controlling the running daemon.
 - Live motion tests must verify that synthetic drags commit a layout change, target fixture windows by PID and title, and restore runtime settings, workspace, and cursor position on failure.
+- Before temporarily replacing a running daemon for live tests, save its layout. After restarting the original daemon, wait for its original window inventory before loading the saved layout, then verify restored window order and sizes with fresh queries.
 - Unit tests must isolate mouse-state reads from the real WindowServer. Synthetic frame-change events must specify the mouse state needed by the case.
 - Configuration watcher tests must use temporary paths and observe actual filesystem notifications and `ConfigUpdated` events. Do not use the user's configuration or start a daemon for these tests.
 - The fork's command is `wm`; use its `query`, `execute`, and `subscribe` subcommands to control the daemon. Keep Rift names in upstream attribution, archived import references, and historical verifier filenames.
