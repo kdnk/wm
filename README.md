@@ -76,6 +76,14 @@ wm close-window
 
 The command presses the focused window's native close button, including all its tabs. With the wm daemon running, it selects the next tiled neighbor after the window disappears, or the previous neighbor at the end. It also works without the daemon. `wm execute window close` retains Command-W behavior for closing a tab.
 
+## Subscribe to events
+
+```sh
+wm subscribe mach windows_changed
+```
+
+The command prints matching events until the process exits. Press Ctrl-C to end the subscription. The former `wm subscribe unsub-mach` command is removed because a separate process cannot unsubscribe the original subscriber.
+
 ## Verify changes
 
 ```sh

@@ -504,7 +504,7 @@ enum DisplayCommands {
 
 #[derive(Subcommand)]
 enum SubscribeCommands {
-    /// Subscribe to Mach IPC events
+    /// Print Mach IPC events until this process exits. Press Ctrl-C to unsubscribe.
     Mach {
         /// Event to subscribe to (workspace_changed, windows_changed, window_title_changed, focused_window_changed, stacks_changed, layout_changed, selection_changed, binding_mode_changed, config_changed, *)
         event: String,
@@ -520,11 +520,6 @@ enum SubscribeCommands {
         /// Arguments to pass to command (event data will be appended as JSON)
         #[arg(long, allow_hyphen_values = true)]
         args: Vec<String>,
-    },
-    /// Unsubscribe from Mach IPC events
-    UnsubMach {
-        /// Event to unsubscribe from
-        event: String,
     },
     /// Unsubscribe from CLI events
     UnsubCli {
@@ -686,9 +681,6 @@ fn build_subscribe_request(sub: SubscribeCommands) -> Result<WmRequest, String> 
             event: parse_event_kind(&event)?,
             command,
             args,
-        }),
-        SubscribeCommands::UnsubMach { event } => Ok(WmRequest::Unsubscribe {
-            event: parse_event_kind(&event)?,
         }),
         SubscribeCommands::UnsubCli { event } => Ok(WmRequest::UnsubscribeCli {
             event: parse_event_kind(&event)?,
