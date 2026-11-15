@@ -5,7 +5,14 @@ use objc2_foundation::MainThreadMarker;
 use tokio::sync::mpsc::UnboundedSender;
 use wm::actor::reactor::{Event as ReactorEvent, Sender as ReactorSender};
 use wm::ui::menu_bar::MenuAction;
-pub use wm::{actor, common, layout_engine, sys, ui};
+pub use wm::{actor, common, layout_engine, sys};
+mod ui {
+    pub use wm::ui::*;
+    #[allow(dead_code)]
+    pub(crate) mod motion {
+        include!("../src/ui/motion.rs");
+    }
+}
 #[allow(dead_code)]
 mod status_mode {
     include!("../src/ui/menu_bar.rs");
@@ -242,6 +249,143 @@ mod window_list {
     use objc2_app_kit::NSStatusBarButton;
     include!("../src/ui/menu_bar/window_list.rs");
 
+    fn motion_demo(
+        output: std::path::PathBuf,
+        view: Rc<RefCell<WindowListView>>,
+        workspaces: Rc<RefCell<Vec<WorkspaceWindows>>>,
+        parent: Retained<NSView>,
+        handler: Rc<MenuActionHandler>,
+    ) -> Retained<NSTimer> {
+        use serde_json::json;
+
+        #[derive(Clone, Copy)]
+        enum Action {
+            Focus(usize),
+            Workspace(usize),
+            Stop,
+        }
+
+        std::fs::create_dir_all(&output).unwrap();
+        let schedule = [
+            (0.4, Action::Focus(2)),
+            (0.46, Action::Focus(0)),
+            (0.52, Action::Focus(1)),
+            (0.58, Action::Focus(2)),
+            (1.0, Action::Focus(0)),
+            (1.4, Action::Workspace(1)),
+            (1.46, Action::Workspace(0)),
+            (1.52, Action::Workspace(1)),
+            (2.0, Action::Workspace(0)),
+            (2.5, Action::Focus(2)),
+            (2.56, Action::Stop),
+            (2.8, Action::Focus(0)),
+        ];
+        let next = Cell::new(0usize);
+        let samples = RefCell::new(Vec::new());
+        let started = Instant::now();
+        let rect = |frame: NSRect| {
+            [
+                frame.origin.x,
+                frame.origin.y,
+                frame.size.width,
+                frame.size.height,
+            ]
+        };
+        let tick = block2::RcBlock::new(move |timer: std::ptr::NonNull<NSTimer>| {
+            let elapsed = started.elapsed().as_secs_f64();
+            if samples.borrow().is_empty() {
+                let window = parent.window().unwrap();
+                let frame = window.frame();
+                let screen = objc2_app_kit::NSScreen::screens(parent.mtm());
+                let top = screen.firstObject().unwrap().frame().max().y;
+                std::fs::write(
+                    output.join("capture.json"),
+                    serde_json::to_vec(&json!({"pid": std::process::id(), "title": window.title().to_string(), "reduce_motion": NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion(), "rect": [
+                        frame.origin.x,
+                        top - frame.max().y,
+                        frame.size.width,
+                        frame.size.height,
+                    ]})).unwrap(),
+                ).unwrap();
+            }
+            let mut action = None;
+            if let Some(&(at, kind)) = schedule.get(next.get())
+                && elapsed >= at
+            {
+                action = Some(match kind {
+                    Action::Focus(_) => "focus",
+                    Action::Workspace(_) => "workspace",
+                    Action::Stop => "stop",
+                });
+                next.set(next.get() + 1);
+                let mut workspaces = workspaces.borrow_mut();
+                match kind {
+                    Action::Workspace(index) => {
+                        for workspace in workspaces.iter_mut() {
+                            workspace.active = workspace.index == index;
+                            for (position, window) in workspace.windows.iter_mut().enumerate() {
+                                window.focused = workspace.active && position == 0;
+                            }
+                        }
+                    }
+                    Action::Focus(index) => {
+                        let active =
+                            workspaces.iter_mut().find(|workspace| workspace.active).unwrap();
+                        for (position, window) in active.windows.iter_mut().enumerate() {
+                            window.focused = position == index;
+                        }
+                    }
+                    Action::Stop => view.borrow().stop_motion(),
+                }
+                if !matches!(kind, Action::Stop) {
+                    view.borrow_mut().update(
+                        &workspaces,
+                        true,
+                        StripPresentation::Combined,
+                        &parent,
+                        &handler,
+                    );
+                    view.borrow().position_after(12.0, CAPSULE_HEIGHT);
+                }
+            }
+            let view = view.borrow();
+            let frames = view
+                .capsules
+                .iter()
+                .map(|capsule| {
+                    json!({
+                        "workspace": capsule.workspace.index,
+                        "active": capsule.workspace.active,
+                        "frame": rect(capsule.host.frame()),
+                        "focus": if capsule.focus.layer.isHidden() {
+                            None
+                        } else {
+                            Some(rect(capsule.focus.layer.frame()))
+                        },
+                        "target": capsule.focus.target.get().map(rect),
+                    })
+                })
+                .collect::<Vec<_>>();
+            samples
+                .borrow_mut()
+                .push(json!({"time": elapsed, "action": action, "frames": frames}));
+            if elapsed >= 5.0 {
+                std::fs::write(
+                    output.join("menu-motion.json"),
+                    serde_json::to_vec_pretty(&*samples.borrow()).unwrap(),
+                )
+                .unwrap();
+                view.stop_motion();
+                unsafe { timer.as_ref() }.invalidate();
+                println!(
+                    "PASS: scripted focus reversals, workspace reversals, and drag-start settlement recorded"
+                );
+                objc2_app_kit::NSApplication::sharedApplication(parent.mtm()).terminate(None);
+            }
+        });
+        motion_timer(&tick)
+    }
+
     pub fn interactive() {
         use objc2_app_kit::{NSBackingStoreType, NSPanel, NSWindowStyleMask};
         use slotmap::SlotMap;
@@ -368,6 +512,22 @@ mod window_list {
             .setFrame(NSRect::new(NSPoint::new(18.0, 65.0), NSSize::new(260.0, 32.0)));
         parent.addSubview(probe.ns_button());
         let action_rx = RefCell::new(action_rx);
+        let demo = std::env::args().position(|arg| arg == "--motion-demo").map(|index| {
+            std::path::PathBuf::from(
+                std::env::args()
+                    .nth(index + 1)
+                    .expect("--motion-demo requires an output directory"),
+            )
+        });
+        let demo_timer = demo.map(|output| {
+            motion_demo(
+                output,
+                view.clone(),
+                workspaces.clone(),
+                parent.clone(),
+                handler.clone(),
+            )
+        });
         let update = block2::RcBlock::new(move |_: std::ptr::NonNull<NSTimer>| {
             while let Ok(action) = action_rx.borrow_mut().try_recv() {
                 let mut workspaces = workspaces.borrow_mut();
@@ -414,6 +574,9 @@ mod window_list {
         app.setMainMenu(Some(main.ns_menu()));
         app.run();
         timer.invalidate();
+        if let Some(timer) = demo_timer {
+            timer.invalidate();
+        }
     }
 
     fn verify_tracking_motion(parent: &NSView) {
@@ -744,7 +907,17 @@ mod window_list {
             ),
         };
         for progress in [0.0, 0.5, 1.0, 0.0] {
-            frame.apply(progress);
+            let mix = |a: f64, b: f64| a + (b - a) * progress;
+            frame.apply(NSRect::new(
+                NSPoint::new(
+                    mix(frame.from.origin.x, frame.to.origin.x),
+                    mix(frame.from.origin.y, frame.to.origin.y),
+                ),
+                NSSize::new(
+                    mix(frame.from.size.width, frame.to.size.width),
+                    mix(frame.from.size.height, frame.to.size.height),
+                ),
+            ));
             assert_eq!(capsule.material_view().frame(), capsule.host().bounds());
             assert_eq!(capsule.outline.frame(), capsule.host().bounds());
             for scale in [1.0, 2.0] {
@@ -2134,6 +2307,12 @@ mod window_list {
                 "rapid reversal must start at its current frame"
             );
             let reverse = view.geometry.borrow().timer.as_ref().unwrap().clone();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            reverse.fire();
+            assert!(
+                view.capsules[0].host().frame().size.width < middle.size.width,
+                "a redirected workspace must retain its visible resize velocity before reversing"
+            );
             std::thread::sleep(std::time::Duration::from_millis(190));
             reverse.fire();
             assert_eq!(view.capsules[0].host().frame(), initial);
@@ -2146,7 +2325,13 @@ mod window_list {
         view.update(&moving, true, StripPresentation::Combined, &parent, &handler);
         view.position_after(0.0, CAPSULE_HEIGHT);
         let previous_timer = view.geometry.borrow().timer.clone();
-        let frames = view.geometry.borrow().frames.iter().cloned().collect();
+        let frames = view
+            .geometry
+            .borrow()
+            .frames
+            .iter()
+            .map(|moving| moving.frame.clone())
+            .collect();
         view.geometry.borrow_mut().present(frames, GeometryChange::Immediate);
         assert_eq!(
             view.capsules[0].host().frame().size.width,
@@ -2333,6 +2518,12 @@ mod window_list {
             );
             assert!(!timer.isValid());
             let reverse = view.capsules[0].focus.timer.borrow().as_ref().unwrap().clone();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            reverse.fire();
+            assert!(
+                indicator.frame().origin.x > middle.origin.x,
+                "redirected focus must retain its visible velocity before reversing"
+            );
             std::thread::sleep(std::time::Duration::from_millis(250));
             reverse.fire();
             assert_eq!(indicator.frame(), origin);
@@ -2420,7 +2611,7 @@ fn main() {
     let mtm = MainThreadMarker::new().unwrap();
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-    if std::env::args().any(|arg| arg == "--interactive") {
+    if std::env::args().any(|arg| arg == "--interactive" || arg == "--motion-demo") {
         window_list::interactive();
         return;
     }

@@ -30,6 +30,7 @@ use objc2_quartz_core::{
 use super::{MenuAction, MenuActionHandler, ReactorEvent, own_pid};
 use crate::actor::menu_bar::{DisplayWorkspaces, MenuWindow};
 use crate::common::config::{MenuBarDisplayMode, MenuBarSettings};
+use crate::ui::motion::{RectSample, RectSpring};
 
 const ICON_SIZE: f64 = 18.0;
 const BUTTON_WIDTH: f64 = 24.0;
@@ -333,6 +334,7 @@ fn motion_timer(tick: &block2::RcBlock<dyn Fn(std::ptr::NonNull<NSTimer>)>) -> R
 struct FocusIndicator {
     layer: Retained<CALayer>,
     target: Cell<Option<NSRect>>,
+    sample: Rc<Cell<RectSample>>,
     timer: RefCell<Option<Retained<NSTimer>>>,
 }
 
@@ -340,9 +342,11 @@ impl FocusIndicator {
     fn new() -> Self {
         let layer = CALayer::layer();
         layer.setHidden(true);
+        layer.setContentsScale(2.0);
         Self {
             layer,
             target: Cell::new(None),
+            sample: Rc::new(Cell::new(RectSample::stationary(NSRect::ZERO))),
             timer: RefCell::new(None),
         }
     }
@@ -357,6 +361,7 @@ impl FocusIndicator {
     }
 
     fn apply(&self, frame: NSRect) {
+        self.sample.set(RectSample::stationary(frame));
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         self.layer.setFrame(frame);
@@ -365,7 +370,7 @@ impl FocusIndicator {
 
     fn present(&self, target: Option<NSRect>, animate: bool) {
         let previous = self.target.replace(target);
-        if previous == target {
+        if previous == target && animate {
             return;
         }
         if let Some(timer) = self.timer.borrow_mut().take() {
@@ -373,35 +378,32 @@ impl FocusIndicator {
         }
         self.layer.setHidden(target.is_none());
         let Some(to) = target else {
+            self.sample.set(RectSample::stationary(self.layer.frame()));
             return;
         };
-        let from = self.layer.frame();
-        if !animate || previous.is_none() || from == to {
+        let spring = RectSpring::new(self.sample.get(), to, 0.24);
+        let scale = self.layer.contentsScale();
+        if !animate || previous.is_none() || spring.settled(self.sample.get(), scale) {
             self.apply(to);
             return;
         }
         let layer = self.layer.clone();
+        let sample = self.sample.clone();
         let started = Instant::now();
         let tick = block2::RcBlock::new(move |timer: std::ptr::NonNull<NSTimer>| {
-            let elapsed = (started.elapsed().as_secs_f64() / 0.24).min(1.0);
-            let done = elapsed >= 1.0
+            let next = spring.sample(started.elapsed().as_secs_f64());
+            let done = spring.settled(next, scale)
                 || super::drag::busy()
                 || NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion();
-            let progress = if done {
-                1.0
+            let next = if done {
+                RectSample::stationary(to)
             } else {
-                1.0 - (1.0 - elapsed).powi(3)
+                next
             };
-            let mix = |a: f64, b: f64| a + (b - a) * progress;
+            sample.set(next);
             CATransaction::begin();
             CATransaction::setDisableActions(true);
-            layer.setFrame(NSRect::new(
-                NSPoint::new(mix(from.origin.x, to.origin.x), mix(from.origin.y, to.origin.y)),
-                NSSize::new(
-                    mix(from.size.width, to.size.width),
-                    mix(from.size.height, to.size.height),
-                ),
-            ));
+            layer.setFrame(next.frame);
             CATransaction::commit();
             if done {
                 unsafe { timer.as_ref() }.invalidate();
@@ -637,18 +639,7 @@ struct GeometryFrame {
     to: NSRect,
 }
 impl GeometryFrame {
-    fn apply(&self, progress: f64) {
-        let interpolate = |a: f64, b: f64| a + (b - a) * progress;
-        let frame = NSRect::new(
-            NSPoint::new(
-                interpolate(self.from.origin.x, self.to.origin.x),
-                interpolate(self.from.origin.y, self.to.origin.y),
-            ),
-            NSSize::new(
-                interpolate(self.from.size.width, self.to.size.width),
-                interpolate(self.from.size.height, self.to.size.height),
-            ),
-        );
+    fn apply(&self, frame: NSRect) {
         self.host.setFrame(frame);
         let bounds = NSRect::new(NSPoint::ZERO, frame.size);
         self.material.setFrame(bounds);
@@ -658,6 +649,21 @@ impl GeometryFrame {
             child.setFrame(bounds);
         }
         self.host.layoutSubtreeIfNeeded();
+    }
+}
+
+struct MovingGeometry {
+    frame: GeometryFrame,
+    spring: RectSpring,
+    sample: Cell<RectSample>,
+    scale: f64,
+}
+
+impl MovingGeometry {
+    fn finish(&self) {
+        let sample = RectSample::stationary(self.frame.to);
+        self.sample.set(sample);
+        self.frame.apply(sample.frame);
     }
 }
 
@@ -671,7 +677,7 @@ enum GeometryChange {
 #[derive(Default)]
 struct GeometryMotion {
     timer: Option<Retained<NSTimer>>,
-    frames: Rc<Vec<GeometryFrame>>,
+    frames: Rc<Vec<MovingGeometry>>,
 }
 impl GeometryMotion {
     fn cancel(&mut self, finish: bool) {
@@ -680,7 +686,7 @@ impl GeometryMotion {
         }
         if finish {
             for frame in self.frames.iter() {
-                frame.apply(1.0);
+                frame.finish();
             }
         }
     }
@@ -690,40 +696,65 @@ impl GeometryMotion {
             && frames
                 .iter()
                 .zip(self.frames.iter())
-                .all(|(a, b)| std::ptr::eq(&*a.host, &*b.host) && a.to == b.to);
+                .all(|(a, b)| std::ptr::eq(&*a.host, &*b.frame.host) && a.to == b.frame.to);
         if change == GeometryChange::Preserve
             && unchanged
             && self.timer.as_ref().is_some_and(|timer| timer.isValid())
         {
             return;
         }
+        let frames = frames
+            .into_iter()
+            .map(|frame| {
+                let mut initial = RectSample::stationary(frame.from);
+                if let Some(previous) = self
+                    .frames
+                    .iter()
+                    .find(|previous| std::ptr::eq(&*frame.host, &*previous.frame.host))
+                {
+                    initial.velocity = previous.sample.get().velocity;
+                }
+                let scale = frame.host.window().map_or(2.0, |window| window.backingScaleFactor());
+                MovingGeometry {
+                    spring: RectSpring::new(initial, frame.to, 0.18),
+                    sample: Cell::new(initial),
+                    scale,
+                    frame,
+                }
+            })
+            .collect::<Vec<_>>();
         self.cancel(false);
         self.frames = Rc::new(frames);
         if change != GeometryChange::Navigate
-            || self.frames.iter().all(|frame| frame.from == frame.to)
+            || self
+                .frames
+                .iter()
+                .all(|frame| frame.spring.settled(frame.sample.get(), frame.scale))
         {
             for frame in self.frames.iter() {
-                frame.apply(1.0);
+                frame.finish();
             }
             return;
         }
         for frame in self.frames.iter() {
-            frame.apply(0.0);
+            frame.frame.apply(frame.sample.get().frame);
         }
         let frames = self.frames.clone();
         let started = Instant::now();
         let tick = block2::RcBlock::new(move |timer: std::ptr::NonNull<NSTimer>| {
-            let elapsed = (started.elapsed().as_secs_f64() / 0.18).min(1.0);
-            let done = elapsed >= 1.0
-                || super::drag::busy()
+            let elapsed = started.elapsed().as_secs_f64();
+            let immediate = super::drag::busy()
                 || NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion();
-            let progress = if done {
-                1.0
-            } else {
-                1.0 - (1.0 - elapsed).powi(3)
-            };
+            let mut done = true;
             for frame in frames.iter() {
-                frame.apply(progress);
+                let sample = frame.spring.sample(elapsed);
+                if immediate || frame.spring.settled(sample, frame.scale) {
+                    frame.finish();
+                } else {
+                    frame.sample.set(sample);
+                    frame.frame.apply(sample.frame);
+                    done = false;
+                }
             }
             if done {
                 unsafe { timer.as_ref() }.invalidate();
@@ -1235,6 +1266,9 @@ impl WindowListView {
                 .iter()
                 .find(|item| matches!(item.selection, ControlSelection::WindowFocus(true)))
                 .map(|item| item.button.ns_button().frame());
+            capsule.focus.layer.setContentsScale(
+                capsule.host().window().map_or(2.0, |window| window.backingScaleFactor()),
+            );
             capsule.focus.present(target, !reduced && change != GeometryChange::Navigate);
             capsule.host().layoutSubtreeIfNeeded();
             x += capsule.width + WORKSPACE_GAP;
