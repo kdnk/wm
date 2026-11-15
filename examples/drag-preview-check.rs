@@ -1,5 +1,10 @@
 // Modified by kdnk for wm on 2026-11-15. Original attribution is preserved in LICENSE.
 pub use wm::{actor, common, layout_engine, model, sys};
+mod ui {
+    pub(crate) mod motion {
+        include!("../src/ui/motion.rs");
+    }
+}
 
 mod preview {
     include!("../src/ui/drag_preview.rs");
@@ -10,7 +15,125 @@ mod preview {
     use crate::actor::drag::{DropIntent, DropZone};
     use crate::sys::screen::SpaceId;
 
-    pub fn verify(capture: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
+    struct Recording(std::process::Child);
+
+    impl Drop for Recording {
+        fn drop(&mut self) {
+            if self.0.try_wait().ok().flatten().is_none() {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+    }
+
+    fn verify_motion(
+        target: DropTarget,
+        movie: Option<&Path>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let appearance = PreviewAppearance {
+            increase_contrast: false,
+            reduce_transparency: false,
+            reduce_motion: false,
+        };
+        let mut preview = DragPreview::new(target)?;
+        preview.show_with_appearance(target, appearance)?;
+        let recorder = movie
+            .map(|path| {
+                std::process::Command::new("/usr/sbin/screencapture")
+                    .args(["-x", "-v", "-V", "2", "-R100,100,900,320"])
+                    .arg(path)
+                    .spawn()
+                    .map(Recording)
+            })
+            .transpose()?;
+        if recorder.is_some() {
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        let mut trace = Vec::new();
+        let mut destination = target;
+        for step in 0..80 {
+            if [5, 8, 12, 15, 30, 34].contains(&step) {
+                let shifted = [5, 12, 30].contains(&step);
+                destination = target;
+                if shifted {
+                    destination.preview_area.origin.x += 180.0;
+                    destination.preview_area.size.width += 50.0;
+                }
+                preview.show_with_appearance(destination, appearance)?;
+                let shape_motion = unsafe {
+                    preview.shape.animationForKey(&NSString::from_str("preview.position"))
+                }
+                .unwrap();
+                let began = preview.shape.convertTime_toLayer(shape_motion.beginTime(), None);
+                for layer in
+                    [&*preview.tint, &*preview.card].into_iter().chain(preview.backdrop.as_deref())
+                {
+                    for key in ["preview.position", "preview.bounds"] {
+                        let animation =
+                            unsafe { layer.animationForKey(&NSString::from_str(key)) }.unwrap();
+                        assert_eq!(animation.duration(), shape_motion.duration());
+                        assert!(
+                            (layer.convertTime_toLayer(animation.beginTime(), None) - began).abs()
+                                < 1e-9,
+                            "preview layers must share one compositor clock"
+                        );
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(8));
+            let frame = preview.presented_frame();
+            let carrier = preview.carrier;
+            assert!(frame.origin.x >= carrier.origin.x - 0.125);
+            assert!(frame.origin.y >= carrier.origin.y - 0.125);
+            assert!(
+                frame.origin.x + frame.size.width <= carrier.origin.x + carrier.size.width + 0.125
+            );
+            assert!(
+                frame.origin.y + frame.size.height
+                    <= carrier.origin.y + carrier.size.height + 0.125
+            );
+            trace.push(serde_json::json!({
+                "time": CACurrentMediaTime(),
+                "frame": [frame.origin.x, frame.origin.y, frame.size.width, frame.size.height],
+                "carrier": [carrier.origin.x, carrier.origin.y, carrier.size.width, carrier.size.height],
+            }));
+        }
+        if let Some(path) = movie {
+            std::fs::write(path.with_extension("json"), serde_json::to_vec_pretty(&trace)?)?;
+        }
+        assert!(
+            preview.presented_frame().same_as(preview_frame(destination)),
+            "presented {:?} must settle at {:?}",
+            preview.presented_frame(),
+            preview_frame(destination)
+        );
+        let mut shifted = destination;
+        shifted.preview_area.origin.x += 100.0;
+        preview.show_with_appearance(shifted, appearance)?;
+        preview.show_with_appearance(shifted, PreviewAppearance {
+            reduce_motion: true,
+            ..appearance
+        })?;
+        assert_eq!(preview.carrier, preview_frame(shifted));
+        assert!(preview.motion.is_none());
+        assert!(
+            unsafe { preview.shape.animationForKey(&NSString::from_str("preview.position")) }
+                .is_none()
+        );
+        if let Some(mut recorder) = recorder {
+            assert!(recorder.0.wait()?.success(), "preview motion recording failed");
+        }
+        preview.finish();
+        println!(
+            "PASS: native preview reversals, compositor clock, carrier containment, and Reduce Motion settlement"
+        );
+        Ok(())
+    }
+
+    pub fn verify(
+        capture: Option<&Path>,
+        movie: Option<&Path>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let frame = CGRect::new(CGPoint::new(100.0, 100.0), CGSize::new(900.0, 320.0));
         let background = CgsWindow::new_compositor(frame, 12.0)?;
         let stage = CALayer::layer();
@@ -135,12 +258,14 @@ mod preview {
             assert!(result.success(), "native compositor capture failed");
             println!("Captured {}", path.display());
         }
+        let motion_target = previews[0].1;
         for (preview, target) in &mut previews {
             preview.hide();
             preview.show(*target)?;
             preview.finish();
         }
         drop(previews);
+        verify_motion(motion_target, movie)?;
         drop(surface);
         drop(background);
         Ok(())
@@ -153,13 +278,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Accessory);
     app.finishLaunching();
     let mut args = std::env::args().skip(1);
-    let capture = match args.next().as_deref() {
-        None => None,
-        Some("--capture") => Some(std::path::PathBuf::from(
-            args.next().expect("--capture requires a path"),
-        )),
-        Some(_) => panic!("usage: drag-preview-check [--capture PATH]"),
-    };
-    assert!(args.next().is_none(), "unexpected argument");
-    preview::verify(capture.as_deref())
+    let mut capture = None;
+    let mut movie = None;
+    while let Some(argument) = args.next() {
+        let path = std::path::PathBuf::from(args.next().expect("capture option requires a path"));
+        match argument.as_str() {
+            "--capture" => capture = Some(path),
+            "--motion-capture" => movie = Some(path),
+            _ => panic!("usage: drag-preview-check [--capture PATH] [--motion-capture PATH]"),
+        }
+    }
+    preview::verify(capture.as_deref(), movie.as_deref())
 }
