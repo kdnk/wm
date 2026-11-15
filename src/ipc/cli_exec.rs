@@ -1,4 +1,4 @@
-// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
+// Modified by kdnk for wm on 2026-11-15. Original attribution is preserved in LICENSE.
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::ptr;
@@ -217,10 +217,12 @@ impl DefaultCliExecutor {
             env_storage.push(CString::new(kv).unwrap());
         }
         for (k, v) in env_vars {
-            let mut kv = k.into_bytes();
+            let mut kv = k.as_bytes().to_vec();
             kv.push(b'=');
             kv.extend_from_slice(v.as_bytes());
-            env_storage.push(CString::new(kv).unwrap());
+            env_storage.push(CString::new(kv).map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{k} contains NUL"))
+            })?);
         }
         env_storage.push(CString::new(format!("WM_EVENT_JSON={event_json}")).map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "event JSON contains NUL")
@@ -290,7 +292,9 @@ impl DefaultCliExecutor {
 
 pub fn execute_cli_subscription(event: &BroadcastEvent, subscription: &CliSubscription) {
     let exec = DefaultCliExecutor::new();
-    let _ = exec.execute(event, subscription);
+    if let Err(error) = exec.execute(event, subscription) {
+        tracing::warn!(event = %event.kind(), %error, "Failed to execute CLI subscription");
+    }
 }
 
 /// Publish already serialized bytes to each command without serializing per target.
@@ -300,8 +304,11 @@ pub(crate) fn execute_serialized_cli_subscription(
     subscription: &CliSubscription,
 ) {
     let exec = DefaultCliExecutor::new();
-    let _ = exec.execute_serialized(event, event_json, subscription);
+    if let Err(error) = exec.execute_serialized(event, event_json, subscription) {
+        tracing::warn!(event = %event.kind(), %error, "Failed to execute CLI subscription");
+    }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
