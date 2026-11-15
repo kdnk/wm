@@ -1,4 +1,4 @@
-// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
+// Modified by kdnk for wm on 2026-11-15. Original attribution is preserved in LICENSE.
 //! The Reactor's job is to maintain coherence between the system and model state.
 //!
 //! It takes events from the rest of the system and builds a coherent picture of
@@ -2376,15 +2376,10 @@ impl Reactor {
             }
             Event::ModifierMouseDown { button, point, action } => {
                 let session_id = self.drag_manager.actor.await_modifier(button, point, action);
-                let source = self.window_id_under_cursor().and_then(|window| {
-                    let state = self.state.windows.window(window)?;
-                    self.state.windows.is_admitted(window).then_some((
-                        window,
-                        state.frame_monotonic,
-                        state.info.sys_id,
-                    ))
-                });
-                let Some((window, frame, server_id)) = source else {
+                let source = self
+                    .window_id_under_cursor()
+                    .filter(|window| self.state.windows.is_admitted(*window));
+                let Some(window) = source else {
                     let _ = self.drag_manager.actor.resolve_start(
                         session_id,
                         None,
@@ -2393,6 +2388,8 @@ impl Reactor {
                     return Ok(EventOutcome::no_change());
                 };
                 self.cancel_window_presentations(vec![window]);
+                let state = self.state.windows.window(window).unwrap();
+                let (frame, server_id) = (state.frame_monotonic, state.info.sys_id);
                 self.layout_manager
                     .layout_engine
                     .forget_native_layout_for_window(&self.state.windows, window);
@@ -3315,6 +3312,9 @@ impl Reactor {
             };
             if let Some(app) = self.app_manager.apps.get(&write.window.pid) {
                 if write.coalesced {
+                    if let Some(window) = self.state.windows.window_mut(write.window) {
+                        window.frame_monotonic = write.frame;
+                    }
                     app.handle.send_interactive_frame(
                         write.window,
                         write.frame,

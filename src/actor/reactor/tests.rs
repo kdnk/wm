@@ -1,4 +1,4 @@
-// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
+// Modified by kdnk for wm on 2026-11-15. Original attribution is preserved in LICENSE.
 use objc2_core_foundation::{CGPoint, CGSize};
 use test_log::test;
 
@@ -2321,6 +2321,136 @@ fn layout_events_defer_arrangement_during_drag_except_removal() {
         let before = reactor.layout_update_count;
         reactor.send_layout_event(observe());
         assert_eq!(reactor.layout_update_count, before + 1);
+    }
+}
+
+#[test]
+fn modifier_drag_handoff_starts_from_last_commanded_frame_without_an_ax_echo() {
+    use crate::actor::drag::{DragMotion, DragScene, DragSource, MouseButton};
+
+    for (cancel, stale_echo) in [false, true]
+        .into_iter()
+        .flat_map(|cancel| [false, true].map(move |echo| (cancel, echo)))
+    {
+        let (mut apps, mut reactor) = test_context();
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+        let space = SpaceId::new(1);
+        let wid = WindowId::new(1, 1);
+        apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+        let tile = apps.windows[&wid].frame;
+        reactor.config.settings.animate = true;
+        reactor.config.settings.layout.scrolling.animate = Some(true);
+        reactor
+            .layout_manager
+            .layout_engine
+            .set_layout_settings(&reactor.config.settings.layout);
+        let (sender, receiver) = animation::AnimationSender::channel();
+        reactor.animation_tx = Some(sender);
+        let mut presenter = animation::AnimationManager::new();
+        reactor.drag_manager.actor.begin_modifier(
+            DragSource {
+                window: wid,
+                origin_frame: tile,
+                last_frame: tile,
+                origin_space: Some(space),
+                current_space: Some(space),
+                tiled: true,
+            },
+            tile.mid(),
+            crate::common::config::MouseAction::Move,
+            DragScene::default(),
+        );
+        reactor.drag_manager.externally_controlled_window = Some(wid);
+        let wsid = reactor.test_window_server_id(wid);
+        let previous_txid = reactor.transaction_manager.get_last_sent_txid(wsid);
+        reactor.handle_event(Event::DragMotion(DragMotion {
+            point: CGPoint::new(tile.mid().x + 100., tile.mid().y),
+        }));
+        let echoes = apps.simulate_events();
+        let dragged = apps.windows[&wid].frame;
+        assert_eq!(dragged.origin, CGPoint::new(tile.origin.x + 100., tile.origin.y));
+        assert!(echoes.iter().any(|event| matches!(event, Event::WindowFrameChanged(..))));
+        if stale_echo {
+            reactor.handle_event(Event::WindowFrameChanged(
+                wid,
+                tile,
+                Some(previous_txid),
+                Requested(false),
+                Some(MouseState::Down),
+            ));
+        }
+
+        crate::sys::window_server::set_window_under_cursor_override(Some(None));
+        reactor.handle_event(if cancel {
+            Event::DragCancel
+        } else {
+            Event::MouseUp(MouseButton::Left)
+        });
+        crate::sys::window_server::set_window_under_cursor_override(None);
+        for message in receiver.commands.try_iter() {
+            presenter.handle_message(message);
+        }
+        presenter.tick_at(Instant::now());
+        apps.simulate_events();
+        let first = apps.windows[&wid].frame;
+        assert!(
+            (first.origin.x - dragged.origin.x).abs() < 0.1
+                && (first.origin.y - dragged.origin.y).abs() < 0.1,
+            "cancel={cancel}, stale_echo={stale_echo}: handoff jumped from {dragged:?} to {first:?}"
+        );
+        presenter.tick_at(Instant::now() + Duration::from_millis(40));
+        apps.simulate_events();
+        let approaching = apps.windows[&wid].frame;
+        assert!(approaching.origin.x > tile.origin.x && approaching.origin.x < dragged.origin.x);
+        presenter.tick_at(Instant::now() + Duration::from_secs(1));
+        apps.simulate_events();
+        assert_eq!(apps.windows[&wid].frame, tile);
+        assert!(!reactor.drag_manager.actor.is_active());
+    }
+}
+
+#[test]
+fn rejected_modifier_frames_do_not_change_model_geometry() {
+    use crate::actor::drag::{DragScene, DragSource};
+
+    for rejected in ["inactive", "minimized", "no-app"] {
+        let (mut apps, mut reactor) = test_context();
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+        let space = SpaceId::new(1);
+        let wid = WindowId::new(1, 1);
+        apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+        let tile = apps.windows[&wid].frame;
+        if rejected != "inactive" {
+            reactor.drag_manager.actor.begin_modifier(
+                DragSource {
+                    window: wid,
+                    origin_frame: tile,
+                    last_frame: tile,
+                    origin_space: Some(space),
+                    current_space: Some(space),
+                    tiled: true,
+                },
+                tile.mid(),
+                crate::common::config::MouseAction::Move,
+                DragScene::default(),
+            );
+        }
+        if rejected == "minimized" {
+            reactor.state.windows.observe_minimized(wid);
+        } else if rejected == "no-app" {
+            reactor.app_manager.apps.remove(&wid.pid);
+        }
+        let moved = CGRect::new(CGPoint::new(tile.origin.x + 100., tile.origin.y), tile.size);
+        reactor.apply_event_outcome(
+            EventOutcome::no_change().with_interactive_window_frame_write(wid, moved, false),
+        );
+        apps.simulate_events();
+        assert_eq!(apps.windows[&wid].frame, tile, "{rejected}");
+        assert_eq!(
+            reactor.state.windows.window(wid).unwrap().frame_monotonic,
+            tile,
+            "{rejected}"
+        );
     }
 }
 

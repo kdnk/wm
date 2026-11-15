@@ -163,6 +163,17 @@ impl FrameCadence {
         }
     }
 
+    fn retarget(&mut self, previous: Option<Self>, now: Instant) {
+        match (*self, previous) {
+            (Self::Capped { interval, .. }, Some(Self::Capped { interval: old, next }))
+                if interval == old =>
+            {
+                *self = Self::Capped { interval, next };
+            }
+            _ => self.reset(now),
+        }
+    }
+
     fn delay(&self) -> Duration {
         match self {
             Self::DisplayLinked => Duration::from_secs_f64(1.0 / 60.0),
@@ -476,6 +487,7 @@ impl CameraAnimation {
             old.stop();
             previous = None;
         }
+        let previous_cadence = previous.as_ref().map(|old| old.cadence);
         let now = Instant::now();
         if self.animate && self.gesture.is_none() && !self.presentation.animated() {
             let (from, velocity) = if let Some(old) = &previous {
@@ -505,7 +517,7 @@ impl CameraAnimation {
         }
         self.geometry_started = now;
         self.geometry_progress = 0.0;
-        self.cadence.reset(now);
+        self.cadence.retarget(previous_cadence, now);
         let camera_velocity = self.presentation.position_velocity(now).1;
         for window in &mut self.windows {
             window.motion = None;
@@ -1555,6 +1567,7 @@ impl ActiveAnimation {
     }
 
     fn replace_with(self, mut next: Animation) -> Self {
+        let previous_cadence = self.animation.cadence;
         for window in &mut next.windows {
             if let Some(old) = self.animation.windows.iter().find(|old| old.wid == window.wid) {
                 window.from = old.frame;
@@ -1578,7 +1591,7 @@ impl ActiveAnimation {
         }
         next.windows.sort_unstable_by_key(|w| w.wid.pid);
         let started = Instant::now();
-        next.cadence.reset(started);
+        next.cadence.retarget(Some(previous_cadence), started);
         Self {
             animation: next,
             started,
@@ -2679,6 +2692,123 @@ mod tests {
         }
     }
 
+    fn capped_retarget_message(
+        handle: &AppThreadHandle,
+        viewport: bool,
+        target: f64,
+        fps: f64,
+    ) -> Message {
+        let from = rect(0., 0., 500., 800.);
+        let to = rect(target, 0., 500., 800.);
+        if viewport {
+            let mut camera = motion_camera(handle, from, to);
+            camera.duration = Duration::from_secs(1);
+            camera.cadence = FrameCadence::new(fps, Instant::now());
+            Message::Camera(Box::new(camera))
+        } else {
+            let mut next = animation(handle, WindowId::new(1, 1), from, to);
+            next.duration = Duration::from_secs(1);
+            next.cadence = FrameCadence::new(fps, Instant::now());
+            Message::Replace(next)
+        }
+    }
+
+    fn motion_started(manager: &AnimationManager) -> Instant {
+        match &manager.motions[0] {
+            Motion::Transition(a) => a.started,
+            Motion::Viewport(c) => c.geometry_started,
+        }
+    }
+
+    fn assert_capped_retarget_publications(viewport: bool) {
+        let (handle, mut rx) = AppThreadHandle::channel();
+        let mut manager = AnimationManager::new();
+        manager.handle_message(capped_retarget_message(&handle, viewport, 1000., 20.));
+        let start = motion_started(&manager);
+        let phase = start - Duration::from_millis(10);
+        match &mut manager.motions[0] {
+            Motion::Transition(a) => a.animation.cadence.reset(phase),
+            Motion::Viewport(c) => c.cadence.reset(phase),
+        }
+        collect_requests(&mut rx);
+        let mut previous = rect(0., 0., 500., 800.);
+        for index in 0..6 {
+            manager.handle_message(capped_retarget_message(
+                &handle,
+                viewport,
+                if index % 2 == 0 { 2000. } else { -1000. },
+                20.,
+            ));
+            assert!(collect_requests(&mut rx).is_empty());
+            let deadline = phase + Duration::from_millis((index + 1) * 50);
+            manager.tick_at(deadline - Duration::from_millis(5));
+            assert!(
+                collect_requests(&mut rx).is_empty(),
+                "retarget cannot bypass the cap"
+            );
+            manager.tick_at(deadline);
+            let requests = collect_requests(&mut rx);
+            assert!(
+                matches!(requests.as_slice(), [Observed::Frame { frame, .. }] if *frame != previous),
+                "retarget must publish at the existing deadline: {requests:?}"
+            );
+            let Observed::Frame { frame, .. } = requests[0] else {
+                unreachable!()
+            };
+            previous = frame;
+            manager.tick_at(deadline);
+            assert!(collect_requests(&mut rx).is_empty());
+        }
+    }
+
+    #[test]
+    fn ordinary_capped_retarget_publishes_during_repeated_target_changes() {
+        assert_capped_retarget_publications(false);
+    }
+
+    #[test]
+    fn viewport_capped_retarget_publishes_during_repeated_target_changes() {
+        assert_capped_retarget_publications(true);
+    }
+
+    #[test]
+    fn replacement_applies_new_fps_policy_and_keeps_due_deadlines() {
+        for viewport in [false, true] {
+            let (handle, mut rx) = AppThreadHandle::channel();
+            let mut manager = AnimationManager::new();
+            manager.handle_message(capped_retarget_message(&handle, viewport, 1000., 20.));
+            collect_requests(&mut rx);
+            for (fps, before, due) in [(10., 60, 100), (0., 0, 1), (20., 1, 50)] {
+                manager.handle_message(capped_retarget_message(&handle, viewport, 2000., fps));
+                let start = motion_started(&manager);
+                if before > 0 {
+                    manager.tick_at(start + Duration::from_millis(before));
+                    assert!(collect_requests(&mut rx).is_empty(), "new cap must take effect");
+                }
+                manager.tick_at(start + Duration::from_millis(due));
+                assert!(matches!(collect_requests(&mut rx).as_slice(), [
+                    Observed::Frame { .. }
+                ]));
+            }
+            let past = Instant::now() - Duration::from_millis(150);
+            match &mut manager.motions[0] {
+                Motion::Transition(a) => a.animation.cadence.reset(past),
+                Motion::Viewport(c) => c.cadence.reset(past),
+            }
+            manager.handle_message(capped_retarget_message(&handle, viewport, -1000., 20.));
+            let start = motion_started(&manager);
+            manager.tick_at(start + Duration::from_millis(1));
+            assert!(matches!(collect_requests(&mut rx).as_slice(), [
+                Observed::Frame { .. }
+            ]));
+            manager.tick_at(start + Duration::from_millis(5));
+            assert!(
+                collect_requests(&mut rx).is_empty(),
+                "missed ticks cannot replay"
+            );
+        }
+    }
+
     #[test]
     fn settling_motion_publishes_exact_targets_and_releases_leases_once() {
         for viewport in [false, true] {
@@ -3489,6 +3619,55 @@ mod tests {
                 )
             )),
             "cancelled frames and the target cannot be replayed: {requests:?}"
+        );
+    }
+
+    #[test]
+    fn modifier_grab_anchors_motion_to_the_cancelled_presented_frame() {
+        use super::super::testing::*;
+        use crate::actor::drag::{DragMotion, MouseButton};
+        use crate::actor::reactor::Event;
+        use crate::common::config::MouseAction;
+
+        let (mut apps, mut reactor) = test_context();
+        let space = SpaceId::new(1);
+        apps.make_app_and_settle_on_screen(
+            &mut reactor,
+            rect(0., 0., 1000., 1000.),
+            space,
+            1,
+            make_windows(1),
+        );
+        let wid = WindowId::new(1, 1);
+        let target = rect(500., 0., 500., 800.);
+        let presented = rect(200., 0., 500., 800.);
+        reactor.state.windows.window_mut(wid).unwrap().frame_monotonic = target;
+        let wsid = reactor.state.windows.window(wid).unwrap().info.sys_id.unwrap();
+        let (handle, mut rx) = AppThreadHandle::channel();
+        reactor.app_manager.apps.get_mut(&1).unwrap().handle = handle.clone();
+        let (sender, _receiver) = AnimationSender::channel();
+        sender.control.lock().frames.insert(wid, (handle, presented));
+        reactor.animation_tx = Some(sender);
+        crate::sys::window_server::set_window_under_cursor_override(Some(Some(wsid)));
+        let start = reactor.dispatch_workflow(Event::ModifierMouseDown {
+            button: MouseButton::Left,
+            point: presented.mid(),
+            action: MouseAction::Move,
+        });
+        crate::sys::window_server::set_window_under_cursor_override(None);
+        reactor.apply_event_outcome(start.unwrap());
+        collect_requests(&mut rx);
+        let moved = reactor
+            .dispatch_workflow(Event::DragMotion(DragMotion {
+                point: CGPoint::new(presented.mid().x + 1., presented.mid().y),
+            }))
+            .unwrap();
+        reactor.apply_event_outcome(moved);
+        let requests = collect_requests(&mut rx);
+        assert!(
+            matches!(requests.as_slice(), [Observed::Frame { wid: id, frame, .. }]
+                if *id == wid && *frame == rect(201., 0., 500., 800.)),
+            "the drag must continue from the presented frame: {requests:?}"
         );
     }
 
