@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
+# Modified by kdnk for wm on 2026-11-15. Original attribution is preserved in LICENSE.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd -P)
@@ -12,6 +12,7 @@ fi
 
 python3 tests/rift-settings-focus-verifier-test.py
 python3 tests/rift-multi-resize-verifier-test.py
+python3 tests/motion-content-verifier-test.py
 python3 scripts/check-fork-notices.py
 cargo test --locked --manifest-path cgs/Cargo.toml --lib exact_capture -- --test-threads=1
 cargo test --locked --lib -- --test-threads=1

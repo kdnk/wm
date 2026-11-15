@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
+# Modified by kdnk for wm on 2026-11-15. Original attribution is preserved in LICENSE.
 import argparse
 import ctypes
 import importlib.util
@@ -11,6 +11,73 @@ import subprocess
 import sys
 import time
 import uuid
+
+
+def validate_content(initial, records, title, axis):
+    try:
+        samples = [record for record in records if record["kind"] == "sample"]
+        assert samples, f"{title}: no content samples recorded"
+        content = [snapshot["content"][title] for snapshot in [initial, *samples]]
+        for state in content:
+            assert isinstance(state["generation"], int) and state["generation"] >= 0, (
+                f"{title}: invalid paint generation"
+            )
+            assert len(state["size"]) == 2 and all(value > 0 for value in state["size"]), (
+                f"{title}: invalid content size"
+            )
+        settled = content[-1]
+        native_frames = [snapshot["frames"][title] for snapshot in [initial, *samples]]
+        insets = [native_frames[0][dimension + 2] - content[0]["size"][dimension]
+                  for dimension in range(2)]
+
+        def matches_native(frame, size):
+            return all(abs(frame[dimension + 2] - size[dimension] - insets[dimension]) <= 1
+                       for dimension in range(2))
+
+        native = [frame[axis] for frame in native_frames]
+        dimension = axis - 2
+        assert matches_native(native_frames[-1], settled["size"]), (
+            f"{title}: settled content size does not follow the native resize"
+        )
+        assert settled["painted_size"] == settled["size"], (
+            f"{title}: settled content has stale painted size "
+            f"{settled['painted_size']}, expected {settled['size']}"
+        )
+        paints = [record for record in records
+                  if record["kind"] == "paint_end" and record["title"] == title]
+        sizes = [state["size"] for state in content] + [paint["content_size"] for paint in paints]
+        changed = any(size != content[0]["size"] for size in sizes) or any(
+            abs(frame[dimension + 2] - native_frames[0][dimension + 2]) > 1
+            for frame in native_frames for dimension in range(2)
+        )
+        stale_samples = sum(state["painted_size"] != state["size"] for state in content[1:])
+        checks = {"paint_count": len(paints), "stale_samples": stale_samples,
+                  "native_size_mismatches": sum(not matches_native(frame, state["size"])
+                                                for frame, state in zip(native_frames[1:], content[1:]))}
+        if not changed:
+            return checks
+        assert settled["generation"] > content[0]["generation"], (
+            f"{title}: paint generation did not advance during resizing"
+        )
+        fresh = [paint for paint in paints if paint["generation"] > content[0]["generation"]]
+        assert fresh, f"{title}: resized content has no completed paint"
+        assert (fresh[-1]["generation"], fresh[-1]["content_size"]) == (
+            settled["generation"], settled["size"]
+        ), f"{title}: final paint does not match the settled content generation and size"
+        low, high = min(native), max(native)
+        interior = {round(value, 1) for value in native if low + 1 < value < high - 1}
+        if len(interior) >= 3:
+            content_low = min(size[dimension] for size in sizes)
+            content_high = max(size[dimension] for size in sizes)
+            assert any(
+                low + 1 < paint["native"][axis] < high - 1
+                and content_low < paint["content_size"][dimension] < content_high
+                and matches_native(paint["native"], paint["content_size"])
+                for paint in fresh
+            ), f"{title}: content painted only at endpoints of a native resize"
+        return checks
+    except (KeyError, TypeError, IndexError) as error:
+        raise AssertionError(f"{title}: malformed content trace: {error}") from error
 
 
 def fixture(label):
@@ -54,7 +121,7 @@ def fixture(label):
 
     def event(kind, window, **details):
         if recording:
-            trace.append({"kind": kind, "time_ns": time.monotonic_ns(), "title": window.windowTitle(),
+            trace.append({"kind": kind, "time_ns": time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW), "title": window.windowTitle(),
                           "native": native_frame(window), "qt_size": [window.width(), window.height()], **details})
 
     class Content(QWidget):
@@ -66,7 +133,7 @@ def fixture(label):
             self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
         def paintEvent(self, paint_event):
             self.generation += 1
-            started = time.monotonic_ns()
+            started = time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)
             event("paint_start", self.window, generation=self.generation, content_size=[self.width(), self.height()])
             painter = QPainter(self)
             painter.fillRect(self.rect(), QColor("#17202a"))
@@ -119,12 +186,15 @@ def fixture(label):
     def frames():
         return {w.windowTitle(): native_frame(w) for w, _ in windows}
 
+    def content_states():
+        return {w.windowTitle(): {"generation": c.generation, "painted_size": c.painted_size,
+                                  "size": [c.width(), c.height()]} for w, c in windows}
+
     def poll():
         nonlocal recording
         if recording:
-            trace.append({"kind": "sample", "time_ns": time.monotonic_ns(), "frames": frames(),
-                          "content": {w.windowTitle(): {"generation": c.generation, "painted_size": c.painted_size,
-                                                       "size": [c.width(), c.height()]} for w, c in windows}})
+            trace.append({"kind": "sample", "time_ns": time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW), "frames": frames(),
+                          "content": content_states()})
         if not select.select([sys.stdin], [], [], 0)[0]:
             return
         line = sys.stdin.readline()
@@ -142,7 +212,8 @@ def fixture(label):
             recording = False
             print(json.dumps(trace), flush=True)
         else:
-            print(json.dumps({"time_ns": time.monotonic_ns(), "frames": frames()}), flush=True)
+            print(json.dumps({"time_ns": time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW), "frames": frames(),
+                              "content": content_states()}), flush=True)
 
     timer = QTimer()
     timer.timeout.connect(poll)
@@ -224,11 +295,11 @@ def run(args):
                     str(target['window_server_id']), str(args.video_dir / (name + '.mov')),
                 ], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
                 time.sleep(0.25)
-            initial = command("start")["frames"][target["title"]][axis]
+            initial = command("start")
             events = []
             for delay, operation in operations:
                 time.sleep(delay)
-                events.append({"time_ns": time.monotonic_ns(), "command": operation})
+                events.append({"time_ns": time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW), "command": operation})
                 execute(*operation)
             time.sleep(1)
             records = command("trace")
@@ -238,7 +309,9 @@ def run(args):
             if recorder:
                 _, error = recorder.communicate(timeout=6)
                 video_result = {'returncode': recorder.returncode, 'stderr': error.decode()}
-            record = {"name": name, "video": video_result, "events": events, "samples": samples, "events_from_app": [r for r in records if r["kind"] != "sample"], "windows": current}
+            record = {"name": name, "video": video_result, "events": events, "initial": initial,
+                      "samples": samples, "events_from_app": [r for r in records if r["kind"] != "sample"],
+                      "windows": current}
             report["scenes"].append(record)
             values = [s["frames"][target["title"]][axis] for s in samples]
             low, high = min(values), max(values)
@@ -251,11 +324,13 @@ def run(args):
                 assert high - low > 10, f"{name}: fixture geometry did not change"
                 assert len(interior) >= 3, f"{name}: resize jumped without intermediate native sizes"
                 if returns_to_start:
-                    assert abs(values[-1] - initial) <= 1, (
-                        f"{name}: reversal ended at {values[-1]}, expected {initial}"
+                    initial_size = initial["frames"][target["title"]][axis]
+                    assert abs(values[-1] - initial_size) <= 1, (
+                        f"{name}: reversal ended at {values[-1]}, expected {initial_size}"
                     )
                 assert len(current) == 2, f"{name}: fixture window disappeared"
                 settled = samples[-1]["frames"]
+                record["content_checks"] = {}
                 for window in current:
                     frame = window["frame"]
                     expected = [frame["origin"]["x"], frame["origin"]["y"],
@@ -269,7 +344,10 @@ def run(args):
                     assert all(all(abs(a - b) <= 1 for a, b in zip(item, actual)) for item in tail), (
                         f"{name}: native geometry did not settle after the last target"
                     )
-                print("PASS geometry", name, {kind: sum(r["kind"] == kind for r in records) for kind in ["paint_end", "resize", "move"]}, flush=True)
+                    record["content_checks"][window["title"]] = validate_content(
+                        initial, records, window["title"], axis
+                    )
+                print("PASS geometry and content", name, record["content_checks"], flush=True)
             except AssertionError as error:
                 report["failures"].append(str(error))
                 print(f"FAIL {error}", flush=True)

@@ -149,8 +149,10 @@ def run(args):
         ], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         try:
             time.sleep(0.3)
-            command("start")
-            action()
+            initial = command("start")
+            started = time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)
+            details = action()
+            finished = time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)
             time.sleep(1)
             samples = command("trace")
         finally:
@@ -158,10 +160,16 @@ def run(args):
         assert recorder.returncode == 0, error.decode()
         current = windows()
         record = {"name": name, "samples": samples, "windows": current,
-                  "pointer": pointer.position(), "video": name + ".mov"}
+                  "pointer": pointer.position(), "video": name + ".mov",
+                  "initial": initial, "action_started_ns": started,
+                  "action_finished_ns": finished}
+        if isinstance(details, dict):
+            record["details"] = details
         report["scenes"].append(record)
         native = [sample for sample in samples if sample["kind"] == "sample"]
         assert native, "No native samples captured"
+        assert initial["time_ns"] <= started <= finished <= native[-1]["time_ns"], (
+            "Driver and fixture timestamps use different clock bases")
         for window in current:
             frame = window["frame"]
             expected = [frame["origin"]["x"], frame["origin"]["y"],
@@ -170,6 +178,7 @@ def run(args):
             assert all(abs(a - b) <= 1 for a, b in zip(actual, expected)), (
                 f"{name}: native geometry {actual} differs from {expected}")
         print("PASS native geometry", name, flush=True)
+        return record
 
     try:
         for key, value in overrides.items():
@@ -190,6 +199,77 @@ def run(args):
         def prepare(index):
             focus(targets[index])
             time.sleep(0.7)
+
+        if args.interaction_check:
+            if args.interaction_check in ["all", "focus"]:
+                prepare(0)
+                setting("settings.animation_fps", 20.0)
+
+                def rapid_focus():
+                    commands = []
+                    for index in range(16):
+                        commands.append(time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW))
+                        focus(targets[3 if index % 2 == 0 else 0])
+                        time.sleep(0.005)
+                    return {"command_times_ns": commands}
+
+                record = scene("capped-focus-retarget", rapid_focus)
+                during = [sample for sample in record["samples"]
+                          if sample["kind"] == "sample"
+                          and record["action_started_ns"] <= sample["time_ns"]
+                          <= record["action_finished_ns"]]
+                title = targets[0]["title"]
+                positions = {round(sample["frames"][title][0]) for sample in during}
+                assert len(positions) >= 3, "Repeated focus commands starved native motion"
+                setting("settings.animation_fps", args.animation_fps)
+
+            if args.interaction_check in ["all", "drop"]:
+                prepare(1)
+                source = next(w for w in windows() if w["id"] == targets[1]["id"])
+                title = source["title"]
+                before = {w["title"]: w["layout_position"] for w in windows()}
+
+                def drag_inside_tile():
+                    frame = command("snapshot")["frames"][title]
+                    start = [frame[0] + frame[2] * 0.5, frame[1] + frame[3] * 0.5]
+                    assert screen_left < start[0] < screen_right
+                    end = [start[0] + 100, start[1] + 30]
+                    pointer.mouse(1, start, 1 << 19)
+                    try:
+                        for index in range(1, 13):
+                            t = index / 12
+                            pointer.mouse(6, [a + (b - a) * t for a, b in zip(start, end)], 1 << 19)
+                            time.sleep(0.016)
+                        time.sleep(0.04)
+                        released_frame = command("snapshot")["frames"][title]
+                        released = time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)
+                    finally:
+                        pointer.mouse(2, end, 1 << 19)
+                    return {"release_time_ns": released, "release_frame": released_frame,
+                            "source_title": title}
+
+                record = scene("drop-back-into-tile", drag_inside_tile)
+                assert before == {w["title"]: w["layout_position"] for w in windows()}, (
+                    "The no-op drop changed the layout")
+                released = record["details"]["release_frame"][0]
+                settled = next(w for w in record["windows"] if w["title"] == title)["frame"]["origin"]["x"]
+                assert abs(released - settled) > 40, "Fixture did not move away from its tile"
+                low, high = sorted([released, settled])
+                intermediate = {round(sample["frames"][title][0]) for sample in record["samples"]
+                                if sample["kind"] == "sample"
+                                and sample["time_ns"] > record["details"]["release_time_ns"]
+                                and low + 1 < sample["frames"][title][0] < high - 1}
+                assert len(intermediate) >= 2, "Dropping into the original tile snapped to stale geometry"
+                released_y = record["details"]["release_frame"][1]
+                settled_y = next(w for w in record["windows"] if w["title"] == title)["frame"]["origin"]["y"]
+                assert abs(released_y - settled_y) > 10, "Fixture did not leave its tile vertically"
+                low, high = sorted([released_y, settled_y])
+                vertical = {round(sample["frames"][title][1]) for sample in record["samples"]
+                            if sample["kind"] == "sample"
+                            and sample["time_ns"] > record["details"]["release_time_ns"]
+                            and low + 1 < sample["frames"][title][1] < high - 1}
+                assert len(vertical) >= 2, "Vertical drop settlement snapped to display bounds"
+            return
 
         if args.settling_only:
             prepare(1)
@@ -350,6 +430,8 @@ if __name__ == "__main__":
                         help="Record fullscreen entry, exit, and interrupted toggles")
     scenes.add_argument("--settling-only", action="store_true",
                         help="Record small resizes and interrupted geometry and focus changes")
+    scenes.add_argument("--interaction-check", choices=["all", "focus", "drop"],
+                        help="Verify repeated capped focus and native drag-release continuity")
     parser.add_argument("--animation-fps", type=float, default=0.0,
                         help="Animation FPS cap; 0 follows the display refresh rate")
     run(parser.parse_args())
