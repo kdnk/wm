@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
+# Modified by kdnk for wm on 2026-11-15. Original attribution is preserved in LICENSE.
 """Record motion and pointer behavior using PID-checked disposable windows."""
 
 import argparse
@@ -85,6 +85,8 @@ def run(args):
         "settings.layout.scrolling.preset_column_widths": [0.5, 1.0],
         "settings.drag_drop.modifier": "alt",
     }
+    if args.settling_only:
+        overrides["settings.layout.scrolling.column_width_ratio"] = 0.5
     original_settings = {}
     for key in overrides:
         value = config
@@ -103,6 +105,10 @@ def run(args):
     displays = query("displays")
     display_index, display = next((index + 1, display) for index, display in enumerate(displays)
                                   if display["uuid"] == active["display_uuid"])
+    if args.settling_only:
+        overrides["settings.layout.scrolling.preset_column_widths"] = [
+            0.5, 0.5 + 2 / display["frame"]["size"]["width"],
+        ]
     screen_left = display["frame"]["origin"]["x"]
     screen_right = screen_left + display["frame"]["size"]["width"]
     empty = next((w for w in query("workspaces") if w["display_uuid"] == active["display_uuid"]
@@ -184,6 +190,34 @@ def run(args):
         def prepare(index):
             focus(targets[index])
             time.sleep(0.7)
+
+        if args.settling_only:
+            prepare(1)
+            title = targets[1]["title"]
+
+            def width():
+                return next(w for w in windows() if w["title"] == title)["frame"]["size"]["width"]
+
+            before = width()
+            scene("small-resize", lambda: execute("layout", "switch-preset-column-width"))
+            after = width()
+            assert 0 < abs(after - before) <= 4, f"Expected a small resize, got {before} -> {after}"
+
+            def reverse_resize():
+                execute("layout", "switch-preset-column-width")
+                time.sleep(0.045)
+                execute("layout", "switch-preset-column-width")
+            scene("small-resize-reverse", reverse_resize)
+            assert width() == after, "Interrupted resize did not return to its target width"
+
+            prepare(0)
+
+            def reverse_focus():
+                focus(targets[3])
+                time.sleep(0.045)
+                focus(targets[0])
+            scene("focus-reverse", reverse_focus)
+            return
 
         if args.fullscreen_only:
             prepare(1)
@@ -311,8 +345,11 @@ if __name__ == "__main__":
     parser.add_argument("--qt-python", type=Path, default=Path("/Applications/Anki.app/Contents/Frameworks/Python.framework/Versions/3.13/bin/python3.13"))
     parser.add_argument("--qt-packages", type=Path, default=Path("/Applications/Anki.app/Contents/Resources/app_packages"))
     parser.add_argument("--expect-cursor-retention", action="store_true")
-    parser.add_argument("--fullscreen-only", action="store_true",
+    scenes = parser.add_mutually_exclusive_group()
+    scenes.add_argument("--fullscreen-only", action="store_true",
                         help="Record fullscreen entry, exit, and interrupted toggles")
+    scenes.add_argument("--settling-only", action="store_true",
+                        help="Record small resizes and interrupted geometry and focus changes")
     parser.add_argument("--animation-fps", type=float, default=0.0,
                         help="Animation FPS cap; 0 follows the display refresh rate")
     run(parser.parse_args())

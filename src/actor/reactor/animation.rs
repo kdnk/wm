@@ -1,4 +1,4 @@
-// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
+// Modified by kdnk for wm on 2026-11-15. Original attribution is preserved in LICENSE.
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -200,6 +200,7 @@ pub struct Animation {
     cadence: FrameCadence,
     duration: Duration,
     display: u32,
+    scale: f64,
     windows: Vec<PresentedWindow>,
     handled_windows: Vec<WindowId>,
 }
@@ -431,6 +432,16 @@ impl CameraAnimation {
             .clamp(0.0, 1.0)
         };
         let progress = progress.max(self.geometry_progress);
+        let progress = if self
+            .windows
+            .iter()
+            .filter_map(|window| window.motion)
+            .all(|spring| spring.settled(progress, self.duration, scale))
+        {
+            1.0
+        } else {
+            progress
+        };
         self.geometry_progress = progress;
         let camera_velocity = self.presentation.position_velocity(now).1;
         stage_windows(
@@ -1157,6 +1168,7 @@ impl AnimationManager {
             return false;
         };
         anim.display = screen.id.as_u32();
+        anim.scale = screen.backing_scale;
         let bounds = scrolling_bounds(reactor, space);
         let mut any_frame_changed = camera;
 
@@ -1584,6 +1596,17 @@ impl ActiveAnimation {
             .clamp(0.0, 1.0)
         };
         let t = t.max(self.progress);
+        let t = if self
+            .animation
+            .windows
+            .iter()
+            .filter_map(|window| window.motion)
+            .all(|spring| spring.settled(t, self.animation.duration, self.animation.scale))
+        {
+            1.0
+        } else {
+            t
+        };
         self.animation.stage_frame(t, frames);
         self.progress = t;
     }
@@ -1597,6 +1620,7 @@ impl Animation {
             cadence: FrameCadence::new(fps, Instant::now()),
             duration: Duration::from_secs_f64(duration),
             display: 0,
+            scale: 1.0,
             windows: vec![],
             handled_windows: vec![],
         }
@@ -1709,6 +1733,30 @@ impl FrameSpring {
         Self { from, to, velocity }
     }
 
+    fn settled(self, progress: f64, duration: Duration, scale: f64) -> bool {
+        if progress >= 1.0 || duration.is_zero() {
+            return true;
+        }
+        let (frame, velocity) = self.sample(progress, duration);
+        let displacement = subtract_frame(frame, self.to);
+        let tolerance = 0.25 / scale;
+        let omega = 12.0 / duration.as_secs_f64();
+        let edges = |origin: CGPoint, size: CGSize| {
+            [
+                origin.x,
+                origin.y,
+                origin.x + size.width,
+                origin.y + size.height,
+            ]
+        };
+        edges(displacement.origin, displacement.size)
+            .into_iter()
+            .zip(edges(velocity.origin, velocity.size))
+            .all(|(distance, speed)| {
+                distance.abs() <= tolerance && speed.abs() / omega <= tolerance
+            })
+    }
+
     fn sample(self, progress: f64, duration: Duration) -> (CGRect, FrameVelocity) {
         if progress >= 1.0 || duration.is_zero() {
             return (self.to, FrameVelocity::default());
@@ -1810,6 +1858,135 @@ mod tests {
             Motion::Viewport(c) => Some(c),
             _ => None,
         })
+    }
+
+    #[test]
+    fn small_resize_settles_before_deadline_with_one_exact_terminal_frame() {
+        for viewport in [false, true] {
+            for scale in [1., 2.] {
+                let (handle, mut rx) = AppThreadHandle::channel();
+                let wid = WindowId::new(1, 1);
+                let from = rect(0., 0., 400., 800.);
+                let to = rect(0., 0., 402., 800.);
+                let mut manager = AnimationManager::new();
+                let start = if viewport {
+                    let mut camera = motion_camera(&handle, from, to);
+                    camera.scale = scale;
+                    manager.handle_message(Message::Camera(Box::new(camera)));
+                    camera_mut(&mut manager).unwrap().geometry_started
+                } else {
+                    let mut motion = animation(&handle, wid, from, to);
+                    motion.scale = scale;
+                    manager.handle_message(Message::Replace(motion));
+                    transition_state(&manager).unwrap().started
+                };
+                collect_requests(&mut rx);
+                manager.tick_at(start + Duration::from_millis(100));
+                let mut requests = collect_requests(&mut rx);
+                if scale == 2. {
+                    assert!(matches!(requests.as_slice(), [Observed::Frame { frame, .. }]
+                        if frame.size.width > from.size.width && frame.size.width < to.size.width));
+                    assert!(manager.has_work(), "Retina must retain visible edge motion");
+                    manager.tick_at(start + Duration::from_millis(125));
+                    requests = collect_requests(&mut rx);
+                }
+                assert_animation_frame(&requests[0], wid, to);
+                assert!(matches!(requests.as_slice(), [Observed::Frame { .. },
+                    Observed::Request(Request::EndWindowAnimation(id, _))] if *id == wid));
+                assert!(!manager.has_work());
+                manager.tick_at(start + Duration::from_millis(300));
+                assert!(collect_requests(&mut rx).is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn settling_waits_for_every_window_and_both_far_edges() {
+        let (handle, mut rx) = AppThreadHandle::channel();
+        for delta in [rect(2., 0., 2., 0.), rect(0., 2., 0., 2.)] {
+            let from = rect(10., 10., 400., 800.);
+            let to = add_frame(from, delta);
+            let mut manager = AnimationManager::new();
+            manager.handle_message(Message::Replace(animation(
+                &handle,
+                WindowId::new(1, 1),
+                from,
+                to,
+            )));
+            let start = transition_state(&manager).unwrap().started;
+            collect_requests(&mut rx);
+            manager.tick_at(start + Duration::from_millis(100));
+            assert!(
+                manager.has_work(),
+                "right/bottom error is larger than either component"
+            );
+            assert!(
+                matches!(collect_requests(&mut rx).as_slice(), [Observed::Frame { frame, .. }]
+                if *frame != to)
+            );
+            manager.tick_at(start + Duration::from_millis(150));
+            assert_animation_frame(&collect_requests(&mut rx)[0], WindowId::new(1, 1), to);
+            assert!(!manager.has_work());
+        }
+
+        let small = WindowId::new(1, 1);
+        let large = WindowId::new(1, 2);
+        let from = rect(0., 0., 400., 800.);
+        let mut motion = animation(&handle, small, from, rect(0., 0., 402., 800.));
+        motion.add_window(
+            &handle,
+            large,
+            from,
+            rect(500., 0., 800., 800.),
+            Default::default(),
+        );
+        let mut manager = AnimationManager::new();
+        manager.handle_message(Message::Replace(motion));
+        let start = transition_state(&manager).unwrap().started;
+        collect_requests(&mut rx);
+        manager.tick_at(start + Duration::from_millis(100));
+        let requests = collect_requests(&mut rx);
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|r| matches!(r, Observed::Frame { .. })));
+        assert!(
+            manager.has_work(),
+            "a small resize cannot finish a larger motion"
+        );
+        manager.tick_at(start + Duration::from_millis(300));
+        let requests = collect_requests(&mut rx);
+        assert_animation_frame(&requests[0], small, rect(0., 0., 402., 800.));
+        assert_animation_frame(&requests[1], large, rect(500., 0., 800., 800.));
+        assert!(!manager.has_work());
+    }
+
+    #[test]
+    fn retarget_at_the_published_frame_keeps_inherited_velocity() {
+        let (handle, mut rx) = AppThreadHandle::channel();
+        let wid = WindowId::new(1, 1);
+        let from = rect(0., 0., 400., 800.);
+        let mut manager = AnimationManager::new();
+        manager.handle_message(Message::Replace(animation(
+            &handle,
+            wid,
+            from,
+            rect(500., 0., 800., 800.),
+        )));
+        let start = transition_state(&manager).unwrap().started;
+        collect_requests(&mut rx);
+        manager.tick_at(start + Duration::from_millis(50));
+        let Observed::Frame { frame: published, .. } = collect_requests(&mut rx)[0] else {
+            panic!("frame");
+        };
+        manager.handle_message(Message::Replace(animation(&handle, wid, published, published)));
+        let start = transition_state(&manager).unwrap().started;
+        manager.tick_at(start);
+        assert!(manager.has_work(), "crossing the target at speed is not rest");
+        assert!(collect_requests(&mut rx).is_empty());
+        manager.tick_at(start + Duration::from_millis(1));
+        assert!(
+            matches!(collect_requests(&mut rx).as_slice(), [Observed::Frame { frame, .. }]
+            if frame.origin.x > published.origin.x && frame.size.width > published.size.width)
+        );
     }
 
     #[test]
@@ -1982,6 +2159,36 @@ mod tests {
             cadence: FrameCadence::DisplayLinked,
             bound: None,
         }
+    }
+
+    #[test]
+    fn settled_viewport_resize_keeps_camera_motion_and_velocity() {
+        let (handle, mut rx) = AppThreadHandle::channel();
+        let mut camera =
+            motion_camera(&handle, rect(500., 0., 400., 800.), rect(0., 0., 402., 800.));
+        camera.presentation.retarget(-500., 0., Instant::now(), camera.duration);
+        camera.replace(None);
+        camera.begin();
+        let start = camera.geometry_started;
+        collect_requests(&mut rx);
+        camera.sample(start + Duration::from_millis(100));
+        assert!(camera.active, "camera continues after geometry settles");
+        assert!(camera.windows[0].motion.is_none());
+        assert_eq!(camera.windows[0].frame.size.width, 402.);
+        assert!(camera.windows[0].velocity.origin.x < 0.);
+        assert!(camera.windows[0].velocity.size == CGSize::ZERO);
+        let frame = camera.windows[0].frame;
+        assert!(matches!(collect_requests(&mut rx).as_slice(), [
+            Observed::Frame { .. }
+        ]));
+        camera.sample(start + Duration::from_millis(125));
+        assert!(camera.windows[0].frame.origin.x < frame.origin.x);
+        assert_eq!(camera.windows[0].frame.size.width, 402.);
+        assert!(matches!(collect_requests(&mut rx).as_slice(), [
+            Observed::Frame { set_size: false, .. }
+        ]));
+        camera.sample(start + Duration::from_millis(300));
+        assert!(!camera.active);
     }
 
     fn fullscreen_camera(handle: &AppThreadHandle, within_gaps: bool) -> CameraAnimation {
@@ -2455,15 +2662,20 @@ mod tests {
             let start = camera_mut(&mut manager).unwrap().geometry_started;
             collect_requests(&mut rx);
             let mut count = 0;
-            for tick in 1..=120 {
+            for tick in 1..=60 {
                 manager.tick_at(start + Duration::from_secs_f64(tick as f64 / 120.));
                 count += collect_requests(&mut rx)
                     .iter()
                     .filter(|r| matches!(r, Observed::Frame { .. }))
                     .count();
             }
-            assert_eq!(count, expected, "configured FPS {fps}");
+            assert_eq!(count, expected / 2, "configured FPS {fps}");
+            assert!(manager.has_work());
+            manager.tick_at(start + Duration::from_secs(1));
+            collect_requests(&mut rx);
             assert!(!manager.has_work());
+            manager.tick_at(start + Duration::from_secs(2));
+            assert!(collect_requests(&mut rx).is_empty());
         }
     }
 
@@ -2524,15 +2736,20 @@ mod tests {
             active.animation.cadence.reset(start);
             collect_requests(&mut rx);
             let mut count = 0;
-            for tick in 1..=120 {
+            for tick in 1..=60 {
                 manager.tick_at(start + Duration::from_secs_f64(tick as f64 / 120.0));
                 count += collect_requests(&mut rx)
                     .iter()
                     .filter(|r| matches!(r, Observed::Frame { .. }))
                     .count();
             }
-            assert_eq!(count, expected);
+            assert_eq!(count, expected / 2);
+            assert!(manager.has_work());
+            manager.tick_at(start + Duration::from_secs(1));
+            collect_requests(&mut rx);
             assert!(!manager.has_work());
+            manager.tick_at(start + Duration::from_secs(2));
+            assert!(collect_requests(&mut rx).is_empty());
         }
         let (handle, mut rx) = AppThreadHandle::channel();
         let wid = WindowId::new(1, 1);
