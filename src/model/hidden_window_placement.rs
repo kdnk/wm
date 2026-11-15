@@ -1,4 +1,4 @@
-// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
+// Modified by kdnk for wm on 2026-11-15. Original attribution is preserved in LICENSE.
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -52,8 +52,15 @@ impl ScrollingDisplayBounds {
                 } else {
                     self.screen.max().x - HiddenWindowPlacement::REVEAL_PX
                 },
-                self.screen.origin.y,
+                self.apply(frame).origin.y,
             ))
+    }
+
+    pub(crate) fn for_motion(mut self, previous: CGRect) -> Self {
+        let bottom = self.screen.max().y.max(previous.max().y);
+        self.screen.origin.y = self.screen.origin.y.min(previous.origin.y);
+        self.screen.size.height = bottom - self.screen.origin.y;
+        self
     }
 
     pub(crate) fn apply(self, mut frame: CGRect) -> CGRect {
@@ -177,6 +184,36 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn scrolling_motion_contracts_vertical_overflow_without_relaxing_neighbors() {
+        let screen = rect(0., 0., 1000., 800.);
+        let bounds =
+            ScrollingDisplayBounds::for_screen(screen, &[screen, rect(1000., 0., 1000., 800.)])
+                .unwrap();
+        for direction in [-1., 1.] {
+            let mut previous = rect(700., direction * 30., 400., 800.);
+            for expected in [30., 20., 10., 0.] {
+                let requested = rect(700., direction * expected, 400., 800.);
+                let motion = bounds.for_motion(previous);
+                let frame = motion.apply(requested);
+                assert_eq!(frame.origin.y, direction * expected);
+                assert_eq!(frame.origin.x, 600.);
+                let more_overflow = motion.apply(rect(700., direction * 100., 400., 800.));
+                assert_eq!(more_overflow.origin.y, previous.origin.y);
+                previous = frame;
+            }
+            assert_eq!(
+                bounds.apply(rect(100., direction * 30., 400., 800.)).origin.y,
+                0.
+            );
+        }
+        let inside = rect(100., 0., 400., 800.);
+        assert_eq!(
+            bounds.for_motion(inside).apply(rect(100., 30., 400., 800.)),
+            inside
+        );
     }
 
     #[test]

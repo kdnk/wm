@@ -357,7 +357,8 @@ impl PresentedWindow {
                     }
                 }
                 let frame = positive_size(frame, &mut velocity);
-                let constrained = bound.map_or(frame, |bounds| bounds.apply(frame));
+                let constrained =
+                    bound.map_or(frame, |bounds| bounds.for_motion(self.frame).apply(frame));
                 if constrained.origin.x != frame.origin.x {
                     velocity.origin.x = 0.0;
                 }
@@ -2171,6 +2172,39 @@ mod tests {
             store: WindowTxStore::new(),
             cadence: FrameCadence::DisplayLinked,
             bound: None,
+        }
+    }
+
+    #[test]
+    fn viewport_vertical_settlement_starts_at_the_dragged_frame() {
+        for direction in [-1., 1.] {
+            let (handle, mut rx) = AppThreadHandle::channel();
+            let rest = rect(0., 0., 500., 800.);
+            let dragged = rect(0., direction * 30., 500., 800.);
+            let mut camera = motion_camera(&handle, dragged, rest);
+            camera.bound = super::super::managers::ScrollingDisplayBounds::for_screen(
+                rect(0., 0., 1000., 800.),
+                &[],
+            );
+            let mut manager = AnimationManager::new();
+            manager.handle_message(Message::Camera(Box::new(camera)));
+            let start = camera_mut(&mut manager).unwrap().geometry_started;
+            collect_requests(&mut rx);
+            manager.tick_at(start);
+            assert!(
+                matches!(collect_requests(&mut rx).as_slice(), [Observed::Frame { frame, .. }]
+                if *frame == dragged)
+            );
+            manager.tick_at(start + Duration::from_millis(40));
+            let requests = collect_requests(&mut rx);
+            assert!(matches!(requests.as_slice(), [Observed::Frame { frame, .. }]
+                if frame.origin.y * direction > 0. && frame.origin.y * direction < 30.));
+            manager.tick_at(start + Duration::from_millis(300));
+            assert!(
+                matches!(&collect_requests(&mut rx)[0], Observed::Frame { frame, .. }
+                if *frame == rest)
+            );
+            assert!(!manager.has_work());
         }
     }
 

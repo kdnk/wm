@@ -2364,11 +2364,11 @@ fn modifier_drag_handoff_starts_from_last_commanded_frame_without_an_ax_echo() {
         let wsid = reactor.test_window_server_id(wid);
         let previous_txid = reactor.transaction_manager.get_last_sent_txid(wsid);
         reactor.handle_event(Event::DragMotion(DragMotion {
-            point: CGPoint::new(tile.mid().x + 100., tile.mid().y),
+            point: CGPoint::new(tile.mid().x + 100., tile.mid().y + 30.),
         }));
         let echoes = apps.simulate_events();
         let dragged = apps.windows[&wid].frame;
-        assert_eq!(dragged.origin, CGPoint::new(tile.origin.x + 100., tile.origin.y));
+        assert_eq!(dragged.origin, CGPoint::new(tile.origin.x + 100., tile.origin.y + 30.));
         assert!(echoes.iter().any(|event| matches!(event, Event::WindowFrameChanged(..))));
         if stale_echo {
             reactor.handle_event(Event::WindowFrameChanged(
@@ -2402,6 +2402,7 @@ fn modifier_drag_handoff_starts_from_last_commanded_frame_without_an_ax_echo() {
         apps.simulate_events();
         let approaching = apps.windows[&wid].frame;
         assert!(approaching.origin.x > tile.origin.x && approaching.origin.x < dragged.origin.x);
+        assert!(approaching.origin.y > tile.origin.y && approaching.origin.y < dragged.origin.y);
         presenter.tick_at(Instant::now() + Duration::from_secs(1));
         apps.simulate_events();
         assert_eq!(apps.windows[&wid].frame, tile);

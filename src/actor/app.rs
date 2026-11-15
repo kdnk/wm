@@ -1,4 +1,4 @@
-// Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
+// Modified by kdnk for wm on 2026-11-15. Original attribution is preserved in LICENSE.
 //! The app actor manages messaging to an application using the system
 //! accessibility APIs.
 //!
@@ -884,6 +884,7 @@ fn write_frame(
     current: CGRect,
     mut target: CGRect,
     mut writes: FrameWrites,
+    bounds: Option<ScrollingDisplayBounds>,
 ) -> Result<FrameWrites, AxError> {
     // macOS can clamp a growing window before it reaches its destination.
     // Mixed resizes need the shrink-first fallback only when the target size
@@ -894,7 +895,7 @@ fn write_frame(
         || target.size.height < current.size.height - 0.5;
     let move_first = grows
         && !(shrinks
-            && elem.scrolling_bounds().is_some_and(|bounds| {
+            && bounds.is_some_and(|bounds| {
                 let resized = CGRect::new(current.origin, target.size);
                 bounds.apply(resized).origin.same_as(resized.origin)
             }));
@@ -905,7 +906,7 @@ fn write_frame(
     };
     let mut failed = FrameWrites::default();
     if writes.size
-        && let Some(origin) = elem.scrolling_bounds().and_then(|bounds| {
+        && let Some(origin) = bounds.and_then(|bounds| {
             bounds.resize_origin(current).or_else(|| bounds.resize_origin(target))
         })
     {
@@ -948,9 +949,9 @@ fn reconcile_frame(
     hint: CGRect,
     target: CGRect,
     mode: FrameMode,
+    bounds: Option<ScrollingDisplayBounds>,
     mut before_write: impl FnMut(),
 ) -> Result<CGRect, AxError> {
-    let bounds = elem.scrolling_bounds();
     let constrain = |frame| bounds.map_or(frame, |bounds| bounds.apply(frame));
     let mut target = constrain(target);
     if mode == FrameMode::Position {
@@ -960,7 +961,7 @@ fn reconcile_frame(
     let mut failed = FrameWrites::default();
     if planned.any() {
         before_write();
-        failed = write_frame(elem, hint, target, planned)?;
+        failed = write_frame(elem, hint, target, planned, bounds)?;
     }
     let mut frame = elem.frame()?;
     let target = CGRect::new(
@@ -978,7 +979,7 @@ fn reconcile_frame(
             size: missed.size,
         };
         before_write();
-        let fix_failed = write_frame(elem, frame, target, fix)?;
+        let fix_failed = write_frame(elem, frame, target, fix, bounds)?;
         failed.position |= fix_failed.position;
         failed.size |= fix_failed.size;
         frame = elem.frame()?;
@@ -1011,9 +1012,12 @@ fn write_interactive_frame(
     set_size: bool,
     source: FrameSource,
 ) {
-    if let Some(bounds) = elem.scrolling_bounds() {
+    let bounds = elem.scrolling_bounds().map(|bounds| bounds.for_motion(*hint));
+    if let Some(bounds) = bounds {
         if set_size {
-            if let Ok(accepted) = reconcile_frame(elem, *hint, frame, FrameMode::Full, || {}) {
+            if let Ok(accepted) =
+                reconcile_frame(elem, *hint, frame, FrameMode::Full, Some(bounds), || {})
+            {
                 *hint = accepted;
             }
             return;
@@ -1022,7 +1026,7 @@ fn write_interactive_frame(
     }
     if set_size || (source != FrameSource::Drag && !hint.size.same_as(frame.size)) {
         let both = FrameWrites { position: true, size: true };
-        let _ = write_frame(elem, *hint, frame, both);
+        let _ = write_frame(elem, *hint, frame, both, bounds);
         *hint = frame;
     } else {
         let _ = elem.set_position(frame.origin);
@@ -1554,6 +1558,7 @@ impl State {
                             hint,
                             desired,
                             mode,
+                            authority.1,
                             || self.hold_batch_eui(eui),
                         )
                     });
@@ -1688,6 +1693,7 @@ impl State {
                             frame,
                             target,
                             FrameMode::Full,
+                            authority.1,
                             || {},
                         )
                     });
@@ -2998,7 +3004,14 @@ mod frame_tests {
     }
 
     fn reconcile(window: &FakeWindow, target: CGRect) -> Result<CGRect, AxError> {
-        reconcile_frame(window, window.frame.get(), target, FrameMode::Full, || {})
+        reconcile_frame(
+            window,
+            window.frame.get(),
+            target,
+            FrameMode::Full,
+            window.scrolling_bounds(),
+            || {},
+        )
     }
 
     #[test]
@@ -3008,9 +3021,14 @@ mod frame_tests {
             frame: Cell::new(target),
             ..Default::default()
         };
-        let accepted = reconcile_frame(&window, target, target, FrameMode::Full, || {
-            panic!("equal geometry needs no setter")
-        })
+        let accepted = reconcile_frame(
+            &window,
+            target,
+            target,
+            FrameMode::Full,
+            window.scrolling_bounds(),
+            || panic!("equal geometry needs no setter"),
+        )
         .unwrap();
         assert_eq!(accepted, target);
         assert_eq!(*window.calls.borrow(), vec!["frame"]);
@@ -3032,9 +3050,15 @@ mod frame_tests {
                 authority: &authority,
             };
             let requested = rect(x, 1726., 997., 800.);
-            let mut accepted =
-                reconcile_frame(&target, window.frame.get(), requested, FrameMode::Full, || {})
-                    .unwrap();
+            let mut accepted = reconcile_frame(
+                &target,
+                window.frame.get(),
+                requested,
+                FrameMode::Full,
+                target.scrolling_bounds(),
+                || {},
+            )
+            .unwrap();
             assert_eq!(accepted, window.frame.get());
             assert_eq!(accepted.size.width, 990.);
             window.calls.borrow_mut().clear();
@@ -3099,6 +3123,130 @@ mod frame_tests {
             assert_eq!(accepted.size, window.frame.get().size);
             assert!(accepted.max().x > screen.origin.x && accepted.origin.x < screen.max().x);
         }
+    }
+
+    #[test]
+    fn macos_motion_vertical_settlement_preserves_existing_overflow() {
+        let screen = rect(0., 0., 1000., 800.);
+        for direction in [-1., 1.] {
+            for set_size in [false, true] {
+                let window = FakeWindow {
+                    frame: Cell::new(rect(100., direction * 30., 400., 800.)),
+                    ..Default::default()
+                };
+                let authority = FrameAuthority(
+                    None,
+                    ScrollingDisplayBounds::for_screen(screen, &[
+                        screen,
+                        rect(0., direction * 800., 1000., 800.),
+                    ]),
+                );
+                let target = AuthorizedFrameTarget {
+                    target: &window,
+                    authority: &authority,
+                };
+                let mut accepted = window.frame.get();
+                for (index, y) in [30., 20., 10., 0.].into_iter().enumerate() {
+                    let frame = rect(
+                        100.,
+                        direction * y,
+                        if set_size {
+                            400. + index as f64 * 10.
+                        } else {
+                            400.
+                        },
+                        800.,
+                    );
+                    write_interactive_frame(
+                        &target,
+                        &mut accepted,
+                        frame,
+                        set_size,
+                        FrameSource::Viewport,
+                    );
+                    assert_eq!(accepted, frame, "set_size={set_size}");
+                    assert_eq!(window.frame.get(), frame);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn macos_motion_vertical_overflow_cannot_increase() {
+        let screen = rect(0., 0., 1000., 800.);
+        let window = FakeWindow {
+            frame: Cell::new(rect(100., 30., 400., 800.)),
+            ..Default::default()
+        };
+        let authority = FrameAuthority(None, ScrollingDisplayBounds::for_screen(screen, &[]));
+        let target = AuthorizedFrameTarget {
+            target: &window,
+            authority: &authority,
+        };
+        let mut accepted = window.frame.get();
+        for (requested, expected) in [(50., 30.), (20., 20.), (50., 20.), (0., 0.), (30., 0.)] {
+            write_interactive_frame(
+                &target,
+                &mut accepted,
+                rect(100., requested, 400., 800.),
+                false,
+                FrameSource::Viewport,
+            );
+            assert_eq!(accepted.origin.y, expected);
+            assert_eq!(window.frame.get(), accepted);
+        }
+    }
+
+    #[test]
+    fn instant_placement_does_not_keep_vertical_motion_allowance() {
+        let screen = rect(0., 0., 1000., 800.);
+        let window = FakeWindow {
+            frame: Cell::new(rect(100., 30., 400., 800.)),
+            ..Default::default()
+        };
+        let authority = FrameAuthority(None, ScrollingDisplayBounds::for_screen(screen, &[]));
+        let target = AuthorizedFrameTarget {
+            target: &window,
+            authority: &authority,
+        };
+        let accepted = reconcile_frame(
+            &target,
+            window.frame.get(),
+            window.frame.get(),
+            FrameMode::Full,
+            target.scrolling_bounds(),
+            || {},
+        )
+        .unwrap();
+        assert_eq!(accepted, rect(100., 0., 400., 800.));
+    }
+
+    #[test]
+    fn macos_motion_resize_parking_preserves_vertical_settlement() {
+        let screen = rect(0., 0., 1000., 800.);
+        let from = rect(-200., 30., 400., 800.);
+        let to = rect(-190., 20., 420., 780.);
+        let window = FakeWindow {
+            frame: Cell::new(from),
+            ..Default::default()
+        };
+        let authority = FrameAuthority(None, ScrollingDisplayBounds::for_screen(screen, &[]));
+        let target = AuthorizedFrameTarget {
+            target: &window,
+            authority: &authority,
+        };
+        let mut accepted = from;
+        write_interactive_frame(&target, &mut accepted, to, true, FrameSource::Viewport);
+        assert_eq!(accepted, to);
+        assert!(
+            window
+                .placements
+                .borrow()
+                .iter()
+                .all(|frame| (20. ..=30.).contains(&frame.origin.y)),
+            "horizontal resize parking changed vertical motion: {:?}",
+            window.placements.borrow()
+        );
     }
 
     #[test]
@@ -3230,7 +3378,15 @@ mod frame_tests {
             true,
             FrameSource::Viewport,
         );
-        reconcile_frame(&fenced, CGRect::default(), target, FrameMode::Full, || {}).unwrap();
+        reconcile_frame(
+            &fenced,
+            CGRect::default(),
+            target,
+            FrameMode::Full,
+            fenced.scrolling_bounds(),
+            || {},
+        )
+        .unwrap();
         assert!(
             window.calls.borrow().iter().all(|call| *call == "frame"),
             "drained frames and terminal repair must not write after revocation"
