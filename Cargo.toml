@@ -3,6 +3,7 @@
 name = "wm"
 version = "0.9.3"
 edition = "2024"
+rust-version = "1.95"
 build = "build.rs"
 
 [workspace]

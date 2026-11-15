@@ -813,7 +813,7 @@ impl Reactor {
             &self.layout_manager.layout_engine.workspaces()[workspace].layout_system;
         let (mut presentation, frames) = system.presentation(layout)?;
         let previous = self.presentations.remove(&space);
-        let hover = previous.as_ref().map_or_default(|camera| camera.hover);
+        let hover = previous.as_ref().map_or_else(Default::default, |camera| camera.hover);
         let previous = previous.and_then(|camera| camera.headless);
         let gesture = gesture.or_else(|| {
             self.viewport_gesture
