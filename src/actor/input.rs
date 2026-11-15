@@ -10,10 +10,11 @@ use std::time::{Duration, Instant};
 
 use objc2_app_kit::{NSEvent, NSEventType};
 use objc2_core_foundation::{CGPoint, CGRect};
+#[cfg(not(test))]
+use objc2_core_graphics::CGEventTapOptions as CGTapOpt;
 use objc2_core_graphics::{
     CGDisplayBounds, CGEvent, CGEventField, CGEventFlags, CGEventMask, CGEventSource,
-    CGEventSourceStateID, CGEventTapLocation as CGTapLoc, CGEventTapOptions as CGTapOpt,
-    CGEventTapProxy, CGEventType,
+    CGEventSourceStateID, CGEventTapLocation as CGTapLoc, CGEventTapProxy, CGEventType,
 };
 use tracing::{debug, error, trace, warn};
 
@@ -105,6 +106,12 @@ struct OverviewHotkey {
     flags: CGEventFlags,
 }
 
+#[derive(Clone, Copy)]
+struct DeferredHover {
+    timestamp: u64,
+    deadline: Instant,
+}
+
 pub struct Input {
     events_tx: reactor::Sender,
     requests_rx: Option<Receiver>,
@@ -117,6 +124,7 @@ pub struct Input {
     overview_buttons: Cell<u8>,
     mouse_move_last_timestamp: Cell<Option<u64>>,
     mouse_move_min_interval_ticks: Cell<u64>,
+    deferred_hover: Cell<Option<DeferredHover>>,
     mouse_location: Cell<CGPoint>,
     horizontal_mouse_warp: Cell<Option<HorizontalMouseWarp>>,
     warp_screens: RefCell<Vec<CGRect>>,
@@ -126,6 +134,7 @@ pub struct Input {
     gesture_control: super::gesture::Control,
     gesture_filter: RefCell<gesture::Filter>,
     tap: RefCell<Option<crate::sys::event_tap::EventTap>>,
+    #[cfg(not(test))]
     tap_generation: Cell<u64>,
     disable_hotkey: RefCell<Option<Hotkey>>,
     binding_mode_specs: RefCell<BindingModeSpecs>,
@@ -198,15 +207,19 @@ struct CallbackCtx {
     // Input owns the tap; the callback cannot outlive it or leave its thread.
     this: *const Input,
     recovery_tx: tokio::sync::mpsc::UnboundedSender<Recovery>,
+    #[cfg(not(test))]
     tap_generation: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
 enum Recovery {
+    #[cfg(not(test))]
     TapInvalidated(u64),
     NativeGestureHeld,
+    HoverDeferred,
 }
 
+#[cfg(not(test))]
 unsafe fn drop_input_ctx(ptr: *mut std::ffi::c_void) {
     unsafe { drop(Box::from_raw(ptr as *mut CallbackCtx)) };
 }
@@ -267,6 +280,16 @@ impl Input {
         mask
     }
 
+    #[cfg(test)]
+    fn create_tap_with_mask(
+        &self,
+        _mask: CGEventMask,
+        _recovery_tx: tokio::sync::mpsc::UnboundedSender<Recovery>,
+    ) -> Option<crate::sys::event_tap::EventTap> {
+        None
+    }
+
+    #[cfg(not(test))]
     fn create_tap_with_mask(
         &self,
         mask: CGEventMask,
@@ -312,6 +335,9 @@ impl Input {
             return;
         }
 
+        if self.tap.borrow().is_some() {
+            self.deferred_hover.take();
+        }
         self.reset_gestures();
         self.tap.borrow_mut().take();
         if next_mask == 0 {
@@ -327,6 +353,7 @@ impl Input {
         self.event_mask.set(next_mask);
     }
 
+    #[cfg(not(test))]
     fn rebuild_invalidated_event_tap(
         &self,
         generation: u64,
@@ -382,6 +409,7 @@ impl Input {
             overview_buttons: Cell::new(0),
             mouse_move_last_timestamp: Cell::new(None),
             mouse_move_min_interval_ticks: Cell::new(mouse_move_min_interval_ticks),
+            deferred_hover: Cell::new(None),
             mouse_location: Cell::new(CGPoint::new(0.0, 0.0)),
             horizontal_mouse_warp: Cell::new(config.settings.horizontal_mouse_warp),
             warp_screens: RefCell::new(Vec::new()),
@@ -391,6 +419,7 @@ impl Input {
             gesture_control,
             gesture_filter: RefCell::new(gesture::Filter::default()),
             tap: RefCell::new(None),
+            #[cfg(not(test))]
             tap_generation: Cell::new(0),
             disable_hotkey: RefCell::new(disable_hotkey),
             binding_mode_specs: RefCell::new(Vec::new()),
@@ -426,6 +455,8 @@ impl Input {
         // One reusable hold timer, rearmed only when the deadline changes.
         let mut hold_timer = Timer::manual();
         let mut armed = None;
+        let mut hover_timer = Timer::manual();
+        let mut hover_armed = None;
         loop {
             let hold_deadline = this.gesture_filter.borrow().hold_deadline();
             if hold_deadline != armed {
@@ -434,7 +465,20 @@ impl Input {
                     d.saturating_duration_since(std::time::Instant::now())
                 }));
             }
+            let hover_deadline = this.deferred_hover.get().map(|sample| sample.deadline);
+            if hover_deadline != hover_armed {
+                hover_armed = hover_deadline;
+                hover_timer.set_next_fire(hover_deadline.map_or(Duration::MAX, |deadline| {
+                    deadline.saturating_duration_since(Instant::now())
+                }));
+            }
             tokio::select! {
+                Some(()) = hover_timer.next(), if hover_armed.is_some() => {
+                    hover_armed = None;
+                    if this.deferred_hover.get().is_some_and(|sample| sample.deadline <= Instant::now()) {
+                        this.flush_deferred_hover();
+                    }
+                }
                 Some(()) = hold_timer.next(), if armed.is_some() => {
                     // Fires once per arm; rearm next turn even if the deadline is unchanged.
                     armed = None;
@@ -452,7 +496,8 @@ impl Input {
                 maybe_recovery = recovery_rx.recv() => {
                     let Some(recovery) = maybe_recovery else { break };
                     match recovery {
-                        Recovery::NativeGestureHeld => {}
+                        Recovery::NativeGestureHeld | Recovery::HoverDeferred => {}
+                        #[cfg(not(test))]
                         Recovery::TapInvalidated(generation) => {
                             this.rebuild_invalidated_event_tap(generation, &recovery_tx);
                         }
@@ -472,6 +517,21 @@ impl Input {
         request: Request,
         recovery_tx: &tokio::sync::mpsc::UnboundedSender<Recovery>,
     ) {
+        if matches!(
+            &request,
+            Request::Warp(_)
+                | Request::WarpRelative { .. }
+                | Request::FocusPointer(_)
+                | Request::SetEventProcessing(_)
+                | Request::SetFocusFollowsMouseEnabled(_)
+                | Request::ConfigUpdated(_)
+                | Request::SetLowPowerMode(_)
+                | Request::SetMissionControlActive(..)
+                | Request::ReleaseMissionControl
+                | Request::SpaceStateUpdated(..)
+        ) {
+            self.deferred_hover.take();
+        }
         let reset_gestures = match &request {
             Request::SpaceStateUpdated(snapshot, _) => !snapshot
                 .screens
@@ -747,11 +807,15 @@ impl Input {
     }
 
     #[inline]
-    fn reset_mouse_move_sample_gate(&self) { self.mouse_move_last_timestamp.set(None); }
+    fn reset_mouse_move_sample_gate(&self) {
+        self.mouse_move_last_timestamp.set(None);
+        self.deferred_hover.take();
+    }
 
     fn reconcile_after_tap_reenabled(&self) {
         // A release may have been lost; do not activate from a later unrelated event.
         self.overview_hotkey.set(None);
+        self.reset_mouse_move_sample_gate();
         let mut state = self.state.borrow_mut();
         self.reset_gestures();
         if state.captured_button.take().is_some() {
@@ -779,6 +843,9 @@ impl Input {
         event: &CGEvent,
         proxy: Option<CGEventTapProxy>,
     ) -> bool {
+        if event_type != CGEventType::MouseMoved {
+            self.deferred_hover.take();
+        }
         if self.mission_control_active.get()
             && matches!(
                 event_type,
@@ -1118,12 +1185,7 @@ impl Input {
             }
         }
 
-        if state.focus_follows_mouse_config_enabled
-            && state.focus_follows_mouse_enabled
-            && !state.disable_hotkey_active
-            && state.captured_button.is_none()
-            && !mouse_modifier_held(state.mouse_settings.modifier, state.current_flags)
-        {
+        if self.hover_enabled(&state) {
             // Secondary pointer consumers above do not participate in focus
             // suppression or window resolution.
             drop(state);
@@ -1133,6 +1195,49 @@ impl Input {
         }
 
         true
+    }
+
+    fn hover_enabled(&self, state: &State) -> bool {
+        state.event_processing_enabled
+            && !self.mission_control_active.get()
+            && state.focus_follows_mouse_config_enabled
+            && state.focus_follows_mouse_enabled
+            && !state.disable_hotkey_active
+            && state.captured_button.is_none()
+            && !mouse_modifier_held(state.mouse_settings.modifier, state.current_flags)
+    }
+
+    fn defer_hover(
+        &self,
+        timestamp: u64,
+        recovery_tx: &tokio::sync::mpsc::UnboundedSender<Recovery>,
+    ) {
+        let state = self.state.borrow();
+        if !self.hover_enabled(&state) {
+            self.deferred_hover.take();
+            return;
+        }
+        if let Some(mut sample) = self.deferred_hover.get() {
+            sample.timestamp = timestamp;
+            self.deferred_hover.set(Some(sample));
+        } else {
+            self.deferred_hover.set(Some(DeferredHover {
+                timestamp,
+                deadline: Instant::now() + mouse_move_sampling_duration(state.low_power_mode),
+            }));
+            let _ = recovery_tx.send(Recovery::HoverDeferred);
+        }
+    }
+
+    fn flush_deferred_hover(&self) {
+        let Some(sample) = self.deferred_hover.take() else {
+            return;
+        };
+        if !self.hover_enabled(&self.state.borrow()) {
+            return;
+        }
+        self.mouse_move_last_timestamp.set(Some(event::hid_event_timestamp_now()));
+        let _ = self.mouse_focus_publisher.publish(&self.events_tx, sample.timestamp);
     }
 
     fn maybe_horizontal_mouse_warp(&self, event: &CGEvent) -> Option<CGPoint> {
@@ -1162,6 +1267,7 @@ impl Input {
         }) {
             return None;
         }
+        self.deferred_hover.take();
         self.mouse_move_last_timestamp.set(Some(timestamp));
         Some(CGEvent::location(Some(event)))
     }
@@ -1368,9 +1474,6 @@ unsafe extern "C-unwind" fn input_callback(
     let ctx = unsafe { &*(user_info as *const CallbackCtx) };
     let event = unsafe { event_ref.as_ref() };
 
-    // Keep rejected high-frequency mouse events out of catch_unwind and the
-    // actor/state path. Edge crossings are checked before sampling so a quick
-    // movement cannot stall at the edge.
     let this = unsafe { &*ctx.this };
     let mouse_point = if event_type == CGEventType::MouseMoved {
         let warped = if this.mission_control_active.get() {
@@ -1381,6 +1484,7 @@ unsafe extern "C-unwind" fn input_callback(
         match this.admit_mouse_move(event) {
             Some(point) => Some(warped.unwrap_or(point)),
             None => {
+                this.defer_hover(CGEvent::timestamp(Some(event)), &ctx.recovery_tx);
                 return event_ref.as_ptr();
             }
         }
@@ -1407,6 +1511,7 @@ unsafe extern "C-unwind" fn input_callback(
     }
 }
 
+#[cfg(not(test))]
 unsafe extern "C-unwind" fn event_tap_reenabled(user_info: *mut std::ffi::c_void) {
     if user_info.is_null() {
         return;
@@ -1421,6 +1526,7 @@ unsafe extern "C-unwind" fn event_tap_reenabled(user_info: *mut std::ffi::c_void
     }
 }
 
+#[cfg(not(test))]
 unsafe extern "C-unwind" fn event_tap_invalidated(user_info: *mut std::ffi::c_void) {
     if user_info.is_null() {
         return;
@@ -1540,11 +1646,7 @@ fn mouse_modifier_held(modifier: MouseModifier, flags: CGEventFlags) -> bool {
 
 #[inline]
 fn mouse_move_sampling_profile(low_power_mode: bool) -> u64 {
-    let interval_ns = if low_power_mode {
-        MOUSE_MOVE_MIN_INTERVAL_NS_LOW_POWER
-    } else {
-        MOUSE_MOVE_MIN_INTERVAL_NS_NORMAL
-    };
+    let interval_ns = mouse_move_sampling_duration(low_power_mode).as_nanos() as u64;
     // HID CGEvent timestamps use Mach ticks, unlike Session timestamps.
     // Convert the interval during configuration, not each hardware event.
     #[repr(C)]
@@ -1559,6 +1661,14 @@ fn mouse_move_sampling_profile(low_power_mode: bool) -> u64 {
     let status = unsafe { mach_timebase_info(&mut timebase) };
     assert!(status == 0 && timebase.numer != 0 && timebase.denom != 0);
     interval_in_ticks(interval_ns, timebase.numer, timebase.denom)
+}
+
+fn mouse_move_sampling_duration(low_power_mode: bool) -> Duration {
+    Duration::from_nanos(if low_power_mode {
+        MOUSE_MOVE_MIN_INTERVAL_NS_LOW_POWER
+    } else {
+        MOUSE_MOVE_MIN_INTERVAL_NS_NORMAL
+    })
 }
 
 const WARP_EDGE_THRESHOLD: f64 = 3.0;
@@ -1958,6 +2068,192 @@ mod tests {
     }
 
     #[test]
+    fn final_throttled_mouse_motion_publishes_hover_after_pointer_stops() {
+        for low_power in [false, true] {
+            let (mut input, _, mut events) = input();
+            let (requests_tx, requests_rx) = actor::channel();
+            input.requests_rx = Some(requests_rx);
+            {
+                let mut state = input.state.borrow_mut();
+                state.event_processing_enabled = true;
+                state.focus_follows_mouse_config_enabled = true;
+                state.low_power_mode = low_power;
+            }
+            let interval = mouse_move_sampling_profile(low_power);
+            input.mouse_move_min_interval_ticks.set(interval);
+            let (recovery_tx, _recovery_rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut ctx = CallbackCtx { this: &input, recovery_tx };
+            let event = CGEvent::new_mouse_event(
+                None,
+                CGEventType::MouseMoved,
+                CGPoint::new(150., 30.),
+                objc2_core_graphics::CGMouseButton::Left,
+            )
+            .unwrap();
+            CGEvent::set_flags(Some(&event), CGEventFlags::empty());
+            let start = event::hid_event_timestamp_now();
+            let context = (&mut ctx as *mut CallbackCtx).cast();
+            let pointer = core::ptr::NonNull::from(&*event);
+            CGEvent::set_timestamp(Some(&event), start);
+            unsafe {
+                input_callback(core::ptr::null_mut(), CGEventType::MouseMoved, pointer, context);
+            }
+            assert!(matches!(
+                events.try_recv().unwrap().1,
+                Event::MouseFocusPending(_)
+            ));
+            input.mouse_focus_publisher.discard_through(0);
+            CGEvent::set_location(Some(&event), CGPoint::new(20., 30.));
+            CGEvent::set_timestamp(Some(&event), start + interval / 4);
+            unsafe {
+                input_callback(core::ptr::null_mut(), CGEventType::MouseMoved, pointer, context);
+            }
+            assert!(events.try_recv().is_err(), "crossing must remain rate limited");
+            crate::sys::executor::Executor::run(async move {
+                let timeout = Timer::sleep(Duration::from_millis(150));
+                tokio::select! {
+                    _ = input.run() => panic!("input actor stopped before delivering trailing motion"),
+                    _ = async {
+                        loop {
+                            if matches!(events.recv().await.unwrap().1, Event::MouseFocusPending(_)) {
+                                break;
+                            }
+                        }
+                    } => {}
+                    _ = timeout => panic!("final motion was lost after pointer stopped; low_power={low_power}"),
+                }
+                drop(requests_tx);
+            });
+        }
+    }
+
+    #[test]
+    fn deferred_hover_keeps_only_the_latest_motion_and_one_wake() {
+        let (input, _, mut events) = input();
+        {
+            let mut state = input.state.borrow_mut();
+            state.event_processing_enabled = true;
+            state.focus_follows_mouse_config_enabled = true;
+        }
+        let (recovery_tx, mut recovery_rx) = tokio::sync::mpsc::unbounded_channel();
+        input.defer_hover(10, &recovery_tx);
+        let deadline = input.deferred_hover.get().unwrap().deadline;
+        input.defer_hover(20, &recovery_tx);
+        assert_eq!(input.deferred_hover.get().unwrap().deadline, deadline);
+        assert!(matches!(
+            recovery_rx.try_recv().unwrap(),
+            Recovery::HoverDeferred
+        ));
+        assert!(recovery_rx.try_recv().is_err());
+        input.mouse_focus_publisher.discard_through(10);
+        input.flush_deferred_hover();
+        assert!(
+            matches!(events.try_recv().unwrap().1, Event::MouseFocusPending(_)),
+            "the final timestamp must survive the cutoff for earlier motion"
+        );
+        input.flush_deferred_hover();
+        assert!(
+            events.try_recv().is_err(),
+            "trailing motion must publish only once"
+        );
+    }
+
+    #[test]
+    fn newer_sample_and_focus_changes_cancel_deferred_hover() {
+        let point = CGPoint::new(25., 35.);
+        let requests = [
+            Request::Warp(point),
+            Request::WarpRelative {
+                from: None,
+                to: CGRect::new(point, objc2_core_foundation::CGSize::new(100., 100.)),
+            },
+            Request::FocusPointer(FocusPointer {
+                window: None,
+                visible: CGRect::ZERO,
+                retain: CGRect::ZERO,
+            }),
+            Request::SetFocusFollowsMouseEnabled(false),
+            Request::SetEventProcessing(false),
+            Request::SetMissionControlActive(true, vec![]),
+            Request::SetLowPowerMode(true),
+            Request::ConfigUpdated(Config::default()),
+        ];
+        window_server::set_cursor_location_override(Some(point));
+        for request in requests {
+            let (input, _, mut events) = input();
+            {
+                let mut state = input.state.borrow_mut();
+                state.event_processing_enabled = true;
+                state.focus_follows_mouse_config_enabled = true;
+            }
+            let (recovery_tx, _) = tokio::sync::mpsc::unbounded_channel();
+            input.defer_hover(event::hid_event_timestamp_now(), &recovery_tx);
+            input.on_request(request, &recovery_tx);
+            {
+                let mut state = input.state.borrow_mut();
+                state.event_processing_enabled = true;
+                state.focus_follows_mouse_config_enabled = true;
+                state.focus_follows_mouse_enabled = true;
+            }
+            input.mission_control_active.set(false);
+            input.flush_deferred_hover();
+            while let Ok((_, event)) = events.try_recv() {
+                assert!(
+                    !matches!(event, Event::MouseFocusPending(_)),
+                    "re-enabling hover must require fresh pointer movement"
+                );
+            }
+        }
+        window_server::set_cursor_location_override(None);
+
+        let (input, _, mut events) = input();
+        {
+            let mut state = input.state.borrow_mut();
+            state.event_processing_enabled = true;
+            state.focus_follows_mouse_config_enabled = true;
+        }
+        let (recovery_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        input.defer_hover(10, &recovery_tx);
+        let event = CGEvent::new(None).unwrap();
+        CGEvent::set_timestamp(Some(&event), 20);
+        assert!(input.admit_mouse_move(&event).is_some());
+        input.flush_deferred_hover();
+        assert!(
+            events.try_recv().is_err(),
+            "fresh accepted movement supersedes deferred motion"
+        );
+    }
+
+    #[test]
+    fn deferred_hover_respects_modifiers_and_drag_at_arrival_and_delivery() {
+        for suppressed_at_arrival in [false, true] {
+            for dragging in [false, true] {
+                let (input, _, mut events) = input();
+                {
+                    let mut state = input.state.borrow_mut();
+                    state.event_processing_enabled = true;
+                    state.focus_follows_mouse_config_enabled = true;
+                }
+                let suppress = |active: bool| {
+                    let mut state = input.state.borrow_mut();
+                    if dragging {
+                        state.captured_button =
+                            active.then_some(crate::actor::drag::MouseButton::Left);
+                    } else {
+                        state.disable_hotkey_active = active;
+                    }
+                };
+                suppress(suppressed_at_arrival);
+                let (recovery_tx, _) = tokio::sync::mpsc::unbounded_channel();
+                input.defer_hover(10, &recovery_tx);
+                suppress(!suppressed_at_arrival);
+                input.flush_deferred_hover();
+                assert!(events.try_recv().is_err());
+            }
+        }
+    }
+
+    #[test]
     fn overview_passes_sampled_and_skipped_mouse_motion_to_cursor() {
         let (input, mut wm_rx, mut native_rx) = input();
         let (tx, mut rx) = actor::channel();
@@ -1965,11 +2261,7 @@ mod tests {
         input.mission_control_active.set(true);
         input.mouse_move_min_interval_ticks.set(100);
         let (recovery_tx, _) = tokio::sync::mpsc::unbounded_channel();
-        let mut ctx = CallbackCtx {
-            this: &input,
-            recovery_tx,
-            tap_generation: 0,
-        };
+        let mut ctx = CallbackCtx { this: &input, recovery_tx };
         let event = CGEvent::new(None).unwrap();
         CGEvent::set_type(Some(&event), CGEventType::MouseMoved);
         CGEvent::set_timestamp(Some(&event), 1000);
