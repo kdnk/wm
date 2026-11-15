@@ -27,6 +27,13 @@ def check_client_help(binary, baseline, environment):
     while pending:
         arguments = pending.pop()
         before = command_help(baseline, arguments, environment).replace("wm-cli", "wm")
+        if arguments == ("subscribe",):
+            before = re.sub(r"^  unsub-mach\s.*\n", "", before, flags=re.M)
+        if arguments in [("subscribe",), ("subscribe", "mach")]:
+            before = before.replace(
+                "Subscribe to Mach IPC events",
+                "Print Mach IPC events until this process exits. Press Ctrl-C to unsubscribe",
+            )
         after = command_help(binary, arguments, environment)
         assert before.split() == after.split(), (arguments, before, after)
         checked += 1
@@ -35,14 +42,14 @@ def check_client_help(binary, baseline, environment):
             for name in re.findall(r"^  ([a-z][a-z0-9-]*)\s", commands[1], re.M):
                 if name != "help":
                     pending.append((*arguments, name))
-    print(f"PASS: {checked} client command help pages match the original CLI")
+    print(f"PASS: {checked} client help pages match the original CLI with Mach cancellation updates")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary_dir", type=Path)
     parser.add_argument("--baseline-client", type=Path,
-                        help="compare every client command's help with an original wm-cli build")
+                        help="compare retained client commands with an original wm-cli build")
     args = parser.parse_args()
     binary = args.binary_dir.resolve() / "wm"
     environment = dict(os.environ, WM_BS_NAME="git.kdnk.wm.test." + uuid.uuid4().hex)
@@ -55,6 +62,11 @@ def main():
         command_help(binary, [command], environment)
     close_help = command_help(binary, ["close-window"], environment)
     assert "native close button" in close_help, close_help
+    subscribe_help = command_help(binary, ["subscribe"], environment)
+    assert "unsub-mach" not in subscribe_help, subscribe_help
+    result = run(binary, ["subscribe", "unsub-mach", "windows_changed"], environment)
+    assert result.returncode == 2, result
+    assert "unrecognized subcommand" in result.stderr, result.stderr
     for argument in ["--settings", "settings"]:
         result = run(binary, [argument], environment)
         assert result.returncode == 2, result

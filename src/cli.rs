@@ -1250,6 +1250,23 @@ mod tests {
     }
 
     #[test]
+    fn mach_subscription_has_no_cross_process_unsubscribe() {
+        let subscribe =
+            Cli::try_parse_from(["wm", "subscribe", "mach", "windows_changed"]).unwrap();
+        assert!(matches!(
+            subscribe.command,
+            Some(Commands::Subscribe {
+                subscribe: SubscribeCommands::Mach { event },
+            }) if event == "windows_changed"
+        ));
+        let Err(error) = Cli::try_parse_from(["wm", "subscribe", "unsub-mach", "windows_changed"])
+        else {
+            panic!("a separate process cannot unsubscribe another Mach subscriber");
+        };
+        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
+    }
+
+    #[test]
     fn execute_requests_use_typed_protocol_commands() {
         let request = build_execute_request(ExecuteCommands::Window {
             window_cmd: WindowCommands::Next,
