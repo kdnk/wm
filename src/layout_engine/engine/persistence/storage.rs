@@ -1,13 +1,15 @@
+// Modified by kdnk for wm on 2026-11-17. Original attribution is preserved in LICENSE.
 use super::snapshot::PersistedLayout;
 use super::*;
 
 /// Crash-safe replacement of `path`. Returning success means the complete file reached the
 /// filesystem, because SaveAndExit terminates the process immediately afterwards.
 fn write_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
-    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty());
-    if let Some(parent) = parent {
-        fs::create_dir_all(parent)?;
-    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
     let (temporary, mut file) = loop {
         let sequence = SAVE_TEMP_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
         let suffix = format!("{}.{sequence}.tmp", std::process::id());
@@ -27,9 +29,7 @@ fn write_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
         drop(file);
         // The rename is the commit point; syncing the directory makes it durable.
         fs::rename(&temporary, path)?;
-        if let Some(parent) = parent {
-            File::open(parent)?.sync_all()?;
-        }
+        File::open(parent)?.sync_all()?;
         Ok(())
     })();
     if result.is_err() {
