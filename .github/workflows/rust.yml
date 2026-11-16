@@ -1,4 +1,4 @@
-# Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
+# Modified by kdnk for wm on 2026-11-17. Original attribution is preserved in LICENSE.
 name: rust
 
 on:
@@ -52,6 +52,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.source_sha || github.sha }}
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
@@ -61,6 +62,9 @@ jobs:
         run: |
           python3 tests/rift-settings-focus-verifier-test.py
           python3 tests/rift-multi-resize-verifier-test.py
+          python3 tests/motion-content-verifier-test.py
+      - name: Verify fork attribution
+        run: python3 scripts/check-fork-notices.py
       - name: Verify release signing setup
         run: python3 tests/release-signing-setup-test.py
       - name: Verify release automation
