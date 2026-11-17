@@ -490,8 +490,6 @@ impl WorkspaceStore {
             return false;
         };
         let source = workspace.space;
-        // An explicit move must leave its source usable without growing the catalog
-        // beyond the user creation limit. Check before mutating ownership or history.
         if reason == WorkspaceTransferReason::Explicit
             && source != target
             && self.effective_mode() == WorkspaceMode::Global
@@ -685,9 +683,6 @@ impl WorkspaceStore {
         let scope_ids =
             |space| self.catalog().filter(move |id| namespace(self[*id].space) == namespace(space));
         for space in self.initialized_spaces() {
-            // Automatic global seeds may exceed the creation limit so every live display
-            // remains usable. Reloading that catalog must remain valid; mode migrations
-            // still cannot merge independent catalogs beyond the limit.
             if scope_ids(space).count() > MAX_WORKSPACES
                 && (mode_changed || config.mode != WorkspaceMode::Global)
             {
@@ -902,8 +897,6 @@ impl WorkspaceStore {
         }
     }
 
-    /// Only accepted visible topology and explicit moves seed an empty global desktop.
-    /// Internal restoration may temporarily have no owner and must preserve its history.
     fn seed_space(&mut self, space: SpaceId) {
         if self.effective_mode() == WorkspaceMode::Global && self.active_workspace(space).is_none()
         {
@@ -1786,7 +1779,6 @@ mod tests {
         assert!(store.transfer_workspace(original, a, None, WorkspaceTransferReason::Explicit));
         let created = store.create_workspace(b, None).unwrap();
         assert_eq!(store.active_workspace(b), Some(seeded));
-        // Rediscovery must retain a non-default assignment even on another display.
         store.transfer_workspace(created, a, None, WorkspaceTransferReason::Explicit);
         let mut windows = WindowStore::default();
         let window = WindowId::new(90, 1);
@@ -1796,7 +1788,6 @@ mod tests {
                 .workspace_id,
             created
         );
-        // Repeatedly moving the sole replacement must stop at the creation limit.
         while store.catalog().count() < MAX_WORKSPACES {
             let last = store.active_workspace(b).unwrap();
             assert!(store.transfer_workspace(last, a, None, WorkspaceTransferReason::Explicit));
@@ -1809,7 +1800,6 @@ mod tests {
             owners
         );
         assert_eq!(store.active_workspace(b), Some(last));
-        // Moves that need no replacement remain available at the limit.
         assert!(store.transfer_workspace(original, b, None, WorkspaceTransferReason::Explicit));
         assert_eq!(store.catalog().count(), MAX_WORKSPACES);
         assert!(store.active_workspace(a).is_some());
@@ -1911,8 +1901,6 @@ mod tests {
             assert_eq!(store.catalog().count(), catalog.len() + 1);
             let placement: Vec<_> = store.catalog().map(|id| (id, store[id].space)).collect();
             let active = [a, b, c].map(|space| store.active_workspace(space));
-            // Display loss, return, and physical reordering must not run the initial
-            // allocator again. Departure fallback/restoration is owned by the Reactor.
             for (visible, display_count) in [
                 (vec![a], 1),
                 (vec![a, b, c], 3),

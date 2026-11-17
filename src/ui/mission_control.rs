@@ -35,8 +35,6 @@ const MAX_ZOOM: f64 = 2.0;
 const OVERVIEW_ZOOM: f64 = 0.34;
 const EXIT_MOTION: f64 = 0.28;
 const HANDOFF_RECOVERY: f64 = 1.5;
-// Just a few refresh intervals: soften texture/chrome differences without a
-// prolonged double image. This starts only after native handoff verification.
 const REVEAL_MOTION: f64 = 0.04;
 const CAPTURE_PIXELS: usize = 96 * 1024 * 1024 / 4;
 
@@ -1734,8 +1732,6 @@ impl OverviewSession {
         }
         self.selection = self.displays[self.active].selection;
         self.change_selection(self.selection);
-        // Cached IOSurfaces are already presentable. Submit the warm opening
-        // before source inventory changes can initialize or resize captures.
         drop(_tx);
         self.pump_previews();
         for d in &mut self.displays {
@@ -2142,9 +2138,6 @@ impl OverviewSession {
             start: now,
             target_ready: dismiss,
         };
-        // Existing layout geometry gives immediate feedback. The reactor still
-        // owns the destination and native reveal; its reply retargets from the
-        // actual presentation transform rather than restarting at overview.
         self.animate_exit(target);
         tracing::debug!(dismiss, "Overview close submitted");
         action
@@ -2294,8 +2287,6 @@ impl OverviewSession {
             } else {
                 d.desktop_camera()
             };
-            // An unchanged authoritative destination should not stop and restart
-            // an already running close (especially on uninvolved displays).
             if !d.motion.as_ref().is_some_and(|motion| motion.to == destination) {
                 d.animate(destination, duration);
                 let motion = d.motion.as_mut().unwrap();
@@ -3110,12 +3101,8 @@ impl OverviewSession {
         let _tx = LayerTransaction::disabled();
         let now = Instant::now();
         if let Phase::Waiting(start) = self.phase {
-            // Reading retained frames does not pump captures or initialize streams.
-            // Test readiness against this wake's content, not the previous tick.
             for d in &mut self.displays {
                 if let Some(captures) = &mut d.captures {
-                    // Cold captures must import their completed samples before
-                    // readiness is evaluated. Warm sessions need no pump here.
                     if !d.windows.iter().any(|w| w.preview.has_frame()) {
                         if let Err(error) = captures.pump() {
                             tracing::warn!(?error, "Spatial capture startup failed");
@@ -3331,8 +3318,6 @@ impl OverviewSession {
             let _tx = LayerTransaction::disabled().flush_on_commit();
             for d in &self.displays {
                 fade(&d.root, 0.);
-                // Use the existing display clock only for this short verified
-                // reveal tail. Automatic camera motion remains clock-paused.
                 if let Some(clock) = &d.clock {
                     clock.set_paused(false);
                 }
@@ -3340,9 +3325,6 @@ impl OverviewSession {
             self.reveal = Some(Instant::now());
             return false;
         }
-        // A failed/rejected geometry reply must not trap input forever, and a
-        // timeout alone cannot justify revealing parked windows. Cancel the
-        // close and refresh from the reactor so another selection can succeed.
         if start.elapsed().as_secs_f64() >= HANDOFF_RECOVERY {
             tracing::warn!("Overview handoff did not converge; restoring interactive overview");
             self.interrupt();
@@ -3610,9 +3592,6 @@ mod tests {
         assert!(done);
         assert_eq!(end, first.from);
 
-        // Retargets retain forward speed while landing monotonically, including
-        // the maximum admitted slope. This protects against a second ease-in
-        // pause and against a velocity-preserving curve overshooting its target.
         for slope in [0., 0.5, 1.5, 3.] {
             let retarget = Motion {
                 curve: MotionCurve::Retarget(slope),

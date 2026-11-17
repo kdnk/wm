@@ -10549,7 +10549,6 @@ fn named_pin_reload_moves_immediately_and_seeds_only_once() {
                 reactor.layout_manager.layout_engine.workspaces()[ids[1]].space,
                 target
             );
-            // Repeated exposure must keep the replacement workspace.
             reactor.handle_event(space_state_event_with(
                 vec![shared_left(), shared_right()],
                 vec![Some(a), Some(b)],
@@ -10584,7 +10583,6 @@ fn named_pin_reload_moves_immediately_and_seeds_only_once() {
 fn window_moves_never_relocate_workspaces_or_strand_layout_members() {
     let (a, b) = (SpaceId::new(1), SpaceId::new(2));
     let windows = [1, 2, 3].map(|idx| WindowId::new(1, idx));
-    // Connecting adds one workspace, regardless of the existing default count.
     for count in [1, 2] {
         let mut settings = shared_settings();
         settings.default_workspace_count = count;
@@ -10610,7 +10608,6 @@ fn window_moves_never_relocate_workspaces_or_strand_layout_members() {
             }))
         };
         let target = reactor.layout_manager.layout_engine.workspaces().active_workspace(b).unwrap();
-        // A newly connected display immediately accepts commands and pointer placement.
         for _ in 0..2 {
             reactor.handle_event(move_first(1));
             apps.simulate_until_quiet(&mut reactor);

@@ -337,8 +337,6 @@ impl MissionControlActor {
                 if let Some(session) = self.session.as_mut() {
                     session.pump_previews();
                     if session.handoff_ready() {
-                        // Native layout, stacking and focus have already been
-                        // prepared and verified underneath the cover.
                         self.close();
                     }
                 }

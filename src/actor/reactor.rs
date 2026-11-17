@@ -2486,9 +2486,6 @@ impl Reactor {
                 {
                     outcome.display_switch_warp = Some(space);
                 }
-                // Covered activation follows the same native focus path as an
-                // explicit pick. apply_event_outcome arranges the scrolling
-                // viewport and stack first, then dispatches this raise request.
                 if let Some(window) = window.filter(|&window| response.focus_window == Some(window))
                 {
                     // Explicit overview picks use the same focus path as the CLI.
@@ -4482,8 +4479,6 @@ impl Reactor {
                 outcome.arrange.passes = 1;
             }
         }
-        // Topology changes expose displays in finalize_space_change, after restoration.
-        // A config-only pin change has no topology finalization, so expose it here.
         if pins_only.is_some() {
             self.expose_all_spaces();
         }
@@ -6879,8 +6874,6 @@ impl Reactor {
         self.apply_event_outcome(outcome);
     }
 
-    /// Moves one window into the destination's active workspace. Accepted visible
-    /// topology seeds empty displays without relocating an existing workspace.
     fn move_window_to_display(
         &mut self,
         window: WindowId,
