@@ -68,6 +68,12 @@ wm service start
 wm query windows
 ```
 
+wm automatically restores the last saved layout when it starts. `wm service restart`
+and `wm service stop` save the current column widths, window order, workspace
+assignments, and scroll positions before stopping the daemon. If saving fails, the
+daemon stays running. A first start without a saved layout uses the normal initial
+layout. No restore option is required.
+
 ## Close a window
 
 ```sh

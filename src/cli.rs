@@ -38,10 +38,6 @@ pub struct Cli {
     #[arg(long)]
     pub validate: bool,
 
-    /// Restore the master layout file saved at shutdown.
-    #[arg(long)]
-    pub restore: bool,
-
     /// Record reactor events to the specified file path. Overwrites the file if
     /// exists.
     #[arg(long)]
@@ -1179,7 +1175,6 @@ mod tests {
             "--default-disable",
             "--no-animate",
             "--validate",
-            "--restore",
             "--record",
             "events.json",
             "--config",
@@ -1187,7 +1182,7 @@ mod tests {
         ])
         .unwrap();
         assert!(cli.command.is_none());
-        assert!(cli.one && cli.default_disable && cli.no_animate && cli.validate && cli.restore);
+        assert!(cli.one && cli.default_disable && cli.no_animate && cli.validate);
         assert_eq!(cli.record, Some(PathBuf::from("events.json")));
         assert_eq!(cli.config, Some(PathBuf::from("config.toml")));
 
@@ -1214,11 +1209,19 @@ mod tests {
         for command in [
             vec!["wm", "--one", "query", "windows"],
             vec!["wm", "--config", "config.toml", "execute", "debug"],
-            vec!["wm", "--restore", "subscribe", "list-cli"],
             vec!["wm", "--validate", "close-window"],
             vec!["wm", "--recover-windows", "123", "service", "start"],
         ] {
             assert!(Cli::try_parse_from(command).is_err());
+        }
+    }
+
+    #[test]
+    fn restore_options_are_not_needed_or_accepted() {
+        assert!(Cli::try_parse_from(["wm"]).is_ok());
+        for option in ["--restore", "--no-restore"] {
+            let error = Cli::try_parse_from(["wm", option]).err().unwrap();
+            assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
         }
     }
 

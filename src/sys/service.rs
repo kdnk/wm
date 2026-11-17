@@ -7,12 +7,122 @@ use std::io::{self, Write};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use clap::Subcommand;
 use nix::unistd::getuid;
+use wm_protocol::{ReactorCommand, WmCommand, WmRequest, WmResponse};
+
+use crate::common::config::restore_file;
+use crate::ipc::WmMachClient;
 
 const LAUNCHCTL_PATH: &str = "/bin/launchctl";
 const WM_PLIST: &str = wm_protocol::DEFAULT_SERVICE_NAME;
+
+trait ServiceControl {
+    fn running_pid(&mut self) -> io::Result<Option<u32>>;
+    fn checkpoint(&mut self) -> io::Result<()>;
+    fn start(&mut self) -> io::Result<()>;
+    fn launchctl(&mut self, args: &[&str], suppress_output: bool) -> io::Result<i32>;
+}
+
+struct NativeServiceControl;
+
+#[derive(Debug, PartialEq, Eq)]
+enum ListedService {
+    Missing,
+    Stopped,
+    Running(u32),
+}
+
+impl ServiceControl for NativeServiceControl {
+    fn running_pid(&mut self) -> io::Result<Option<u32>> {
+        let output = Command::new(LAUNCHCTL_PATH).arg("list").output()?;
+        if !output.status.success() {
+            return Err(io::Error::other("could not query the running wm service"));
+        }
+        let jobs = std::str::from_utf8(&output.stdout)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        match listed_service(jobs)? {
+            ListedService::Running(pid) => Ok(Some(pid)),
+            ListedService::Stopped => Ok(None),
+            ListedService::Missing => {
+                let target = format!("gui/{}/{}", getuid(), WM_PLIST);
+                if run_launchctl(&["print", &target], true)? == 0 {
+                    Err(io::Error::other(
+                        "cannot determine whether the loaded wm service is running",
+                    ))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    }
+
+    fn checkpoint(&mut self) -> io::Result<()> {
+        let client = WmMachClient::connect().map_err(io::Error::other)?;
+        let response = client
+            .send_typed_request_with_timeout::<String>(
+                &WmRequest::ExecuteCommand {
+                    command: WmCommand::Reactor(ReactorCommand::SaveLayout {
+                        path: restore_file(),
+                    }),
+                },
+                Duration::from_secs(10),
+            )
+            .map_err(io::Error::other)?;
+        checkpoint_response(response)
+    }
+
+    fn launchctl(&mut self, args: &[&str], suppress_output: bool) -> io::Result<i32> {
+        run_launchctl(args, suppress_output)
+    }
+
+    fn start(&mut self) -> io::Result<()> { service_start() }
+}
+
+fn checkpoint_response(response: WmResponse<String>) -> io::Result<()> {
+    match response {
+        WmResponse::Success { data } if data == "Layout saved" => Ok(()),
+        WmResponse::Error { error } => Err(io::Error::other(error.to_string())),
+        _ => Err(io::Error::other(
+            "daemon did not acknowledge a durable layout save",
+        )),
+    }
+}
+
+fn listed_service(jobs: &str) -> io::Result<ListedService> {
+    for job in jobs.lines() {
+        let mut fields = job.split_whitespace();
+        let (Some(pid), Some(_status), Some(label)) = (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        if label != WM_PLIST {
+            continue;
+        }
+        if pid == "-" {
+            return Ok(ListedService::Stopped);
+        }
+        return pid
+            .parse::<u32>()
+            .ok()
+            .filter(|pid| *pid > 0)
+            .map(ListedService::Running)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid wm service PID"));
+    }
+    Ok(ListedService::Missing)
+}
+
+fn checkpoint_running_service(control: &mut impl ServiceControl) -> io::Result<bool> {
+    if control.running_pid()?.is_some() {
+        control.checkpoint().map_err(|error| {
+            io::Error::other(format!("could not save layout; wm is still running: {error}"))
+        })?;
+        return Ok(true);
+    }
+    Ok(false)
+}
 
 #[derive(Subcommand)]
 pub enum ServiceCommands {
@@ -280,6 +390,7 @@ pub fn service_start() -> io::Result<()> {
         }
 
         if plist_changed {
+            checkpoint_running_service(&mut NativeServiceControl)?;
             let _ = run_launchctl(&["bootout", &domain_target, plist_path.to_str().unwrap()], true);
             let _ = spawn_launchctl(&["bootstrap", &domain_target, plist_path.to_str().unwrap()]);
             let _ = std::thread::sleep(std::time::Duration::from_millis(150));
@@ -315,7 +426,14 @@ pub fn service_restart() -> io::Result<()> {
 
     let uid = getuid();
     let service_target = format!("gui/{}/{}", uid, WM_PLIST);
-    let code = run_launchctl(&["kickstart", "-k", &service_target], false)?;
+    restart_service(&mut NativeServiceControl, &service_target)
+}
+
+fn restart_service(control: &mut impl ServiceControl, service_target: &str) -> io::Result<()> {
+    if !checkpoint_running_service(control)? {
+        return control.start();
+    }
+    let code = control.launchctl(&["kickstart", "-k", service_target], false)?;
     if code == 0 {
         Ok(())
     } else {
@@ -339,10 +457,26 @@ pub fn service_stop() -> io::Result<()> {
     let service_target = format!("gui/{}/{}", uid, WM_PLIST);
     let domain_target = format!("gui/{}", uid);
 
-    let is_bootstrapped = run_launchctl(&["print", &service_target], true).unwrap_or(1);
+    stop_service(
+        &mut NativeServiceControl,
+        &service_target,
+        &domain_target,
+        &plist_path,
+    )
+}
+
+fn stop_service(
+    control: &mut impl ServiceControl,
+    service_target: &str,
+    domain_target: &str,
+    plist_path: &Path,
+) -> io::Result<()> {
+    checkpoint_running_service(control)?;
+
+    let is_bootstrapped = control.launchctl(&["print", service_target], true)?;
 
     if is_bootstrapped != 0 {
-        let code = run_launchctl(&["kill", "SIGTERM", &service_target], false)?;
+        let code = control.launchctl(&["kill", "SIGTERM", service_target], false)?;
         if code == 0 {
             Ok(())
         } else {
@@ -353,8 +487,8 @@ pub fn service_stop() -> io::Result<()> {
         }
     } else {
         let code1 =
-            run_launchctl(&["bootout", &domain_target, plist_path.to_str().unwrap()], false)?;
-        let code2 = run_launchctl(&["disable", &service_target], false)?;
+            control.launchctl(&["bootout", domain_target, plist_path.to_str().unwrap()], false)?;
+        let code2 = control.launchctl(&["disable", service_target], false)?;
 
         if code1 == 0 && code2 == 0 {
             Ok(())
@@ -366,3 +500,7 @@ pub fn service_stop() -> io::Result<()> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "service_tests.rs"]
+mod tests;

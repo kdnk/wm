@@ -20,7 +20,7 @@ mod transient_focus;
 mod utils;
 
 #[cfg(test)]
-mod testing;
+pub(crate) mod testing;
 
 #[cfg(test)]
 #[allow(non_snake_case)]
@@ -1273,6 +1273,18 @@ impl Reactor {
 
     pub(crate) fn handle_ipc_command(&mut self, command: Command) {
         self.handle_loop_event(Event::Command(command));
+    }
+
+    pub(crate) fn save_layout(&mut self, path: std::path::PathBuf) -> std::io::Result<()> {
+        if self.refreshes_blocked() || self.active_display_space().is_none() {
+            return Err(std::io::Error::other("layout is still waiting for displays"));
+        }
+        self.commit_presentations();
+        self.layout_manager.layout_engine.save_current_layout(
+            path,
+            &self.state.windows,
+            self.active_display_space(),
+        )
     }
 
     fn note_windowserver_activity(event: &Event) {
@@ -2819,21 +2831,17 @@ impl Reactor {
                 );
             }
             Event::Command(Command::Reactor(ReactorCommand::SaveAndExit)) => {
-                let active_space = self.active_display_space();
-                return command_workflow::handle_command_reactor_save_and_exit(
-                    &self.state,
-                    &mut self.layout_manager,
-                    active_space,
-                );
+                if let Err(error) = self.save_layout(crate::common::config::restore_file()) {
+                    return Ok(EventOutcome::no_change().with_stdout_line(format!(
+                        "Could not save master file; Wm is still running: {error}"
+                    )));
+                }
+                std::process::exit(0);
             }
             Event::Command(Command::Reactor(ReactorCommand::SaveLayout { path })) => {
-                let active_space = self.active_display_space();
-                return command_workflow::handle_command_reactor_save_layout(
-                    &self.state,
-                    &mut self.layout_manager,
-                    path,
-                    active_space,
-                );
+                self.save_layout(path.clone())?;
+                return Ok(EventOutcome::no_change()
+                    .with_stdout_line(format!("Saved layout to {}", path.display())));
             }
             Event::Command(Command::Reactor(ReactorCommand::RestoreLayout {
                 path,

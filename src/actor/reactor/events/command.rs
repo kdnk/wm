@@ -1,5 +1,5 @@
 // Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use super::super::ScreenInfo;
 use crate::actor::app::{AppThreadHandle, Quiet, WindowId};
@@ -11,7 +11,7 @@ use crate::actor::reactor::managers::{
 };
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::common::collections::HashMap;
-use crate::common::config::{self as config, Config};
+use crate::common::config::Config;
 use crate::common::log::{MetricsCommand, handle_command as handle_metrics_command};
 use crate::layout_engine::{LayoutCommand, LayoutEvent};
 use crate::model::WmState;
@@ -309,42 +309,6 @@ pub fn handle_command_reactor_serialize(
     serialized: Result<String, serde_json::Error>,
 ) -> anyhow::Result<EventOutcome> {
     Ok(EventOutcome::no_change().with_stdout_line(serialized?))
-}
-
-pub fn handle_command_reactor_save_and_exit(
-    state: &WmState,
-    layout: &LayoutManager,
-    active_space: Option<SpaceId>,
-) -> anyhow::Result<EventOutcome> {
-    if let Err(e) = save_layout(state, layout, config::restore_file(), active_space) {
-        error!("Could not save master file: {e}");
-        // A quit request is conditional on a durable master save. Keep Wm running when the
-        // snapshot cannot be committed so the user can fix the filesystem problem or retry
-        // without losing the only complete in-memory layout.
-        return Ok(EventOutcome::no_change()
-            .with_stdout_line(format!("Could not save master file; Wm is still running: {e}")));
-    }
-    std::process::exit(0);
-}
-
-fn save_layout(
-    state: &WmState,
-    layout: &LayoutManager,
-    path: std::path::PathBuf,
-    active_space: Option<SpaceId>,
-) -> std::io::Result<()> {
-    layout.layout_engine.save_current_layout(path, &state.windows, active_space)
-}
-
-pub fn handle_command_reactor_save_layout(
-    state: &WmState,
-    layout: &LayoutManager,
-    path: std::path::PathBuf,
-    active_space: Option<SpaceId>,
-) -> anyhow::Result<EventOutcome> {
-    save_layout(state, layout, path.clone(), active_space)?;
-    info!(path = %path.display(), "Saved layout");
-    Ok(EventOutcome::no_change().with_stdout_line(format!("Saved layout to {}", path.display())))
 }
 
 #[derive(Debug, Clone)]

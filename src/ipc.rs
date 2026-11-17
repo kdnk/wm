@@ -13,6 +13,9 @@ pub mod cli_exec;
 pub mod protocol;
 pub mod subscriptions;
 
+#[cfg(test)]
+mod tests;
+
 pub use protocol::{WmCommand, WmRequest, WmResponse};
 pub use wm_client::{ClientError as WmMachClientError, WmMachClient, WmMachSubscription};
 
@@ -415,6 +418,17 @@ fn handle_reactor_command(
     reactor: &mut reactor::Reactor,
     command: crate::model::reactor::Command,
 ) -> Vec<u8> {
+    if let crate::model::reactor::Command::Reactor(wm_protocol::ReactorCommand::SaveLayout {
+        path,
+    }) = command
+    {
+        return match reactor.save_layout(path) {
+            Ok(()) => encode_success("Layout saved"),
+            Err(error) => encode_error(serde_json::json!({
+                "message": format!("Could not save layout: {error}"),
+            })),
+        };
+    }
     reactor.handle_ipc_command(command);
     encode_success("Command executed successfully")
 }

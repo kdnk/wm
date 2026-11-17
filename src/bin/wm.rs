@@ -125,28 +125,25 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Wm."
 
     let (broadcast_tx, broadcast_rx) = wm::actor::channel();
 
-    let mut layout = if opt.restore {
-        let path = restore_file();
-        match LayoutEngine::load_for_startup_restore(path.clone()) {
-            Ok(layout) => layout,
-            Err(error) => {
+    let path = restore_file();
+    let mut layout = match LayoutEngine::load_for_startup_restore(path.clone()) {
+        Ok(layout) => layout,
+        Err(error) => {
+            if !error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            {
                 eprintln!(
                     "Could not restore master file at {}; starting with a fresh layout: {error}",
                     path.display()
                 );
-                LayoutEngine::new(
-                    &config.virtual_workspaces,
-                    &config.settings.layout,
-                    Some(broadcast_tx.clone()),
-                )
             }
+            LayoutEngine::new(
+                &config.virtual_workspaces,
+                &config.settings.layout,
+                Some(broadcast_tx.clone()),
+            )
         }
-    } else {
-        LayoutEngine::new(
-            &config.virtual_workspaces,
-            &config.settings.layout,
-            Some(broadcast_tx.clone()),
-        )
     };
     if let Err(error) = layout.finish_loading(
         &config.virtual_workspaces,
