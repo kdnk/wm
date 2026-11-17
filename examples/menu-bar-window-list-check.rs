@@ -346,6 +346,7 @@ mod window_list {
                         &handler,
                     );
                     view.borrow().position_after(12.0, CAPSULE_HEIGHT);
+                    view.borrow().set_mode(false);
                 }
             }
             let view = view.borrow();
@@ -457,6 +458,7 @@ mod window_list {
             &handler,
         );
         view.borrow().position_after(12.0, CAPSULE_HEIGHT);
+        view.borrow().set_mode(false);
         let probe = Button::new(&ui, "Move focus and open menu").on_click({
             let view = view.clone();
             let workspaces = workspaces.clone();
@@ -481,6 +483,7 @@ mod window_list {
                         &handler,
                     );
                     view.borrow().position_after(12.0, CAPSULE_HEIGHT);
+                    view.borrow().set_mode(false);
                 }
                 let menu =
                     view.borrow_mut().window_menu(workspaces.borrow()[0].windows.iter(), &handler);
@@ -554,6 +557,7 @@ mod window_list {
                     &handler,
                 );
                 view.borrow().position_after(12.0, CAPSULE_HEIGHT);
+                view.borrow().set_mode(false);
             }
         });
         let timer = unsafe {
@@ -985,6 +989,45 @@ mod window_list {
         }
     }
 
+    fn verify_workspace_selection_pixels(active: &WorkspaceCapsule, inactive: &WorkspaceCapsule) {
+        use objc2_app_kit::{
+            NSBitmapImageRep, NSColorSpace, NSDeviceRGBColorSpace, NSGraphicsContext,
+        };
+        for scale in [1.0, 2.0] {
+            let edge_coverage = |capsule: &WorkspaceCapsule| {
+                let bounds = capsule.host().bounds();
+                let bitmap = unsafe {
+                    NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+                        NSBitmapImageRep::alloc(), std::ptr::null_mut(),
+                        (bounds.size.width * scale).ceil() as isize,
+                        (bounds.size.height * scale).ceil() as isize,
+                        8, 4, true, false, NSDeviceRGBColorSpace, 0, 0,
+                    ).unwrap()
+                };
+                let context = NSGraphicsContext::graphicsContextWithBitmapImageRep(&bitmap)
+                    .unwrap()
+                    .CGContext();
+                objc2_core_graphics::CGContext::scale_ctm(Some(&context), scale, scale);
+                capsule.outline.renderInContext(&context);
+                (0..(3.0 * scale) as isize)
+                    .map(|y| {
+                        bitmap
+                            .colorAtX_y(bitmap.pixelsWide() / 2, y)
+                            .unwrap()
+                            .colorUsingColorSpace(&NSColorSpace::sRGBColorSpace())
+                            .unwrap()
+                            .alphaComponent()
+                    })
+                    .sum::<f64>()
+                    / scale
+            };
+            assert!(
+                edge_coverage(active) > edge_coverage(inactive) + 0.5,
+                "the active workspace must have a visibly stronger rendered edge at {scale}x"
+            );
+        }
+    }
+
     fn verify_mode_pixels(capsule: &WorkspaceCapsule) {
         use objc2_app_kit::{NSBitmapImageRep, NSColorSpace, NSDeviceRGBColorSpace};
         let bounds = capsule.content_host.bounds();
@@ -1377,9 +1420,9 @@ mod window_list {
             assert_eq!(
                 view.capsules[0].outline.lineWidth(),
                 if NSWorkspace::sharedWorkspace().accessibilityDisplayShouldIncreaseContrast() {
-                    1.0
+                    2.0
                 } else {
-                    0.5
+                    1.5
                 }
             );
             assert!(glass.layer().unwrap().backgroundColor().is_none());
@@ -1746,20 +1789,20 @@ mod window_list {
                     capsule.workspace.active && mode
                 );
                 let expected = if capsule.workspace.active {
-                    NSColor::labelColor().colorWithAlphaComponent(if contrast {
-                        0.65
+                    color.colorWithAlphaComponent(if contrast {
+                        1.0
                     } else if dark {
-                        0.22
+                        0.95
                     } else {
-                        0.18
+                        0.85
                     })
                 } else {
                     NSColor::separatorColor()
                 };
                 assert_eq!(
                     layer.lineWidth(),
-                    if capsule.workspace.active && contrast {
-                        1.0
+                    if capsule.workspace.active {
+                        if contrast { 2.0 } else { 1.5 }
                     } else {
                         0.5
                     }
@@ -1970,6 +2013,52 @@ mod window_list {
                 );
             }
             verify_focus_artwork(&mut view, &parent, &handler, &windows);
+            for (presentation, label) in [
+                (StripPresentation::Combined, "combined"),
+                (StripPresentation::WorkspaceOverview, "overview"),
+            ] {
+                for selected in [0, 1] {
+                    let mut selection = styled.clone();
+                    for (index, workspace) in selection.iter_mut().enumerate() {
+                        workspace.active = index == selected;
+                    }
+                    view.update(&selection, true, presentation, &parent, &handler);
+                    view.position_after(0.0, CAPSULE_HEIGHT);
+                    view.stop_motion();
+                    view.set_mode(false);
+                    for capsule in &view.capsules {
+                        assert_outline(capsule, false);
+                    }
+                    verify_workspace_selection_pixels(
+                        &view.capsules[selected],
+                        &view.capsules[1 - selected],
+                    );
+                    if let Ok(prefix) = std::env::var("WM_MENU_BAR_SNAPSHOT") {
+                        let bounds =
+                            NSRect::new(NSPoint::ZERO, NSSize::new(view.width(), CAPSULE_HEIGHT));
+                        let bitmap = parent.bitmapImageRepForCachingDisplayInRect(bounds).unwrap();
+                        parent.cacheDisplayInRect_toBitmapImageRep(bounds, &bitmap);
+                        let data = unsafe {
+                            bitmap.representationUsingType_properties(
+                                NSBitmapImageFileType::PNG,
+                                &NSDictionary::new(),
+                            )
+                        }
+                        .unwrap();
+                        let theme = if dark_appearance(&appearance) {
+                            "dark"
+                        } else {
+                            "light"
+                        };
+                        let content = if selected == 0 { "populated" } else { "empty" };
+                        std::fs::write(
+                            format!("{prefix}.{theme}-{label}-{content}-selection.png"),
+                            data.to_vec(),
+                        )
+                        .unwrap();
+                    }
+                }
+            }
             let mut active_empty = styled.clone();
             active_empty[0].active = false;
             active_empty[1].active = true;

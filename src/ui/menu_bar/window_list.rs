@@ -588,18 +588,18 @@ impl WorkspaceCapsule {
                 None
             };
             self.material_view().layer().unwrap().setBackgroundColor(background.as_deref());
-            layer.setLineWidth(if self.workspace.active && contrast {
-                1.0
+            layer.setLineWidth(if self.workspace.active {
+                if contrast { 2.0 } else { 1.5 }
             } else {
                 0.5
             });
             let border = if self.workspace.active {
-                NSColor::labelColor().colorWithAlphaComponent(if contrast {
-                    0.65
+                color.colorWithAlphaComponent(if contrast {
+                    1.0
                 } else if dark {
-                    0.22
+                    0.95
                 } else {
-                    0.18
+                    0.85
                 })
             } else {
                 NSColor::separatorColor()
