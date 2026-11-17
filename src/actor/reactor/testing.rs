@@ -245,6 +245,9 @@ impl Reactor {
         sys_id: Option<WindowServerId>,
         is_manageable: bool,
     ) {
+        if let Some(id) = sys_id {
+            crate::sys::window_server::register_synthetic_window(id);
+        }
         self.state.windows.insert_window(wid, super::WindowState {
             native_transient: false,
             info: WindowInfo {
@@ -773,6 +776,25 @@ fn synthetic_window_created_uses_frame_space_without_native_queries() {
     assert!(window_spaces(WindowServerId::new(77)).is_empty());
     assert_eq!(native_window_space_query_count(), before);
     assert_eq!(reactor.assigned_space_for_window_id(id), Some(spaces[1]));
+}
+
+#[test]
+fn inserted_test_window_states_never_query_native_spaces() {
+    use crate::sys::window_server::{native_window_space_query_count, window_spaces};
+
+    let mut reactor = test_reactor();
+    let before = native_window_space_query_count();
+    for (index, sys_id) in [(1, 121), (2, 122)] {
+        let id = WindowId::new(1, index);
+        let native = WindowServerId::new(sys_id);
+        if index == 1 {
+            reactor.insert_test_window(id, native, Some(SpaceId::new(2)), CGRect::default(), true);
+        } else {
+            reactor.insert_test_window_state(id, CGRect::default(), Some(native), true);
+        }
+        assert!(window_spaces(native).is_empty());
+    }
+    assert_eq!(native_window_space_query_count(), before);
 }
 
 #[test]
