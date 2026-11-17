@@ -49,6 +49,7 @@ thread_local! {
     static TEST_WINDOW_SUITABILITY_OVERRIDE: RefCell<HashMap<u32, bool>> = RefCell::new(HashMap::default());
     static TEST_WINDOW_ORDERED_IN_OVERRIDE: RefCell<HashMap<u32, bool>> = RefCell::new(HashMap::default());
     static TEST_WINDOW_PARENT_OVERRIDE: RefCell<HashMap<u32, Option<WindowServerId>>> = RefCell::new(HashMap::default());
+    static TEST_WINDOW_TAGS: RefCell<HashMap<u32, u64>> = RefCell::new(HashMap::default());
     static TEST_WINDOW_UNDER_CURSOR_OVERRIDE: std::cell::Cell<Option<Option<WindowServerId>>> = const { std::cell::Cell::new(None) };
     static TEST_WINDOW_AT_POINT_REGIONS: RefCell<Option<Vec<(CGRect, WindowServerId)>>> = const { RefCell::new(None) };
     static TEST_CURSOR_LOCATION_OVERRIDE: std::cell::Cell<Option<CGPoint>> = const { std::cell::Cell::new(None) };
@@ -418,6 +419,32 @@ pub fn mission_control_dock_overlay_visible() -> bool {
 
             get_num(&window, unsafe { kCGWindowLayer }) == Some(MISSION_CONTROL_DOCK_LAYER)
         })
+}
+
+/// Read tags without treating a failed query as an empty mask.
+#[cfg(not(test))]
+pub fn window_tags(id: WindowServerId) -> Option<u64> {
+    let query = WindowIterator::new(&[id])?;
+    (query.count() == 1)
+        .then(|| query.advance().map(|window| window.tags()))
+        .flatten()
+}
+
+#[cfg(test)]
+pub fn window_tags(id: WindowServerId) -> Option<u64> {
+    TEST_WINDOW_TAGS.with(|tags| tags.borrow().get(&id.as_u32()).copied())
+}
+
+#[cfg(test)]
+pub(crate) fn set_window_tags_override(id: WindowServerId, tags: Option<u64>) {
+    TEST_WINDOW_TAGS.with(|values| {
+        let mut values = values.borrow_mut();
+        if let Some(tags) = tags {
+            values.insert(id.as_u32(), tags);
+        } else {
+            values.remove(&id.as_u32());
+        }
+    });
 }
 
 pub fn window_parent(id: WindowServerId) -> Option<WindowServerId> {

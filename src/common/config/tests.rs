@@ -235,6 +235,32 @@ fn app_rules_parse_placement_size_and_focus() {
 }
 
 #[test]
+fn app_rule_tag_masks_are_validated_and_distinguish_matchers() {
+    let mut settings = VirtualWorkspaceSettings::default();
+    for mask in [1, 130, i64::MAX as u64] {
+        settings.app_rules = vec![AppWorkspaceRule {
+            window_tags: Some(mask),
+            ..Default::default()
+        }];
+        assert!(settings.validate().is_empty(), "valid mask {mask}");
+    }
+    for mask in [0, i64::MAX as u64 + 1, u64::MAX] {
+        settings.app_rules[0].window_tags = Some(mask);
+        assert!(settings.validate().iter().any(|issue| issue.contains("window_tags must be")));
+    }
+    settings.app_rules = [2, 128]
+        .map(|mask| AppWorkspaceRule {
+            app_id: Some("com.example.Tool".into()),
+            window_tags: Some(mask),
+            ..Default::default()
+        })
+        .to_vec();
+    assert!(settings.validate().is_empty());
+    settings.app_rules[1].window_tags = Some(2);
+    assert!(settings.validate().iter().any(|issue| issue.contains("same windows")));
+}
+
+#[test]
 fn app_rule_geometry_validation_rejects_invalid_values() {
     let mut settings = VirtualWorkspaceSettings::default();
     settings.app_rules.push(AppWorkspaceRule {
@@ -252,6 +278,7 @@ fn app_rule_geometry_validation_rejects_invalid_values() {
         title_substring: None,
         ax_role: None,
         ax_subrole: None,
+        window_tags: None,
     });
 
     let issues = settings.validate();

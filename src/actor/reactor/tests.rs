@@ -5000,6 +5000,47 @@ fn moving_workspace_direction_wrap_is_opt_in() {
 }
 
 #[test]
+fn app_rule_tags_are_read_during_discovery_and_title_reapplication() {
+    let window = WindowId::new(1, 1);
+    let native = WindowServerId::new(10_001);
+    for (tags, expected_index) in [(Some(130), 1), (Some(2), 0), (None, 0)] {
+        let settings = crate::common::config::VirtualWorkspaceSettings {
+            default_workspace_count: 2,
+            reapply_app_rules_on_title_change: true,
+            app_rules: vec![crate::common::config::AppWorkspaceRule {
+                window_tags: Some(130),
+                title_regex: Some("Window|matched".into()),
+                workspace: Some(WorkspaceSelector::Index(1)),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let (mut apps, mut reactor) =
+            (Apps::new(), test_reactor_with_workspace_settings(&settings));
+        reactor.config.virtual_workspaces = settings;
+        let space = SpaceId::new(1);
+        reactor.handle_event(space_state_event(
+            vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.))],
+            vec![Some(space)],
+        ));
+        crate::sys::window_server::set_window_tags_override(native, tags);
+        make_active_app(&mut apps, &mut reactor, 1, make_windows(1), Some(window));
+        assert_eq!(
+            reactor.test_workspace_for_window(space, window),
+            Some(reactor.test_workspace(space, expected_index))
+        );
+        let first = reactor.test_workspace(space, 0);
+        reactor.assign_test_window_to_workspace(space, window, first);
+        reactor.handle_event(Event::WindowTitleChanged(window, "matched".into()));
+        assert_eq!(
+            reactor.test_workspace_for_window(space, window),
+            Some(reactor.test_workspace(space, expected_index))
+        );
+        crate::sys::window_server::set_window_tags_override(native, None);
+    }
+}
+
+#[test]
 fn title_change_reapply_does_not_rebalance_unchanged_layout() {
     let (mut apps, mut reactor) = test_context();
     reactor.config.virtual_workspaces.reapply_app_rules_on_title_change = true;
@@ -5924,6 +5965,7 @@ fn fullscreen_startup_fixture(
             title_substring: None,
             ax_role: None,
             ax_subrole: None,
+            window_tags: None,
         }];
     }
 

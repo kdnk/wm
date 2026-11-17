@@ -6866,6 +6866,7 @@ impl Reactor {
             window_title: Some(&state.info.title),
             ax_role: state.info.ax_role.as_deref(),
             ax_subrole: state.info.ax_subrole.as_deref(),
+            window_tags: state.info.sys_id.and_then(crate::sys::window_server::window_tags),
         }) {
             return;
         }

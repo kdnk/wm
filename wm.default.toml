@@ -306,6 +306,7 @@ workspace_names = [
 #   - title_regex    : regular expression matched against the window title
 #   - title_substring: literal substring (case-sensitive) matched against the title
 #   - ax_role / ax_subrole: exact match against macOS Accessibility (AX) role/subrole
+#   - window_tags    : raw WindowServer tag mask. All bits must be present; use 1 to 9223372036854775807.
 #
 # Rule options:
 #   - workspace (integer, 0-based): target workspace index. If omitted or invalid, uses the active workspace.
