@@ -2960,15 +2960,12 @@ pub(crate) mod tests {
         let mut f = Fixture::new(3);
         f.select(2);
         f.system.center_selected_column(f.layout);
-        f.constraints.insert(
-            wid(2),
-            WindowLayoutConstraints {
-                is_resizable: true,
-                min_width: 300.0,
-                max_width: 550.0,
-                ..Default::default()
-            },
-        );
+        f.constraints.insert(wid(2), WindowLayoutConstraints {
+            is_resizable: true,
+            min_width: 300.0,
+            max_width: 550.0,
+            ..Default::default()
+        });
         let right = f.frame(2).max().x;
         for (amount, width) in [(0.4, 550.0), (0.4, 550.0), (-0.8, 300.0), (-0.8, 300.0)] {
             f.system.resize_selection_by(
@@ -3032,14 +3029,11 @@ pub(crate) mod tests {
         );
         assert_eq!(f.frame(1).origin.x, -1470.0);
         assert_eq!(f.frame(1).max().x, right);
-        f.constraints.insert(
-            wid(1),
-            WindowLayoutConstraints {
-                is_resizable: true,
-                min_width: 1200.0,
-                ..Default::default()
-            },
-        );
+        f.constraints.insert(wid(1), WindowLayoutConstraints {
+            is_resizable: true,
+            min_width: 1200.0,
+            ..Default::default()
+        });
         f.prepare();
         f.system.resize_selection_by(
             f.layout,
@@ -3068,14 +3062,11 @@ pub(crate) mod tests {
         let now = Instant::now();
         presentation.retarget(0.0, 0.0, now, Duration::from_millis(300));
         presentation.sample(now + Duration::from_millis(30), 1.0);
-        f.system
-            .commit_presented_viewport(f.layout, &presentation.snapshot(now));
+        f.system.commit_presented_viewport(f.layout, &presentation.snapshot(now));
         let before = f.frame(1);
         assert!(before.origin.x > 0.0 && before.origin.x < 500.0);
         let cloned = f.system.clone_layout(f.layout);
-        let frames = f
-            .system
-            .calculate_frames(cloned, f.screen, &f.constraints, &f.gaps, false);
+        let frames = f.system.calculate_frames(cloned, f.screen, &f.constraints, &f.gaps, false);
         assert_eq!(frames.iter().find(|(w, _)| *w == wid(1)).unwrap().1, before);
         let snapshot = serde_json::to_string(&f.system).unwrap();
         let mut restored: ScrollingLayoutSystem = serde_json::from_str(&snapshot).unwrap();
@@ -3123,14 +3114,12 @@ pub(crate) mod tests {
         let (mut presentation, _) = f.system.presentation(f.layout).unwrap();
         let now = Instant::now();
         presentation.retarget(0.0, 0.0, now, Duration::from_millis(300));
-        f.system
-            .commit_presented_viewport(f.layout, &presentation.snapshot(now));
+        f.system.commit_presented_viewport(f.layout, &presentation.snapshot(now));
         f.system.layouts[f.layout].reconcile_camera_bounds();
         let (mut presentation, _) = f.system.presentation(f.layout).unwrap();
         assert_eq!(presentation.target(), -500.0);
         presentation.finish();
-        f.system
-            .commit_presented_viewport(f.layout, &presentation.snapshot(now));
+        f.system.commit_presented_viewport(f.layout, &presentation.snapshot(now));
         assert_eq!(f.frame(1).origin.x, 500.0);
     }
 
@@ -3281,11 +3270,10 @@ pub(crate) mod tests {
             }
         }
         assert!(f.system.begin_viewport_gesture(f.layout, Instant::now()));
-        assert!(f.system.switch_preset_column_width(
-            f.layout,
-            false,
-            HorizontalResizeAnchor::Left,
-        ));
+        assert!(
+            f.system
+                .switch_preset_column_width(f.layout, false, HorizontalResizeAnchor::Left,)
+        );
         assert_eq!(f.selected(), Some(wid(2)));
         assert_eq!(
             f.system.update_viewport_gesture(f.layout, 10.0, Duration::ZERO),
@@ -3305,11 +3293,10 @@ pub(crate) mod tests {
         assert_eq!(f.frame(1).origin.x, 20.0);
 
         // A preset chosen while expanded survives the temporary geometry override.
-        assert!(f.system.switch_preset_column_width(
-            f.layout,
-            false,
-            HorizontalResizeAnchor::Left,
-        ));
+        assert!(
+            f.system
+                .switch_preset_column_width(f.layout, false, HorizontalResizeAnchor::Left,)
+        );
         assert_eq!(f.frame(1).size.width, 950.0);
         f.system.add_window_after_selection(f.layout, wid(2));
         assert_eq!(f.frame(1).size.width, 317.0);
@@ -3791,7 +3778,8 @@ pub(crate) mod tests {
             let hidden_height = f.frame(2).size.height;
             f.system.set_window_participation(wid(2), false);
             f.select(1);
-            f.system.resize_selection_by(f.layout, 0.1, orientation, HorizontalResizeAnchor::Left);
+            f.system
+                .resize_selection_by(f.layout, 0.1, orientation, HorizontalResizeAnchor::Left);
             assert_eq!(f.frame(1).size.height, 800.0);
             let expected_width = if orientation == ResizeOrientation::Smart {
                 600.0
@@ -3880,7 +3868,8 @@ pub(crate) mod tests {
         for orientation in [ResizeOrientation::Vertical, ResizeOrientation::Smart] {
             let mut f = Fixture::new(2);
             f.drop(2, 1, WindowDropAction::Stack);
-            f.system.resize_selection_by(f.layout, 0.1, orientation, HorizontalResizeAnchor::Left);
+            f.system
+                .resize_selection_by(f.layout, 0.1, orientation, HorizontalResizeAnchor::Left);
             assert_eq!(f.frame(2).size, CGSize::new(500.0, 480.0));
             assert_eq!(f.frame(1).size.height, 320.0);
             let new = CGRect::new(CGPoint::ZERO, CGSize::new(500.0, 600.0));

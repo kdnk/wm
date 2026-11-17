@@ -106,41 +106,21 @@ mod drop_preview_tests;
 
 #[cfg(test)]
 mod resize_anchor_tests {
-    use super::HorizontalResizeAnchor;
     use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+
+    use super::HorizontalResizeAnchor;
 
     #[test]
     fn pointer_anchor_uses_target_display_coordinates_and_defaults_without_input() {
         let screen = CGRect::new(CGPoint::new(-1500.0, 80.0), CGSize::new(1000.0, 800.0));
         for (pointer, expected) in [
-            (
-                Some(CGPoint::new(-1499.0, 100.0)),
-                HorizontalResizeAnchor::Left,
-            ),
-            (
-                Some(CGPoint::new(-1000.0, 100.0)),
-                HorizontalResizeAnchor::Right,
-            ),
-            (
-                Some(CGPoint::new(-501.0, 100.0)),
-                HorizontalResizeAnchor::Right,
-            ),
-            (
-                Some(CGPoint::new(-500.0, 100.0)),
-                HorizontalResizeAnchor::Left,
-            ),
-            (
-                Some(CGPoint::new(500.0, 100.0)),
-                HorizontalResizeAnchor::Left,
-            ),
-            (
-                Some(CGPoint::new(-700.0, 50.0)),
-                HorizontalResizeAnchor::Left,
-            ),
-            (
-                Some(CGPoint::new(f64::NAN, 100.0)),
-                HorizontalResizeAnchor::Left,
-            ),
+            (Some(CGPoint::new(-1499.0, 100.0)), HorizontalResizeAnchor::Left),
+            (Some(CGPoint::new(-1000.0, 100.0)), HorizontalResizeAnchor::Right),
+            (Some(CGPoint::new(-501.0, 100.0)), HorizontalResizeAnchor::Right),
+            (Some(CGPoint::new(-500.0, 100.0)), HorizontalResizeAnchor::Left),
+            (Some(CGPoint::new(500.0, 100.0)), HorizontalResizeAnchor::Left),
+            (Some(CGPoint::new(-700.0, 50.0)), HorizontalResizeAnchor::Left),
+            (Some(CGPoint::new(f64::NAN, 100.0)), HorizontalResizeAnchor::Left),
             (
                 Some(CGPoint::new(-700.0, f64::INFINITY)),
                 HorizontalResizeAnchor::Left,

@@ -2003,9 +2003,7 @@ fn width_commands_capture_pointer_side_on_the_command_display() {
     use crate::sys::window_server::set_cursor_location_override;
     struct ResetCursor;
     impl Drop for ResetCursor {
-        fn drop(&mut self) {
-            set_cursor_location_override(None);
-        }
+        fn drop(&mut self) { set_cursor_location_override(None); }
     }
     let _reset = ResetCursor;
     for (pointer, right) in [

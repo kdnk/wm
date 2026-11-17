@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use super::{
-    Direction, FloatingManager, HorizontalResizeAnchor, LayoutId, LayoutSystemKind, ResizeOrientation,
+    Direction, FloatingManager, HorizontalResizeAnchor, LayoutId, LayoutSystemKind,
+    ResizeOrientation,
 };
 #[cfg(test)]
 use crate::actor::app::AppInfo;
@@ -2467,11 +2468,8 @@ impl LayoutEngine {
                         response.changed = response.focus_window.is_some();
                     }
                     LayoutCommand::SwitchPresetColumnWidth { backwards } => {
-                        response.changed = system.switch_preset_column_width(
-                            layout,
-                            backwards,
-                            resize_anchor,
-                        );
+                        response.changed =
+                            system.switch_preset_column_width(layout, backwards, resize_anchor);
                     }
                     LayoutCommand::CenterSelection => system.center_selected_column(layout),
                     _ => unreachable!(),

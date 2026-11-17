@@ -6,6 +6,7 @@
 - An explicit request to run `but land` authorizes its normal remote push and takes precedence over the local-only landing default above. Run `but land` without URL rewrites, remote overrides, or other changes that suppress its push. Use local-only landing only when the user explicitly requests it or asks to land changes without naming `but land`.
 - The `cgs/` directory contains vendored cgs sources with the exact-capture extension required by live resizing. Preserve its license and record source updates in `cgs/README.fork.md`.
 - Run `bash scripts/verify-dot-port.sh` after changing the imported Rift features. Pass a configuration file as the optional argument to validate additional app rules.
+- Run `cargo +nightly fmt --all --check` after changing Rust files, matching CI. Ensure the formatter is nightly; `scripts/verify-dot-port.sh` does not check formatting.
 - The verification script tests LaunchAgent serialization with an isolated HOME. It must not start or stop the user's service, change signing identities, or install the daemon.
 - Desktop tests under `tests/rift-*-live-test.py` require a running matching daemon and macOS permissions. Native geometry tests alone do not prove composited content rendering; retain display video and daemon traces for live resize verification.
 - Use `cargo run --locked --example menu-bar-window-list-check -- --interactive` for isolated native menu interaction checks without controlling the running daemon.
