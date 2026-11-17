@@ -681,6 +681,74 @@ mod tests {
         });
     }
 
+    fn assert_hover_successor_survives_previous_cancellation(arrives_during_grace: bool) {
+        let mut manager = RaiseManager::new();
+        let (handles, mut rx) = create_test_app_handles();
+        let hover_group = CancellationToken::new();
+        let previous = WindowId::new(1, 1);
+        let successor = WindowId::new(1, 2);
+        let request = |window| {
+            Event::MouseRaiseRequest(
+                RaiseRequest {
+                    raise_windows: vec![],
+                    focus_window: Some((window, None)),
+                    app_handles: handles.clone(),
+                    focus_quiet: Quiet::Yes,
+                },
+                hover_group.clone(),
+            )
+        };
+        manager.handle_message(request(previous));
+        let sent = collect_requests(&mut rx);
+        let [Request::Raise(windows, previous_token, previous_sequence, Quiet::Yes)] = &sent[..]
+        else {
+            panic!("previous hover must reach the app");
+        };
+        assert_eq!(windows, &[previous]);
+
+        if arrives_during_grace {
+            manager.handle_message(Event::RaiseTimeout {
+                sequence_id: *previous_sequence,
+            });
+            assert!(!previous_token.is_cancelled());
+        }
+        manager.handle_message(request(successor));
+        if !arrives_during_grace {
+            assert!(collect_requests(&mut rx).is_empty());
+            manager.handle_message(Event::RaiseTimeout {
+                sequence_id: *previous_sequence,
+            });
+        }
+
+        assert!(previous_token.is_cancelled());
+        assert!(
+            !hover_group.is_cancelled(),
+            "retiring one hover must preserve later input"
+        );
+        let sent = collect_requests(&mut rx);
+        let [Request::Raise(windows, successor_token, sequence, Quiet::Yes)] = &sent[..] else {
+            panic!("successor hover must reach the app without another mouse move");
+        };
+        assert_eq!(windows, &[successor]);
+        assert!(!successor_token.is_cancelled());
+        manager.handle_message(Event::RaiseCompleted {
+            window_id: successor,
+            sequence_id: *sequence,
+        });
+        assert!(manager.active_sequence.is_none());
+        assert!(manager.queued_sequences.is_empty());
+    }
+
+    #[test]
+    fn hover_successor_survives_superseding_focus_during_grace() {
+        assert_hover_successor_survives_previous_cancellation(true);
+    }
+
+    #[test]
+    fn hover_successor_survives_queued_focus_timeout() {
+        assert_hover_successor_survives_previous_cancellation(false);
+    }
+
     #[test]
     fn delayed_focus_has_finite_grace_and_survives_stacking_only_requests() {
         Executor::run(async {
@@ -1080,6 +1148,9 @@ mod tests {
         ));
         let cancelled_sequence = manager.active_sequence.as_ref().unwrap().sequence_id;
         token.cancel();
+        assert!(
+            matches!(&sent[..], [Request::Raise(_, active_token, _, _)] if active_token.is_cancelled())
+        );
         // Any scheduler wake must retire cancellation before processing more work.
         manager.handle_message(Event::RaiseCompleted {
             window_id: hover,
