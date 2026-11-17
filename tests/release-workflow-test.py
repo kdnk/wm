@@ -309,14 +309,11 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(triggers["push"]["paths"], ["Cargo.toml"])
         self.assertIn("workflow_dispatch", triggers)
         jobs = workflow["jobs"]
-        self.assertEqual(jobs["verify"]["uses"], "./.github/workflows/rust.yml")
-        self.assertEqual(jobs["verify"]["with"]["source_sha"], "${{ needs.prepare.outputs.sha }}")
-        verification = read_workflow("rust.yml")
-        self.assertEqual(verification["on"]["workflow_call"]["inputs"]["source_sha"]["type"], "string")
-        self.assertIn("${{ inputs.source_sha || github.ref }}", verification["concurrency"]["group"])
-        for job in verification["jobs"].values():
-            self.assertEqual(job["steps"][0]["with"]["ref"], "${{ inputs.source_sha || github.sha }}")
-        self.assertEqual(jobs["tag"]["needs"], ["prepare", "verify"])
+        self.assertEqual(set(jobs), {"prepare", "tag", "build", "publish"})
+        self.assertFalse((ROOT / ".github/workflows/rust.yml").exists())
+        self.assertEqual(jobs["tag"]["needs"], "prepare")
+        self.assertEqual(jobs["tag"]["if"], "needs.prepare.outputs.release == 'true'")
+        self.assertEqual(jobs["tag"]["steps"][0]["with"]["ref"], "${{ needs.prepare.outputs.sha }}")
         self.assertEqual(jobs["build"]["needs"], ["prepare", "tag"])
         self.assertEqual(jobs["publish"]["needs"], ["prepare", "build"])
         for name in ["build", "publish"]:
@@ -341,15 +338,9 @@ class ReleaseTests(unittest.TestCase):
             "cargo": '''import sys
 assert sys.argv[1:] == ['build','--release','--locked','--package','wm','--bin','wm','--target',__import__('os').environ['TEST_TARGET']]
 ''',
-            "lipo": '''import sys
-from pathlib import Path
-args=sys.argv[1:]
-if args[0] == '-create':
-    assert len(args) == 5 and args[3] == '-output'
-    assert all(Path(name).name == 'wm' and Path(name).is_file() for name in args[1:3])
-    Path(args[4]).write_text('#!/bin/sh\\nprintf "wm 1.2.3\\\\n"\\n')
-else:
-    assert args[0] == 'dist/wm' and args[1] == '-verify_arch' and args[2] in ('arm64','x86_64')
+            "lipo": '''import os,sys
+assert sys.argv[1:] == ['-archs','dist/wm']
+print(os.environ.get('TEST_ARCHS', 'arm64'))
 ''',
             "strip": '''import sys
 assert sys.argv[1:] == ['-x','dist/wm']
@@ -369,14 +360,19 @@ assert sys.argv[1:] == ['-x','dist/wm']
         for target in jobs["build"]["strategy"]["matrix"]["target"]:
             binaries = self.directory / "target" / target / "release"
             binaries.mkdir(parents=True)
-            (binaries / "wm").write_bytes(b"wm slice")
+            (binaries / "wm").write_text('#!/bin/sh\nprintf "wm 1.2.3\\n"\n')
             (binaries / "wm-cli").write_bytes(b"stale client must not ship")
             run_step(build["Build release"], TEST_TARGET=target)
             run_step(build["Bundle architecture binaries"], TEST_TARGET=target)
             with tarfile.open(self.directory / "artifacts" / f"{target}.tar.gz") as archive:
                 self.assertEqual(archive.getnames(), ["wm"])
 
-        run_step(publish["Create universal binary"])
+        self.assertEqual(jobs["build"]["strategy"]["matrix"]["target"], ["aarch64-apple-darwin"])
+        result = subprocess.run(["/bin/bash", "-c", publish["Prepare ARM64 binary"]["run"]],
+                                cwd=self.directory, env=dict(self.environment, TEST_ARCHS="arm64 x86_64"),
+                                text=True, capture_output=True)
+        self.assertNotEqual(result.returncode, 0, "Universal binaries must not be published")
+        run_step(publish["Prepare ARM64 binary"])
         for name in ("wm.default.toml", "assets/release-signing.pem", "LICENSE", "NOTICE",
                      "cgs/LICENSE", "cgs/third-party/ProgressiveBlurHeader.LICENSE"):
             destination = self.directory / name

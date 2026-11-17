@@ -10,7 +10,7 @@ On macOS with Python 3.8 or later and curl, run:
 curl -fsSL https://raw.githubusercontent.com/kdnk/wm/main/install.sh | sh
 ```
 
-The installer downloads the latest universal macOS release and verifies the executable against the pinned signing certificate. A repository checkout, GitHub CLI, and Rust toolchain are not required. It installs `wm` in `~/.local/bin`. Add that directory to PATH.
+The installer downloads the latest macOS release for Apple silicon and verifies the executable against the pinned signing certificate. A repository checkout, GitHub CLI, and Rust toolchain are not required. It installs `wm` in `~/.local/bin`. Add that directory to PATH.
 
 `wm` now includes the former `wm-cli` commands. Update scripts and shortcuts to use `wm query`, `wm execute`, and `wm subscribe`. Existing `wm-cli` installations are left untouched. Older two-binary releases require a compatible older installer; see the [release installation notes](docs/release-signing.md#install-a-signed-release).
 
@@ -85,6 +85,16 @@ wm subscribe mach windows_changed
 The command prints matching events until the process exits. Press Ctrl-C to end the subscription. The former `wm subscribe unsub-mach` command is removed because a separate process cannot unsubscribe the original subscriber.
 
 ## Verify changes
+
+Run tests and formatting locally. GitHub Actions only builds, signs, and publishes releases. Release binaries target Apple silicon only.
+
+Install Rust 1.95.0, stable, and nightly with rustfmt, then run:
+
+```sh
+bash scripts/verify-local.sh
+```
+
+After changing imported Rift features, also run:
 
 ```sh
 bash scripts/verify-dot-port.sh

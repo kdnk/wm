@@ -46,18 +46,10 @@ jobs:
             --sha "$RELEASE_SHA" --before "$BEFORE" --event "$EVENT_NAME" \
             --output "$GITHUB_OUTPUT"
 
-  verify:
-    needs: prepare
-    if: needs.prepare.outputs.release == 'true'
-    permissions:
-      contents: read
-    uses: ./.github/workflows/rust.yml
-    with:
-      source_sha: ${{ needs.prepare.outputs.sha }}
-
   tag:
     name: Create immutable version tag
-    needs: [prepare, verify]
+    needs: prepare
+    if: needs.prepare.outputs.release == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -81,7 +73,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+        target: [aarch64-apple-darwin]
 
     steps:
       - name: Checkout source at release tag
@@ -126,7 +118,7 @@ jobs:
           retention-days: 3
 
   publish:
-    name: Package and publish universal release
+    name: Package and publish ARM64 release
     needs: [prepare, build]
     permissions:
       contents: write
@@ -149,24 +141,15 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Create universal binary
+      - name: Prepare ARM64 binary
         run: |
           set -euxo pipefail
           mkdir -p dist
-          for arch in aarch64-apple-darwin x86_64-apple-darwin; do
-            test -s "artifacts/${arch}.tar.gz"
-            mkdir -p "slices/${arch}"
-            tar -xzf "artifacts/${arch}.tar.gz" -C "slices/${arch}"
-          done
-          lipo -create \
-            slices/aarch64-apple-darwin/wm \
-            slices/x86_64-apple-darwin/wm \
-            -output dist/wm
+          test -s artifacts/aarch64-apple-darwin.tar.gz
+          tar -xzf artifacts/aarch64-apple-darwin.tar.gz -C dist
           strip -x dist/wm
           chmod +x dist/wm
-          for arch in arm64 x86_64; do
-            lipo dist/wm -verify_arch "$arch"
-          done
+          test "$(lipo -archs dist/wm)" = arm64
 
       - name: Import signing certificate
         uses: apple-actions/import-codesign-certs@v7

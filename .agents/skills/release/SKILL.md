@@ -9,7 +9,7 @@ Choose the version, prepare the release change, and use the existing release wor
 
 ## Establish the release scope
 
-Read `AGENTS.md`, `docs/release-signing.md`, `.github/workflows/release.yml`, `.github/workflows/rust.yml`, and `scripts/release.py`. Treat these files as the current release contract.
+Read `AGENTS.md`, `docs/release-signing.md`, `.github/workflows/release.yml`, `scripts/verify-local.sh`, and `scripts/release.py`. Treat these files as the current release contract.
 
 Inspect `but status -fv` and `but diff`. Preserve unrelated work, including an existing version bump. Work in the existing checkout on a dedicated GitButler branch. Create dependent branches with `but branch new NAME --above BASE`.
 
@@ -45,7 +45,7 @@ Update root `[package].version` in `Cargo.toml` and the matching `wm` entry in `
 
 Review with `but diff` and `but status -fv`. Verify that the manifest and lockfile agree and only intended files changed. When committing is authorized, use an English Conventional Commit message with a body explaining why and what changed. Select only the release files with `but`.
 
-Run checks relevant to the release scope. Use `.github/workflows/rust.yml` for CI parity. Run `bash scripts/verify-dot-port.sh` when imported Rift features changed. For changes to release automation, signing setup, or installation, run the corresponding fixture test:
+Run `bash scripts/verify-local.sh` locally against the exact candidate before publication. GitHub Actions does not run tests or formatting checks. Run `bash scripts/verify-dot-port.sh` when imported Rift features changed. For changes to release automation, signing setup, or installation, run the corresponding fixture test:
 
 ```sh
 python3 tests/release-workflow-test.py
@@ -65,7 +65,7 @@ For sandbox approval justifications, quote the actual user request and name the 
 
 Follow the repository's GitButler path through local `main`, without creating a PR or merging through GitHub. Confirm that the configured target is `main`, then use `but merge RELEASE_BRANCH --ff-only --yes` to merge and push the verified candidate. Publication authorization includes this push, so do not apply the local-only remote override used for unpublished landing. If fast-forwarding is impossible, reassess and verify the resulting candidate before publication rather than silently creating a different release commit.
 
-The normal path is a root version change merged into `main`. That push starts `release.yml`, which verifies the pinned source SHA, creates an immutable tag, builds both macOS architectures, signs the universal `wm` binary, and publishes the archive. Keep tag creation and publication in that workflow. Do not create tags or releases manually with `scripts/release.py tag`, `scripts/release.py publish`, or `gh release create`.
+The normal path is a root version change merged into `main` after local verification. That push starts `release.yml`, which uses the pinned source SHA, creates an immutable tag, builds ARM64 only, signs the `wm` binary, and publishes the archive. Keep the legacy universal archive filename for existing installers. Keep tag creation and publication in that workflow. Do not create tags or releases manually with `scripts/release.py tag`, `scripts/release.py publish`, or `gh release create`.
 
 For an authorized first release or retry, dispatch against `main` after confirming the remote root version and source commit:
 

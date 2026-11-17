@@ -33,9 +33,13 @@ If both signing secrets already exist, setup leaves them unchanged. Check the pi
 
 ## Publish a release
 
+Run `bash scripts/verify-local.sh` locally against the exact candidate before publishing. GitHub Actions does not run tests or formatting checks.
+
+The archive retains the `wm-universal-macos-VERSION.tar.gz` filename for existing installers. New archives contain an Apple silicon binary only. Intel is excluded.
+
 The release workflow checks that the imported certificate matches the pinned public certificate before trusting it on the temporary Actions runner. It signs `wm` as `git.kdnk.wm`, then packages the signed binary, default configuration, public certificate, and license notices.
 
-The local setup command does not publish a release. To publish a new version, change `[package].version` in `Cargo.toml` and merge that change into `main`. The release workflow detects the version change, runs the reusable Rust checks, creates the matching tag at that exact commit, builds and signs both architectures, then creates a GitHub release with the completed archive.
+The local setup command does not publish a release. To publish a new version, change `[package].version` in `Cargo.toml` and merge that change into `main`. The release workflow detects the version change, creates the matching tag at that exact commit, builds and signs ARM64 only, then creates a GitHub release with the completed archive.
 
 The workflow does not need a pre-existing Release. Build or signing failures leave the Release unpublished. An unfinished draft can be completed by retrying; a published release is left unchanged. Existing tags must point to the planned source commit and are never moved by automation.
 
