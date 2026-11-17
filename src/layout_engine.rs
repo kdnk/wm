@@ -14,6 +14,34 @@ pub use engine::{
 pub(crate) use floating::FloatingManager;
 pub use graph::{Direction, LayoutKind, Orientation, ResizeOrientation};
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HorizontalResizeAnchor {
+    #[default]
+    Left,
+    Right,
+}
+
+impl HorizontalResizeAnchor {
+    pub fn from_pointer(
+        screen: Option<objc2_core_foundation::CGRect>,
+        pointer: Option<objc2_core_foundation::CGPoint>,
+    ) -> Self {
+        if let (Some(screen), Some(pointer)) = (screen, pointer)
+            && pointer.x.is_finite()
+            && pointer.y.is_finite()
+            && pointer.x >= screen.origin.x
+            && pointer.x < screen.max().x
+            && pointer.y >= screen.origin.y
+            && pointer.y < screen.max().y
+            && pointer.x >= screen.mid().x
+        {
+            Self::Right
+        } else {
+            Self::Left
+        }
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[serde(transparent)]
 pub struct ColumnId(pub u64);
@@ -75,3 +103,58 @@ pub use crate::model::virtual_workspace::{VirtualWorkspaceId, WorkspaceStore};
 
 #[cfg(test)]
 mod drop_preview_tests;
+
+#[cfg(test)]
+mod resize_anchor_tests {
+    use super::HorizontalResizeAnchor;
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+
+    #[test]
+    fn pointer_anchor_uses_target_display_coordinates_and_defaults_without_input() {
+        let screen = CGRect::new(CGPoint::new(-1500.0, 80.0), CGSize::new(1000.0, 800.0));
+        for (pointer, expected) in [
+            (
+                Some(CGPoint::new(-1499.0, 100.0)),
+                HorizontalResizeAnchor::Left,
+            ),
+            (
+                Some(CGPoint::new(-1000.0, 100.0)),
+                HorizontalResizeAnchor::Right,
+            ),
+            (
+                Some(CGPoint::new(-501.0, 100.0)),
+                HorizontalResizeAnchor::Right,
+            ),
+            (
+                Some(CGPoint::new(-500.0, 100.0)),
+                HorizontalResizeAnchor::Left,
+            ),
+            (
+                Some(CGPoint::new(500.0, 100.0)),
+                HorizontalResizeAnchor::Left,
+            ),
+            (
+                Some(CGPoint::new(-700.0, 50.0)),
+                HorizontalResizeAnchor::Left,
+            ),
+            (
+                Some(CGPoint::new(f64::NAN, 100.0)),
+                HorizontalResizeAnchor::Left,
+            ),
+            (
+                Some(CGPoint::new(-700.0, f64::INFINITY)),
+                HorizontalResizeAnchor::Left,
+            ),
+            (None, HorizontalResizeAnchor::Left),
+        ] {
+            assert_eq!(
+                HorizontalResizeAnchor::from_pointer(Some(screen), pointer),
+                expected
+            );
+        }
+        assert_eq!(
+            HorizontalResizeAnchor::from_pointer(None, Some(screen.mid())),
+            HorizontalResizeAnchor::Left
+        );
+    }
+}

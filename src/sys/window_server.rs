@@ -1075,6 +1075,11 @@ pub fn set_cursor_location_override(point: Option<CGPoint>) {
 }
 
 #[cfg(test)]
+pub fn cursor_location_override() -> Option<CGPoint> {
+    TEST_CURSOR_LOCATION_OVERRIDE.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
 pub fn set_window_at_point_regions(regions: Option<Vec<(CGRect, WindowServerId)>>) {
     TEST_WINDOW_AT_POINT_REGIONS.with(|value| *value.borrow_mut() = regions);
 }

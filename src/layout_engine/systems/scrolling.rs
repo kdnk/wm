@@ -21,7 +21,8 @@ use crate::layout_engine::systems::{
 };
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{
-    ColumnId, ColumnPlacement, Direction, LayoutId, ResizeOrientation, WindowDropAction,
+    ColumnId, ColumnPlacement, Direction, HorizontalResizeAnchor, LayoutId, ResizeOrientation,
+    WindowDropAction,
 };
 use crate::model::hidden_window_placement::HiddenWindowPlacement;
 use crate::sys::geometry::Round;
@@ -107,6 +108,13 @@ impl Viewport {
     fn start_offset(&self) -> f64 {
         match self {
             Self::Pending { from, .. } => *from,
+            _ => self.offset(),
+        }
+    }
+
+    fn target_offset(&self) -> f64 {
+        match self {
+            Self::Animation(spring) => spring.target,
             _ => self.offset(),
         }
     }
@@ -806,13 +814,12 @@ impl Serialize for LayoutState {
         stored.serialize_field("active_column", &self.active_column)?;
         stored.serialize_field("next_column_id", &self.next_column_id)?;
         let current = self.viewport.offset();
-        let offset = if matches!(self.viewport, Viewport::Gesture(_) | Viewport::Animation(_)) {
-            self.geometry
-                .as_ref()
-                .map_or(current, |g| current.clamp(g.bounds.0, g.bounds.1))
-        } else {
-            current
+        let bounds = match self.viewport {
+            Viewport::Gesture(_) => self.geometry.as_ref().map(|g| g.bounds),
+            Viewport::Animation(_) => self.camera_bounds(),
+            _ => None,
         };
+        let offset = bounds.map_or(current, |(min, max)| current.clamp(min, max));
         stored.serialize_field("viewport", &offset)?;
         let anchor = self.bookmark().or_else(|| self.restored_view.clone()).map(|mut anchor| {
             anchor.relative_offset += offset - current;
@@ -1020,9 +1027,20 @@ impl LayoutState {
         }
     }
 
+    fn camera_bounds(&self) -> Option<(f64, f64)> {
+        let g = self.geometry.as_ref()?;
+        let Some(column) = self.columns.get(self.active_column).and_then(|c| g.column(c.id)) else {
+            return Some(g.bounds);
+        };
+        // Explicit width changes may leave blank space before the first or after the last column.
+        let left = column.world_x + (column.width - g.tiling.size.width).min(0.0);
+        Some((g.bounds.0.min(left), g.bounds.1.max(column.world_x)))
+    }
+
     fn reconcile_camera_bounds(&mut self) {
-        if let (Viewport::Animation(spring), Some(g)) = (&mut self.viewport, &self.geometry) {
-            let target = spring.target.clamp(g.bounds.0, g.bounds.1);
+        let bounds = self.camera_bounds();
+        if let (Viewport::Animation(spring), Some((min, max))) = (&mut self.viewport, bounds) {
+            let target = spring.target.clamp(min, max);
             if target != spring.target {
                 let now = Instant::now().max(spring.sampled);
                 let (_, velocity) = spring.position_velocity(now);
@@ -1078,6 +1096,41 @@ impl LayoutState {
             return;
         }
         self.viewport.set_target(offset);
+    }
+
+    fn mutate_width(
+        &mut self,
+        settings: &ScrollingLayoutSettings,
+        inactive: &HashSet<WindowId>,
+        anchor: HorizontalResizeAnchor,
+        edit: impl FnOnce(&mut Self),
+    ) {
+        let old_column = self
+            .columns
+            .get(self.active_column)
+            .and_then(|column| self.geometry.as_ref()?.column(column.id));
+        let target = self.viewport.target_offset();
+        let fullscreen = self.selected(inactive).is_some_and(|window| {
+            self.fullscreen.contains(&window) || self.fullscreen_within_gaps.contains(&window)
+        });
+        self.mutate(settings, inactive, edit);
+        if !fullscreen
+            && let Some(old) = old_column
+            && let Some(g) = &self.geometry
+            && let Some(new) = g.column(old.id)
+        {
+            let width_delta = match anchor {
+                HorizontalResizeAnchor::Left => 0.0,
+                HorizontalResizeAnchor::Right => new.width - old.width,
+            };
+            self.viewport.set_target(fit_offset(
+                target + new.world_x - old.world_x + width_delta,
+                g.tiling.size.width,
+                new,
+            ));
+        } else {
+            self.reveal(settings);
+        }
     }
 
     /// All topology/sizing edits use this transaction. With screen_x = world_x -
@@ -1604,7 +1657,12 @@ impl ScrollingLayoutSystem {
         }
     }
 
-    pub fn switch_preset_column_width(&mut self, layout: LayoutId, backwards: bool) -> bool {
+    pub fn switch_preset_column_width(
+        &mut self,
+        layout: LayoutId,
+        backwards: bool,
+        anchor: HorizontalResizeAnchor,
+    ) -> bool {
         let Some((state, col, _)) = Self::selected_mut(&mut self.layouts, layout, &self.inactive)
         else {
             return false;
@@ -1657,10 +1715,9 @@ impl ScrollingLayoutSystem {
         if matches!(state.columns[col].width, ColumnWidth::Proportion(r) if r == target) {
             return false;
         }
-        state.mutate(&self.settings, &self.inactive, |state| {
+        state.mutate_width(&self.settings, &self.inactive, anchor, |state| {
             state.columns[col].width = ColumnWidth::Proportion(target);
         });
-        state.reveal(&self.settings);
         true
     }
 
@@ -1740,7 +1797,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
         } else if matches!(state.viewport, Viewport::Animation(_)) {
             let offset = state.viewport.offset();
             state.viewport = Viewport::Static(
-                state.geometry.as_ref().map_or(offset, |g| offset.clamp(g.bounds.0, g.bounds.1)),
+                state.camera_bounds().map_or(offset, |(min, max)| offset.clamp(min, max)),
             );
         }
         self.layouts.insert(state)
@@ -2364,6 +2421,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
         layout: LayoutId,
         amount: f64,
         orientation: ResizeOrientation,
+        anchor: HorizontalResizeAnchor,
     ) {
         if !amount.is_finite() {
             return;
@@ -2379,9 +2437,9 @@ impl LayoutSystem for ScrollingLayoutSystem {
             .count();
         let vertical = orientation == ResizeOrientation::Vertical
             || (orientation == ResizeOrientation::Smart && active_rows > 1);
-        state.mutate(&self.settings, &self.inactive, |state| {
-            let column = &mut state.columns[col];
-            if vertical {
+        if vertical {
+            state.mutate(&self.settings, &self.inactive, |state| {
+                let column = &mut state.columns[col];
                 if active_rows > 1 {
                     let total: f64 = column
                         .windows
@@ -2393,7 +2451,10 @@ impl LayoutSystem for ScrollingLayoutSystem {
                     let share = (column.height_weights[row] / total + amount).clamp(0.05, 0.95);
                     set_height_share(column, row, share, total.max(10_000.0), &self.inactive);
                 }
-            } else {
+            });
+        } else {
+            state.mutate_width(&self.settings, &self.inactive, anchor, |state| {
+                let column = &mut state.columns[col];
                 let ratio = state
                     .geometry
                     .as_ref()
@@ -2407,10 +2468,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
                         _ => self.settings.column_width_ratio,
                     });
                 column.width = ColumnWidth::Proportion(clamp_ratio(ratio + amount, &self.settings));
-            }
-        });
-        if !vertical {
-            state.reveal(&self.settings);
+            });
         }
     }
 }
@@ -2622,8 +2680,18 @@ pub(crate) mod tests {
         let mut f = Fixture::new(6);
         f.drop(2, 1, WindowDropAction::Stack);
         f.select(2);
-        f.system.resize_selection_by(f.layout, 0.25, ResizeOrientation::Vertical);
-        f.system.resize_selection_by(f.layout, 0.1, ResizeOrientation::Horizontal);
+        f.system.resize_selection_by(
+            f.layout,
+            0.25,
+            ResizeOrientation::Vertical,
+            HorizontalResizeAnchor::Left,
+        );
+        f.system.resize_selection_by(
+            f.layout,
+            0.1,
+            ResizeOrientation::Horizontal,
+            HorizontalResizeAnchor::Left,
+        );
         f.select(4);
         let before_frame = f.frame(4);
         let before: Vec<_> = f.system.layouts[f.layout]
@@ -2710,7 +2778,12 @@ pub(crate) mod tests {
         let mut f = Fixture::new(3);
         f.drop(2, 1, WindowDropAction::Stack);
         f.select(1);
-        f.system.resize_selection_by(f.layout, 0.25, ResizeOrientation::Vertical);
+        f.system.resize_selection_by(
+            f.layout,
+            0.25,
+            ResizeOrientation::Vertical,
+            HorizontalResizeAnchor::Left,
+        );
         let first = f.frame(1);
         let second = f.frame(2);
         let slot = f.system.window_slot(f.layout, wid(2));
@@ -2774,6 +2847,294 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn width_anchor_preserves_fullscreen_restore_and_expanded_single_column() {
+        for within_gaps in [false, true] {
+            let mut restored_frames = Vec::new();
+            for anchor in [HorizontalResizeAnchor::Left, HorizontalResizeAnchor::Right] {
+                let mut f = Fixture::new(3);
+                f.select(2);
+                f.system.center_selected_column(f.layout);
+                f.system.toggle_fullscreen(f.layout, within_gaps);
+                f.system.switch_preset_column_width(f.layout, false, anchor);
+                f.system
+                    .resize_selection_by(f.layout, -0.1, ResizeOrientation::Horizontal, anchor);
+                assert_eq!(f.frame(2), f.screen);
+                f.system.toggle_fullscreen(f.layout, within_gaps);
+                restored_frames.push(f.frames());
+            }
+            assert_eq!(restored_frames[0], restored_frames[1]);
+        }
+        let mut f = Fixture::new(1);
+        f.system.settings.expand_single_column = true;
+        f.system.layouts[f.layout].geometry = None;
+        let before = f.frame(1);
+        for _ in 0..3 {
+            assert!(f.system.switch_preset_column_width(
+                f.layout,
+                false,
+                HorizontalResizeAnchor::Right
+            ));
+            assert_eq!(f.frame(1), before);
+        }
+    }
+
+    #[test]
+    fn width_anchor_full_half_cycles_preserve_edges_and_column_order() {
+        for (count, selected) in [(1, 1), (3, 1), (3, 2), (3, 3)] {
+            for anchor in [HorizontalResizeAnchor::Left, HorizontalResizeAnchor::Right] {
+                let mut f = Fixture::new(count);
+                f.select(selected);
+                f.system.settings.max_column_width_ratio = 1.0;
+                f.system.settings.preset_column_widths = vec![1.0, 0.5];
+                f.system
+                    .resize_selection_by(f.layout, 0.5, ResizeOrientation::Horizontal, anchor);
+                let members = column_members(&f);
+                for _ in 0..3 {
+                    assert!(f.system.switch_preset_column_width(f.layout, false, anchor));
+                    let half = f.frame(selected);
+                    assert_eq!(half.size.width, 500.0);
+                    assert_eq!(
+                        half.origin.x,
+                        if anchor == HorizontalResizeAnchor::Right {
+                            500.0
+                        } else {
+                            0.0
+                        }
+                    );
+                    assert!(f.system.switch_preset_column_width(f.layout, false, anchor));
+                    let full = f.frame(selected);
+                    assert_eq!(full.origin.x, 0.0);
+                    assert_eq!(full.size.width, 1000.0);
+                    assert_eq!(f.selected(), Some(wid(selected)));
+                    assert_eq!(column_members(&f), members);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn width_anchor_arbitrary_widths_keep_inset_edge_for_presets_and_steps() {
+        for anchor in [HorizontalResizeAnchor::Left, HorizontalResizeAnchor::Right] {
+            let mut f = Fixture::new(3);
+            f.select(2);
+            f.system
+                .resize_selection_by(f.layout, 0.1, ResizeOrientation::Horizontal, anchor);
+            f.system.center_selected_column(f.layout);
+            let initial = f.frame(2);
+            assert_eq!(initial.origin.x, 200.0);
+            f.system.settings.preset_column_widths = vec![0.6, 0.4];
+            for use_presets in [true, false] {
+                for amount in [-0.2, 0.2] {
+                    if use_presets {
+                        assert!(f.system.switch_preset_column_width(f.layout, false, anchor));
+                    } else {
+                        f.system.resize_selection_by(
+                            f.layout,
+                            amount,
+                            ResizeOrientation::Smart,
+                            anchor,
+                        );
+                    }
+                    let frame = f.frame(2);
+                    assert_eq!(frame.size.width, if amount < 0.0 { 400.0 } else { 600.0 });
+                    assert_eq!(
+                        if anchor == HorizontalResizeAnchor::Right {
+                            frame.max().x
+                        } else {
+                            frame.origin.x
+                        },
+                        if anchor == HorizontalResizeAnchor::Right {
+                            initial.max().x
+                        } else {
+                            initial.origin.x
+                        }
+                    );
+                }
+            }
+            assert_eq!(f.frame(2), initial);
+        }
+    }
+
+    #[test]
+    fn width_anchor_uses_constrained_width_and_keeps_vertical_stack_camera() {
+        let mut f = Fixture::new(3);
+        f.select(2);
+        f.system.center_selected_column(f.layout);
+        f.constraints.insert(
+            wid(2),
+            WindowLayoutConstraints {
+                is_resizable: true,
+                min_width: 300.0,
+                max_width: 550.0,
+                ..Default::default()
+            },
+        );
+        let right = f.frame(2).max().x;
+        for (amount, width) in [(0.4, 550.0), (0.4, 550.0), (-0.8, 300.0), (-0.8, 300.0)] {
+            f.system.resize_selection_by(
+                f.layout,
+                amount,
+                ResizeOrientation::Horizontal,
+                HorizontalResizeAnchor::Right,
+            );
+            let frame = f.frame(2);
+            assert_eq!(frame.size.width, width);
+            assert_eq!(frame.max().x, right);
+        }
+        f.system.settings.preset_column_widths = vec![0.8, 0.9];
+        for _ in 0..2 {
+            assert!(f.system.switch_preset_column_width(
+                f.layout,
+                false,
+                HorizontalResizeAnchor::Right,
+            ));
+            assert_eq!(f.frame(2).max().x, right);
+        }
+        f.drop(3, 2, WindowDropAction::Stack);
+        let x = f.frame(2).origin.x;
+        for orientation in [ResizeOrientation::Vertical, ResizeOrientation::Smart] {
+            f.system
+                .resize_selection_by(f.layout, 0.1, orientation, HorizontalResizeAnchor::Right);
+            assert_eq!(f.frame(2).origin.x, x);
+            assert_eq!(f.frame(3).origin.x, x);
+        }
+    }
+
+    #[test]
+    fn width_anchor_obeys_asymmetric_gaps_display_origin_and_visibility() {
+        let mut f = Fixture::new(3);
+        f.screen.origin = CGPoint::new(-1500.0, 80.0);
+        f.gaps.outer.left = 30.0;
+        f.gaps.outer.right = 70.0;
+        f.gaps.inner.horizontal = 20.0;
+        f.system.settings.max_column_width_ratio = 1.0;
+        f.prepare();
+        f.system.resize_selection_by(
+            f.layout,
+            0.5,
+            ResizeOrientation::Horizontal,
+            HorizontalResizeAnchor::Right,
+        );
+        let right = f.frame(1).max().x;
+        f.system.resize_selection_by(
+            f.layout,
+            -0.5,
+            ResizeOrientation::Horizontal,
+            HorizontalResizeAnchor::Right,
+        );
+        assert_eq!(f.frame(1).max().x, right);
+        assert_eq!(right, -570.0);
+        f.system.resize_selection_by(
+            f.layout,
+            0.5,
+            ResizeOrientation::Horizontal,
+            HorizontalResizeAnchor::Left,
+        );
+        assert_eq!(f.frame(1).origin.x, -1470.0);
+        assert_eq!(f.frame(1).max().x, right);
+        f.constraints.insert(
+            wid(1),
+            WindowLayoutConstraints {
+                is_resizable: true,
+                min_width: 1200.0,
+                ..Default::default()
+            },
+        );
+        f.prepare();
+        f.system.resize_selection_by(
+            f.layout,
+            -0.1,
+            ResizeOrientation::Horizontal,
+            HorizontalResizeAnchor::Right,
+        );
+        assert_eq!(f.frame(1).origin.x, -1470.0);
+        assert_eq!(f.frame(1).size.width, 1200.0);
+    }
+
+    #[test]
+    fn width_anchor_rapid_commands_use_destination_and_preserve_save_clone() {
+        let mut f = Fixture::new(3);
+        f.system.settings.max_column_width_ratio = 1.0;
+        f.system.settings.preset_column_widths = vec![1.0, 0.5];
+        for _ in 0..2 {
+            assert!(f.system.switch_preset_column_width(
+                f.layout,
+                false,
+                HorizontalResizeAnchor::Right,
+            ));
+        }
+        let bounds = f.system.layouts[f.layout].geometry.as_ref().unwrap().bounds;
+        let (mut presentation, _) = f.system.presentation(f.layout).unwrap();
+        let now = Instant::now();
+        presentation.retarget(0.0, 0.0, now, Duration::from_millis(300));
+        presentation.sample(now + Duration::from_millis(30), 1.0);
+        f.system
+            .commit_presented_viewport(f.layout, &presentation.snapshot(now));
+        let before = f.frame(1);
+        assert!(before.origin.x > 0.0 && before.origin.x < 500.0);
+        let cloned = f.system.clone_layout(f.layout);
+        let frames = f
+            .system
+            .calculate_frames(cloned, f.screen, &f.constraints, &f.gaps, false);
+        assert_eq!(frames.iter().find(|(w, _)| *w == wid(1)).unwrap().1, before);
+        let snapshot = serde_json::to_string(&f.system).unwrap();
+        let mut restored: ScrollingLayoutSystem = serde_json::from_str(&snapshot).unwrap();
+        restored.update_settings(&f.system.settings);
+        restored.prepare_layout(f.layout, f.screen, &f.constraints, &f.gaps);
+        let frames = restored.calculate_frames(f.layout, f.screen, &f.constraints, &f.gaps, false);
+        assert_eq!(frames.iter().find(|(w, _)| *w == wid(1)).unwrap().1, before);
+        f.system.resize_selection_by(
+            f.layout,
+            -0.1,
+            ResizeOrientation::Horizontal,
+            HorizontalResizeAnchor::Right,
+        );
+        assert_eq!(f.frame(1).size.width, 400.0);
+        assert_eq!(f.frame(1).max().x, 1000.0);
+        f.system.resize_selection_by(
+            f.layout,
+            0.1,
+            ResizeOrientation::Horizontal,
+            HorizontalResizeAnchor::Right,
+        );
+        assert_eq!(f.frame(1).origin.x, 500.0);
+        assert_eq!(
+            f.system.layouts[f.layout].geometry.as_ref().unwrap().bounds,
+            bounds
+        );
+        f.gaps.inner.vertical = 10.0;
+        f.prepare();
+        assert_eq!(f.frame(1).origin.x, 500.0);
+    }
+
+    #[test]
+    fn right_anchored_width_survives_animation_reconciliation() {
+        let mut f = Fixture::new(3);
+        f.system.settings.max_column_width_ratio = 1.0;
+        f.system.settings.preset_column_widths = vec![1.0, 0.5];
+        for _ in 0..2 {
+            assert!(f.system.switch_preset_column_width(
+                f.layout,
+                false,
+                HorizontalResizeAnchor::Right,
+            ));
+        }
+        assert_eq!(f.frame(1).origin.x, 500.0);
+        let (mut presentation, _) = f.system.presentation(f.layout).unwrap();
+        let now = Instant::now();
+        presentation.retarget(0.0, 0.0, now, Duration::from_millis(300));
+        f.system
+            .commit_presented_viewport(f.layout, &presentation.snapshot(now));
+        f.system.layouts[f.layout].reconcile_camera_bounds();
+        let (mut presentation, _) = f.system.presentation(f.layout).unwrap();
+        assert_eq!(presentation.target(), -500.0);
+        presentation.finish();
+        f.system
+            .commit_presented_viewport(f.layout, &presentation.snapshot(now));
+        assert_eq!(f.frame(1).origin.x, 500.0);
+    }
+
+    #[test]
     fn preset_width_cycles_and_effective_width_search() {
         for (width, backwards, expected) in [
             (
@@ -2802,23 +3163,39 @@ pub(crate) mod tests {
                 s.columns[0].width = width
             });
             for &pixels in expected {
-                assert!(f.system.switch_preset_column_width(f.layout, backwards));
+                assert!(f.system.switch_preset_column_width(
+                    f.layout,
+                    backwards,
+                    HorizontalResizeAnchor::Left,
+                ));
                 assert_eq!(f.frame(1).size.width, pixels);
             }
         }
         let mut f = Fixture::new(1);
         f.system.settings.preset_column_widths = vec![0.7, f64::NAN, 0.3, 0.5, 0.0];
         for pixels in [700.0, 300.0, 500.0] {
-            assert!(f.system.switch_preset_column_width(f.layout, false));
+            assert!(f.system.switch_preset_column_width(
+                f.layout,
+                false,
+                HorizontalResizeAnchor::Left,
+            ));
             assert_eq!(f.frame(1).size.width, pixels);
         }
         f.system.settings.preset_column_widths = vec![0.33333, 0.66667];
         for pixels in [667.0, 333.0, 667.0, 333.0] {
-            assert!(f.system.switch_preset_column_width(f.layout, false));
+            assert!(f.system.switch_preset_column_width(
+                f.layout,
+                false,
+                HorizontalResizeAnchor::Left,
+            ));
             assert_eq!(f.frame(1).size.width, pixels);
         }
         f.system.settings.preset_column_widths = vec![-1.0, f64::INFINITY];
-        assert!(!f.system.switch_preset_column_width(f.layout, false));
+        assert!(!f.system.switch_preset_column_width(
+            f.layout,
+            false,
+            HorizontalResizeAnchor::Left,
+        ));
     }
 
     #[test]
@@ -2829,10 +3206,19 @@ pub(crate) mod tests {
             max_width: 450.0,
             ..Default::default()
         });
-        f.system.resize_selection_by(f.layout, -0.08, ResizeOrientation::Horizontal);
+        f.system.resize_selection_by(
+            f.layout,
+            -0.08,
+            ResizeOrientation::Horizontal,
+            HorizontalResizeAnchor::Left,
+        );
         f.prepare();
         for ratio in [0.5, 2.0 / 3.0] {
-            assert!(f.system.switch_preset_column_width(f.layout, false));
+            assert!(f.system.switch_preset_column_width(
+                f.layout,
+                false,
+                HorizontalResizeAnchor::Left,
+            ));
             assert!(matches!(f.system.layouts[f.layout].columns[0].width,
                 ColumnWidth::Proportion(r) if (r - ratio).abs() < 1e-6));
             assert_eq!(f.frame(1).size.width, 450.0);
@@ -2841,7 +3227,11 @@ pub(crate) mod tests {
             f.system.layouts[f.layout].mutate(&f.system.settings, &f.system.inactive, |s| {
                 s.columns[0].width = ColumnWidth::Proportion(start);
             });
-            assert!(f.system.switch_preset_column_width(f.layout, false));
+            assert!(f.system.switch_preset_column_width(
+                f.layout,
+                false,
+                HorizontalResizeAnchor::Left,
+            ));
             assert!(matches!(f.system.layouts[f.layout].columns[0].width,
                 ColumnWidth::Proportion(r) if (r - target).abs() < 1e-6));
         }
@@ -2851,12 +3241,21 @@ pub(crate) mod tests {
     fn preset_width_preserves_stack_selection_and_fullscreen_restore() {
         let mut f = Fixture::new(2);
         f.drop(2, 1, WindowDropAction::Stack);
-        f.system.resize_selection_by(f.layout, 0.1, ResizeOrientation::Vertical);
+        f.system.resize_selection_by(
+            f.layout,
+            0.1,
+            ResizeOrientation::Vertical,
+            HorizontalResizeAnchor::Left,
+        );
         f.gaps.inner.horizontal = 20.0;
         let before = f.frames();
         let weights = f.system.layouts[f.layout].columns[0].height_weights.clone();
         for _ in 0..3 {
-            assert!(f.system.switch_preset_column_width(f.layout, false));
+            assert!(f.system.switch_preset_column_width(
+                f.layout,
+                false,
+                HorizontalResizeAnchor::Left,
+            ));
         }
         assert_eq!(f.frames(), before); // Same membership, row heights and gap-aware half width.
         assert_eq!(f.frame(1).size.width, 490.0);
@@ -2864,17 +3263,29 @@ pub(crate) mod tests {
         assert_eq!(f.system.layouts[f.layout].columns[0].height_weights, weights);
         for within_gaps in [false, true] {
             f.system.toggle_fullscreen(f.layout, within_gaps);
-            assert!(f.system.switch_preset_column_width(f.layout, false));
+            assert!(f.system.switch_preset_column_width(
+                f.layout,
+                false,
+                HorizontalResizeAnchor::Left,
+            ));
             assert_eq!(f.frame(2), f.screen);
             f.system.toggle_fullscreen(f.layout, within_gaps);
             assert_eq!(f.frame(2).size.width, 660.0);
             assert_eq!(f.selected(), Some(wid(2)));
             for _ in 0..2 {
-                assert!(f.system.switch_preset_column_width(f.layout, false));
+                assert!(f.system.switch_preset_column_width(
+                    f.layout,
+                    false,
+                    HorizontalResizeAnchor::Left,
+                ));
             }
         }
         assert!(f.system.begin_viewport_gesture(f.layout, Instant::now()));
-        assert!(f.system.switch_preset_column_width(f.layout, false));
+        assert!(f.system.switch_preset_column_width(
+            f.layout,
+            false,
+            HorizontalResizeAnchor::Left,
+        ));
         assert_eq!(f.selected(), Some(wid(2)));
         assert_eq!(
             f.system.update_viewport_gesture(f.layout, 10.0, Duration::ZERO),
@@ -2894,7 +3305,11 @@ pub(crate) mod tests {
         assert_eq!(f.frame(1).origin.x, 20.0);
 
         // A preset chosen while expanded survives the temporary geometry override.
-        assert!(f.system.switch_preset_column_width(f.layout, false));
+        assert!(f.system.switch_preset_column_width(
+            f.layout,
+            false,
+            HorizontalResizeAnchor::Left,
+        ));
         assert_eq!(f.frame(1).size.width, 950.0);
         f.system.add_window_after_selection(f.layout, wid(2));
         assert_eq!(f.frame(1).size.width, 317.0);
@@ -2971,7 +3386,12 @@ pub(crate) mod tests {
     fn unequal_and_clipped_columns_reveal_with_minimum_camera_motion() {
         let mut f = Fixture::new(3);
         f.select(2);
-        f.system.resize_selection_by(f.layout, -0.1, ResizeOrientation::Horizontal);
+        f.system.resize_selection_by(
+            f.layout,
+            -0.1,
+            ResizeOrientation::Horizontal,
+            HorizontalResizeAnchor::Left,
+        );
         let before = f.frames();
         f.select(1);
         f.select(2);
@@ -3069,7 +3489,12 @@ pub(crate) mod tests {
         for direction in [Direction::Left, Direction::Right] {
             let mut f = Fixture::new(2);
             f.select(1);
-            f.system.resize_selection_by(f.layout, -0.1, ResizeOrientation::Horizontal);
+            f.system.resize_selection_by(
+                f.layout,
+                -0.1,
+                ResizeOrientation::Horizontal,
+                HorizontalResizeAnchor::Left,
+            );
             let destination_id = f.system.container_tree(f.layout).children[0].node_id;
             f.select(2);
             f.system.consume_or_expel_selection(f.layout, Direction::Left);
@@ -3079,7 +3504,12 @@ pub(crate) mod tests {
                 f.system.container_tree(f.layout).children[0].node_id,
                 destination_id
             );
-            f.system.resize_selection_by(f.layout, 0.2, ResizeOrientation::Vertical);
+            f.system.resize_selection_by(
+                f.layout,
+                0.2,
+                ResizeOrientation::Vertical,
+                HorizontalResizeAnchor::Left,
+            );
             let offset = f.system.layouts[f.layout].viewport.start_offset();
             f.system.consume_or_expel_selection(f.layout, direction);
             assert_eq!(f.selected(), Some(wid(2)));
@@ -3130,7 +3560,12 @@ pub(crate) mod tests {
         f.select(2);
         f.system.center_selected_column(f.layout);
         let before = f.frames();
-        f.system.resize_selection_by(f.layout, 0.1, ResizeOrientation::Horizontal);
+        f.system.resize_selection_by(
+            f.layout,
+            0.1,
+            ResizeOrientation::Horizontal,
+            HorizontalResizeAnchor::Left,
+        );
         assert_eq!(f.frame(1), before[0].1);
         assert_eq!(f.frame(2).origin.x, before[1].1.origin.x);
         assert_eq!(f.frame(2).size.width, 600.0);
@@ -3197,7 +3632,12 @@ pub(crate) mod tests {
         assert_eq!(f.frame(1).origin.x, x);
 
         f.system.toggle_fullscreen_of_selection(f.layout);
-        f.system.resize_selection_by(f.layout, 0.3, ResizeOrientation::Horizontal);
+        f.system.resize_selection_by(
+            f.layout,
+            0.3,
+            ResizeOrientation::Horizontal,
+            HorizontalResizeAnchor::Left,
+        );
         f.system.toggle_fullscreen_of_selection(f.layout);
         assert_eq!(f.frame(1).origin.x, 200.0); // Reconcile the saved view with the enlarged tile.
     }
@@ -3284,7 +3724,12 @@ pub(crate) mod tests {
         assert_eq!(f.frame(2).size.width, 600.0);
         f.select(1);
         for (delta, expected) in [(0.1, 500.0), (1.0, 700.0), (-1.0, 300.0)] {
-            f.system.resize_selection_by(f.layout, delta, ResizeOrientation::Horizontal);
+            f.system.resize_selection_by(
+                f.layout,
+                delta,
+                ResizeOrientation::Horizontal,
+                HorizontalResizeAnchor::Left,
+            );
             assert_eq!(f.frame(1).size.width, expected);
         }
     }
@@ -3324,7 +3769,12 @@ pub(crate) mod tests {
                 let hidden_height = f.frame(3).size.height;
                 f.system.set_window_participation(wid(3), false);
                 f.select(1);
-                f.system.resize_selection_by(f.layout, 0.1, orientation);
+                f.system.resize_selection_by(
+                    f.layout,
+                    0.1,
+                    orientation,
+                    HorizontalResizeAnchor::Left,
+                );
                 assert_eq!(f.frame(1).size.height, (800.0 - gap) * 0.6);
                 assert_eq!(f.frame(2).size.height, (800.0 - gap) * 0.4);
                 f.system.set_window_participation(wid(3), true);
@@ -3341,7 +3791,7 @@ pub(crate) mod tests {
             let hidden_height = f.frame(2).size.height;
             f.system.set_window_participation(wid(2), false);
             f.select(1);
-            f.system.resize_selection_by(f.layout, 0.1, orientation);
+            f.system.resize_selection_by(f.layout, 0.1, orientation, HorizontalResizeAnchor::Left);
             assert_eq!(f.frame(1).size.height, 800.0);
             let expected_width = if orientation == ResizeOrientation::Smart {
                 600.0
@@ -3380,7 +3830,12 @@ pub(crate) mod tests {
                     let new = CGRect::new(old.origin, CGSize::new(old.size.width, expected));
                     f.system.on_window_resized(f.layout, wid(1), old, new, f.screen, &f.gaps);
                 } else {
-                    f.system.resize_selection_by(f.layout, 0.1, ResizeOrientation::Vertical);
+                    f.system.resize_selection_by(
+                        f.layout,
+                        0.1,
+                        ResizeOrientation::Vertical,
+                        HorizontalResizeAnchor::Left,
+                    );
                 }
                 assert_eq!(
                     f.frame(1).size.height,
@@ -3425,7 +3880,7 @@ pub(crate) mod tests {
         for orientation in [ResizeOrientation::Vertical, ResizeOrientation::Smart] {
             let mut f = Fixture::new(2);
             f.drop(2, 1, WindowDropAction::Stack);
-            f.system.resize_selection_by(f.layout, 0.1, orientation);
+            f.system.resize_selection_by(f.layout, 0.1, orientation, HorizontalResizeAnchor::Left);
             assert_eq!(f.frame(2).size, CGSize::new(500.0, 480.0));
             assert_eq!(f.frame(1).size.height, 320.0);
             let new = CGRect::new(CGPoint::ZERO, CGSize::new(500.0, 600.0));

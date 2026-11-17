@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
-use crate::layout_engine::{Direction, LayoutKind, ResizeOrientation};
+use crate::layout_engine::{Direction, HorizontalResizeAnchor, LayoutKind, ResizeOrientation};
 
 slotmap::new_key_type! { pub struct LayoutId; }
 
@@ -327,6 +327,7 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
         layout: LayoutId,
         amount: f64,
         orientation: ResizeOrientation,
+        anchor: HorizontalResizeAnchor,
     );
     fn rebalance(&mut self, _layout: LayoutId) {}
     fn toggle_tile_orientation(&mut self, _layout: LayoutId) {}
@@ -544,7 +545,12 @@ mod participation_tests {
                 system.add_window_after_selection(layout, window);
             }
             system.select_window(layout, windows[1]);
-            system.resize_selection_by(layout, 0.13, ResizeOrientation::Horizontal);
+            system.resize_selection_by(
+                layout,
+                0.13,
+                ResizeOrientation::Horizontal,
+                HorizontalResizeAnchor::Left,
+            );
             system.select_window(layout, windows[0]);
             let slots: Vec<_> = windows.iter().map(|&w| system.window_slot(layout, w)).collect();
             let original = frames(system);

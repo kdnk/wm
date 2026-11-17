@@ -1999,6 +1999,67 @@ fn genuine_external_frame_changes_invalidate_layout() {
 }
 
 #[test]
+fn width_commands_capture_pointer_side_on_the_command_display() {
+    use crate::sys::window_server::set_cursor_location_override;
+    struct ResetCursor;
+    impl Drop for ResetCursor {
+        fn drop(&mut self) {
+            set_cursor_location_override(None);
+        }
+    }
+    let _reset = ResetCursor;
+    for (pointer, right) in [
+        (Some(CGPoint::new(750.0, 500.0)), true),
+        (Some(CGPoint::new(500.0, 500.0)), true),
+        (Some(CGPoint::new(250.0, 500.0)), false),
+        (Some(CGPoint::new(1500.0, 500.0)), false),
+        (None, false),
+    ] {
+        let (mut apps, mut reactor, a, _) = two_displays(Default::default());
+        let window = WindowId::new(1, 1);
+        let mut config = reactor.config.clone();
+        config.settings.layout.scrolling.column_width_ratio = 1.0;
+        config.settings.layout.scrolling.max_column_width_ratio = 1.0;
+        config.settings.layout.scrolling.preset_column_widths = vec![1.0, 0.5];
+        config.settings.layout.scrolling.preserve_window_sizes = false;
+        reactor
+            .layout_manager
+            .layout_engine
+            .set_layout_settings(&config.settings.layout);
+        reactor.config = config;
+        reactor.space_state.command_space = Some(a);
+        set_cursor_location_override(pointer);
+        reactor.handle_test_layout_command(LayoutCommand::ResizeWindowBy { amount: 1.0 });
+        apps.simulate_until_quiet(&mut reactor);
+        let full = apps.windows[&window].frame;
+        reactor.handle_test_layout_command(LayoutCommand::SwitchPresetColumnWidth {
+            backwards: false,
+        });
+        apps.simulate_until_quiet(&mut reactor);
+        let half = apps.windows[&window].frame;
+        assert!(half.size.width < full.size.width, "{pointer:?}");
+        assert_eq!(
+            if right { half.max().x } else { half.origin.x },
+            if right { full.max().x } else { full.origin.x },
+            "{pointer:?}"
+        );
+        reactor.handle_test_layout_command(LayoutCommand::ResizeWindowBy { amount: -0.1 });
+        apps.simulate_until_quiet(&mut reactor);
+        let smaller = apps.windows[&window].frame;
+        assert!(smaller.size.width < half.size.width);
+        assert_eq!(
+            if right {
+                smaller.max().x
+            } else {
+                smaller.origin.x
+            },
+            if right { half.max().x } else { half.origin.x },
+            "{pointer:?}"
+        );
+    }
+}
+
+#[test]
 fn scrolling_display_transfer_ignores_intermediate_native_width() {
     let (mut apps, mut reactor, a, _b) = two_displays(Default::default());
     let window = WindowId::new(1, 1);

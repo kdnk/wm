@@ -28,6 +28,7 @@ pub struct LayoutCommandPayload {
     pub visible_spaces: Vec<SpaceId>,
     pub visible_space_frames: HashMap<SpaceId, objc2_core_foundation::CGRect>,
     pub post_arrange_mouse_warp: Option<WindowId>,
+    pub resize_anchor: crate::layout_engine::HorizontalResizeAnchor,
 }
 
 pub fn handle_command_layout(
@@ -42,6 +43,7 @@ pub fn handle_command_layout(
         visible_spaces,
         visible_space_frames,
         post_arrange_mouse_warp,
+        resize_anchor,
     } = payload;
     info!(?cmd);
     let is_move_node = matches!(cmd, LayoutCommand::MoveNode(_));
@@ -95,6 +97,7 @@ pub fn handle_command_layout(
             &visible_spaces,
             &visible_space_frames,
             cmd,
+            resize_anchor,
         )
     };
 

@@ -1486,6 +1486,23 @@ impl Reactor {
             self.config.settings.mouse_follows_focus.then(|| self.main_window()).flatten();
         let is_move_node = matches!(command, layout::LayoutCommand::MoveNode(_));
         let (visible_spaces, visible_space_frames) = self.visible_spaces_for_layout(false);
+        let mut resize_anchor = layout::HorizontalResizeAnchor::Left;
+        if matches!(
+            command,
+            layout::LayoutCommand::SwitchPresetColumnWidth { .. }
+                | layout::LayoutCommand::ResizeWindowGrow(_)
+                | layout::LayoutCommand::ResizeWindowShrink(_)
+                | layout::LayoutCommand::ResizeWindowBy { .. }
+        ) {
+            #[cfg(not(test))]
+            let pointer = window_server::current_cursor_location().ok();
+            #[cfg(test)]
+            let pointer = window_server::cursor_location_override();
+            resize_anchor = layout::HorizontalResizeAnchor::from_pointer(
+                command_space.and_then(|space| visible_space_frames.get(&space).copied()),
+                pointer,
+            );
+        }
         let outcome = command_workflow::handle_command_layout(
             &mut self.state,
             &mut self.layout_manager,
@@ -1496,6 +1513,7 @@ impl Reactor {
                 visible_spaces,
                 visible_space_frames,
                 post_arrange_mouse_warp,
+                resize_anchor,
             },
         )?;
         if is_move_node {

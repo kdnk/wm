@@ -3198,7 +3198,12 @@ mod tests {
         // Unequal widths: move the first of three columns past its neighbor.
         next.sample(Instant::now() + Duration::from_secs(2));
         system.commit_presented_viewport(layout, &next.state.lock().viewport);
-        system.resize_selection_by(layout, -0.4, ResizeOrientation::Horizontal);
+        system.resize_selection_by(
+            layout,
+            -0.4,
+            ResizeOrientation::Horizontal,
+            crate::layout_engine::HorizontalResizeAnchor::Left,
+        );
         system.add_window_after_selection(layout, WindowId::new(1, 3));
         system.select_window(layout, visible);
         let before: Vec<_> =

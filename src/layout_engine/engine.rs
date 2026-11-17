@@ -5,7 +5,9 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use super::{Direction, FloatingManager, LayoutId, LayoutSystemKind, ResizeOrientation};
+use super::{
+    Direction, FloatingManager, HorizontalResizeAnchor, LayoutId, LayoutSystemKind, ResizeOrientation,
+};
 #[cfg(test)]
 use crate::actor::app::AppInfo;
 use crate::actor::app::{WindowId, pid_t};
@@ -799,6 +801,7 @@ impl LayoutEngine {
             layout,
             resize_amount,
             ResizeOrientation::Horizontal,
+            HorizontalResizeAnchor::Left,
         );
     }
 
@@ -2126,6 +2129,7 @@ impl LayoutEngine {
         visible_spaces: &[SpaceId],
         visible_space_frames: &HashMap<SpaceId, CGRect>,
         command: LayoutCommand,
+        resize_anchor: HorizontalResizeAnchor,
     ) -> EventResponse {
         if !matches!(
             command,
@@ -2427,6 +2431,7 @@ impl LayoutEngine {
                     layout,
                     amount,
                     orientation,
+                    resize_anchor,
                 );
                 EventResponse::default()
             }
@@ -2462,7 +2467,11 @@ impl LayoutEngine {
                         response.changed = response.focus_window.is_some();
                     }
                     LayoutCommand::SwitchPresetColumnWidth { backwards } => {
-                        response.changed = system.switch_preset_column_width(layout, backwards);
+                        response.changed = system.switch_preset_column_width(
+                            layout,
+                            backwards,
+                            resize_anchor,
+                        );
                     }
                     LayoutCommand::CenterSelection => system.center_selected_column(layout),
                     _ => unreachable!(),
@@ -3799,6 +3808,7 @@ mod tests {
                 &[space],
                 &HashMap::default(),
                 LayoutCommand::ToggleStack,
+                HorizontalResizeAnchor::Left,
             )
         };
         let _ = command(&mut engine, &mut store);
@@ -3856,6 +3866,7 @@ mod tests {
             &visible_spaces,
             &visible_space_centers,
             LayoutCommand::ToggleStack,
+            HorizontalResizeAnchor::Left,
         );
 
         assert_eq!(response.focus_window, Some(focused));
@@ -3867,6 +3878,7 @@ mod tests {
             &visible_spaces,
             &visible_space_centers,
             LayoutCommand::ToggleStack,
+            HorizontalResizeAnchor::Left,
         );
 
         assert_eq!(response.focus_window, Some(focused));
@@ -4006,6 +4018,7 @@ mod tests {
                 &visible_spaces,
                 &visible_space_frames,
                 LayoutCommand::NextWindow,
+                HorizontalResizeAnchor::Left,
             )
         }));
 
@@ -4173,6 +4186,7 @@ mod tests {
             &visible_spaces,
             &visible_space_frames,
             LayoutCommand::ResizeWindowBy { amount: 0.2 },
+            HorizontalResizeAnchor::Left,
         );
 
         let resized_layout = engine.calculate_layout(
@@ -4381,6 +4395,7 @@ mod tests {
                 &visible_spaces,
                 &visible_space_frames,
                 LayoutCommand::MoveFocus(Direction::Right),
+                HorizontalResizeAnchor::Left,
             )
         }));
 
@@ -4483,6 +4498,7 @@ mod tests {
             &visible_spaces,
             &visible_space_frames,
             LayoutCommand::MoveFocus(Direction::Up),
+            HorizontalResizeAnchor::Left,
         );
 
         assert_eq!(response.focus_window, Some(upper_window));
@@ -4632,6 +4648,7 @@ mod tests {
             &[space],
             &HashMap::default(),
             LayoutCommand::ResizeWindowBy { amount: 0.2 },
+            HorizontalResizeAnchor::Left,
         );
 
         let gaps = engine.layout_settings.gaps.clone();
@@ -4649,6 +4666,7 @@ mod tests {
             &[space],
             &HashMap::default(),
             LayoutCommand::ResizeWindowBy { amount: 0.2 },
+            HorizontalResizeAnchor::Left,
         );
         assert_ne!(
             engine.calculate_layout(space, internal, &gaps, Default::default()),
@@ -4699,6 +4717,7 @@ mod tests {
             &[space],
             &HashMap::default(),
             LayoutCommand::ResizeWindowBy { amount: 0.2 },
+            HorizontalResizeAnchor::Left,
         );
 
         let modified = engine.calculate_layout(space, screen, &gaps, Default::default());
@@ -4739,6 +4758,7 @@ mod tests {
             &[space],
             &HashMap::default(),
             LayoutCommand::ResizeWindowBy { amount: 0.2 },
+            HorizontalResizeAnchor::Left,
         );
 
         let gaps = engine.layout_settings.gaps.clone();
@@ -4788,6 +4808,7 @@ mod tests {
             &[space_a, space_b],
             &HashMap::default(),
             LayoutCommand::ResizeWindowBy { amount: 0.2 },
+            HorizontalResizeAnchor::Left,
         );
 
         let gaps = engine.layout_settings.gaps.clone();
@@ -4832,6 +4853,7 @@ mod tests {
             &[space],
             &HashMap::default(),
             LayoutCommand::ResizeWindowBy { amount: 0.2 },
+            HorizontalResizeAnchor::Left,
         );
 
         let gaps = engine.layout_settings.gaps.clone();
@@ -4887,6 +4909,7 @@ mod tests {
             &[space],
             &HashMap::default(),
             LayoutCommand::MoveNode(Direction::Up),
+            HorizontalResizeAnchor::Left,
         );
 
         let modified = engine.calculate_layout(space, screen, &gaps, Default::default());
