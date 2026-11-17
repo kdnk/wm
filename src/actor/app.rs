@@ -674,7 +674,7 @@ impl Request {
     #[inline]
     fn disables_enhanced_ui(&self) -> bool {
         match self {
-            Self::SetWindowFrames(_, _, _, enabled, _) => *enabled,
+            Self::SetWindowFrames(_, _, FrameMode::Full, enabled, _) => *enabled,
             _ => false,
         }
     }
@@ -795,6 +795,7 @@ struct AppWindowState {
     window_server_id: Option<WindowServerId>,
     title: String,
     is_animating: bool,
+    animation_eui_held: bool,
     animation_authority: FrameAuthority,
     last_animation_frame: Option<(CGRect, FrameAuthority)>,
     // Latest observed or intended geometry; only a hint for choosing AX setters.
@@ -942,8 +943,8 @@ fn write_frame(
 /// `hint` is the last observed or intended frame. It only selects setters: AX
 /// notifications are asynchronous, so it may be stale, and the returned frame is
 /// always read back, unless the app did not answer a setter: the readback would
-/// queue behind it and wait out the same timeout. `before_write` runs before any
-/// setter.
+/// queue behind it and wait out the same timeout. `before_write` runs only
+/// before writes that include a resize.
 fn reconcile_frame(
     elem: &impl FrameTarget,
     hint: CGRect,
@@ -960,7 +961,9 @@ fn reconcile_frame(
     let planned = FrameWrites::between(hint, target, mode);
     let mut failed = FrameWrites::default();
     if planned.any() {
-        before_write();
+        if planned.size {
+            before_write();
+        }
         failed = write_frame(elem, hint, target, planned, bounds)?;
     }
     let mut frame = elem.frame()?;
@@ -978,7 +981,9 @@ fn reconcile_frame(
             position: !failed.position,
             size: missed.size,
         };
-        before_write();
+        if fix.size {
+            before_write();
+        }
         let fix_failed = write_frame(elem, frame, target, fix, bounds)?;
         failed.position |= fix_failed.position;
         failed.size |= fix_failed.size;
@@ -988,7 +993,6 @@ fn reconcile_frame(
     // Reuse the readback already required by reconciliation, never requested size.
     let constrained = constrain(CGRect::new(target.origin, frame.size));
     if !failed.position && !constrained.origin.same_as(frame.origin) && bounds.is_some() {
-        before_write();
         elem.set_position(constrained.origin)?;
         frame = elem.frame()?;
     }
@@ -1034,7 +1038,7 @@ fn write_interactive_frame(
     }
 }
 
-/// Batch-scoped Enhanced UI suppression, acquired before the batch's first write.
+/// Batch-scoped Enhanced UI suppression, acquired before the batch's first resize.
 #[derive(Debug, PartialEq, Eq)]
 enum BatchEui {
     NotRequested,
@@ -1282,7 +1286,6 @@ impl State {
 
         if !should_terminate && !pending_frames.is_empty() {
             let mut state = this.borrow_mut();
-            state.hold_batch_eui(&mut eui);
             for (wid, frame) in pending_frames {
                 if let Err(err) = state.apply_interactive_frame(wid, frame) {
                     warn!(?wid, ?err, "Failed to apply animation frame");
@@ -1324,6 +1327,20 @@ impl State {
             ..
         } = pending;
         let _guard = span.enter();
+        // Acquire lazily: animation startup and position-only samples need no EUI.
+        let needs_resize = {
+            let window = self.window_mut(wid)?;
+            authority.1.is_none()
+                && (set_size
+                    || (source != FrameSource::Drag
+                        && !window.last_known_frame.size.same_as(frame.size)))
+                && !window.animation_eui_held
+        };
+        if needs_resize {
+            let app = self.app.clone();
+            self.enhanced_ui.acquire(&app);
+            self.window_mut(wid)?.animation_eui_held = true;
+        }
         let window = self.window_mut(wid)?;
         window.last_seen_txid = txid;
         window.frame_source = source;
@@ -1590,8 +1607,6 @@ impl State {
                     (window.elem.clone(), started_animation)
                 };
                 if started_animation {
-                    let app = self.app.clone();
-                    self.enhanced_ui.acquire(&app);
                     self.stop_notifications_for_animation(&elem);
                 }
             }
@@ -1667,9 +1682,11 @@ impl State {
                 // A newer target may already be in the shared store. Report the
                 // transaction actually written by this actor, including on normal end.
                 let txid = Self::some_txid(last_seen_txid);
-                if ended_animation {
+                if std::mem::take(&mut self.window_mut(wid)?.animation_eui_held) {
                     let app = self.app.clone();
                     self.enhanced_ui.release(&app);
+                }
+                if ended_animation {
                     self.restart_notifications_after_animation(&elem);
                 }
                 let mut frame =
@@ -1694,7 +1711,12 @@ impl State {
                             target,
                             FrameMode::Full,
                             authority.1,
-                            || {},
+                            || {
+                                if *eui == BatchEui::NotRequested {
+                                    *eui = BatchEui::Deferred;
+                                }
+                                self.hold_batch_eui(eui);
+                            },
                         )
                     });
                     frame = match self.handle_ax_result(wid, result)? {
@@ -2373,6 +2395,7 @@ impl State {
             window_server_id: Some(window_server_id),
             title: info.title.clone(),
             is_animating: false,
+            animation_eui_held: false,
             animation_authority: Default::default(),
             last_animation_frame: None,
             last_known_frame: info.frame,
@@ -2734,7 +2757,7 @@ impl State {
     fn remove_window(&mut self, wid: WindowId) -> Option<AppWindowState> {
         let window = self.windows.remove(&wid)?;
         self.elem_to_wid.remove(&window.elem);
-        if window.is_animating {
+        if window.animation_eui_held {
             let app = self.app.clone();
             self.enhanced_ui.release(&app);
         }
@@ -3012,6 +3035,55 @@ mod frame_tests {
             window.scrolling_bounds(),
             || {},
         )
+    }
+
+    #[test]
+    fn enhanced_ui_is_suppressed_only_for_actual_resizes() {
+        let initial = rect(10., 20., 1024., 800.);
+        for (target, mode, hint, expected_resizes) in [
+            (rect(30., 40., 1024., 800.), FrameMode::Full, initial, 0),
+            (rect(30., 40., 900., 700.), FrameMode::Position, initial, 0),
+            (rect(30., 40., 900., 700.), FrameMode::Full, initial, 1),
+            (initial, FrameMode::Full, rect(30., 40., 1024., 800.), 0),
+            (
+                rect(10., 20., 900., 700.),
+                FrameMode::Full,
+                rect(10., 20., 900., 700.),
+                1,
+            ),
+        ] {
+            let window = FakeWindow {
+                frame: Cell::new(initial),
+                ..Default::default()
+            };
+            let resizes = Cell::new(0);
+            reconcile_frame(&window, hint, target, mode, None, || {
+                resizes.set(resizes.get() + 1)
+            })
+            .unwrap();
+            assert_eq!(resizes.get(), expected_resizes);
+            assert_eq!(
+                window.calls.borrow().iter().filter(|&&call| call == "size").count(),
+                expected_resizes
+            );
+        }
+    }
+
+    #[test]
+    fn position_only_batches_do_not_request_enhanced_ui_suppression() {
+        let wid = WindowId::new(1, 1);
+        let request = |mode, enabled| {
+            Request::SetWindowFrames(
+                vec![(wid, CGRect::default())],
+                Default::default(),
+                mode,
+                enabled,
+                Default::default(),
+            )
+        };
+        assert!(!request(FrameMode::Position, true).disables_enhanced_ui());
+        assert!(!request(FrameMode::Full, false).disables_enhanced_ui());
+        assert!(request(FrameMode::Full, true).disables_enhanced_ui());
     }
 
     #[test]
