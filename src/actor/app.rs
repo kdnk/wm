@@ -1015,13 +1015,19 @@ fn write_interactive_frame(
     mut frame: CGRect,
     set_size: bool,
     source: FrameSource,
+    mut before_resize: impl FnMut(),
 ) {
     let bounds = elem.scrolling_bounds().map(|bounds| bounds.for_motion(*hint));
     if let Some(bounds) = bounds {
         if set_size {
-            if let Ok(accepted) =
-                reconcile_frame(elem, *hint, frame, FrameMode::Full, Some(bounds), || {})
-            {
+            if let Ok(accepted) = reconcile_frame(
+                elem,
+                *hint,
+                frame,
+                FrameMode::Full,
+                Some(bounds),
+                &mut before_resize,
+            ) {
                 *hint = accepted;
             }
             return;
@@ -1029,6 +1035,7 @@ fn write_interactive_frame(
         frame = bounds.apply(CGRect::new(frame.origin, hint.size));
     }
     if set_size || (source != FrameSource::Drag && !hint.size.same_as(frame.size)) {
+        before_resize();
         let both = FrameWrites { position: true, size: true };
         let _ = write_frame(elem, *hint, frame, both, bounds);
         *hint = frame;
@@ -1038,7 +1045,6 @@ fn write_interactive_frame(
     }
 }
 
-/// Batch-scoped Enhanced UI suppression, acquired before the batch's first resize.
 #[derive(Debug, PartialEq, Eq)]
 enum BatchEui {
     NotRequested,
@@ -1327,21 +1333,10 @@ impl State {
             ..
         } = pending;
         let _guard = span.enter();
-        // Acquire lazily: animation startup and position-only samples need no EUI.
-        let needs_resize = {
-            let window = self.window_mut(wid)?;
-            authority.1.is_none()
-                && (set_size
-                    || (source != FrameSource::Drag
-                        && !window.last_known_frame.size.same_as(frame.size)))
-                && !window.animation_eui_held
-        };
-        if needs_resize {
-            let app = self.app.clone();
-            self.enhanced_ui.acquire(&app);
-            self.window_mut(wid)?.animation_eui_held = true;
-        }
-        let window = self.window_mut(wid)?;
+        assert_eq!(wid.pid, self.pid);
+        let window = self.windows.get_mut(&wid).ok_or(AxError::NotFound)?;
+        let enhanced_ui = &mut self.enhanced_ui;
+        let app = &self.app;
         window.last_seen_txid = txid;
         window.frame_source = source;
         // Release reapplies this frame, including position-only viewport writes.
@@ -1355,6 +1350,12 @@ impl State {
             frame,
             set_size,
             source,
+            || {
+                if !window.animation_eui_held {
+                    enhanced_ui.acquire(app);
+                    window.animation_eui_held = true;
+                }
+            },
         );
         Ok(())
     }
@@ -3070,6 +3071,73 @@ mod frame_tests {
     }
 
     #[test]
+    fn interactive_resize_suppression_matches_native_size_writes() {
+        let initial = rect(100., 100., 800., 600.);
+        let screen = rect(0., 0., 1440., 900.);
+        for (bounded, set_size, hint, frame, expected_resize) in [
+            (true, true, initial, rect(200., 100., 700., 600.), true),
+            (true, false, initial, rect(200., 100., 700., 600.), false),
+            (
+                true,
+                false,
+                rect(100., 100., 700., 600.),
+                rect(200., 100., 900., 600.),
+                false,
+            ),
+            (true, true, initial, initial, false),
+            (
+                true,
+                true,
+                rect(100., 100., 700., 600.),
+                rect(100., 100., 700., 600.),
+                true,
+            ),
+            (false, true, initial, rect(200., 100., 700., 600.), true),
+            (false, false, initial, rect(200., 100., 700., 600.), true),
+            (false, false, initial, rect(200., 100., 800., 600.), false),
+        ] {
+            let window = FakeWindow {
+                frame: Cell::new(initial),
+                ..Default::default()
+            };
+            let authority = FrameAuthority(
+                None,
+                bounded.then(|| ScrollingDisplayBounds::for_screen(screen, &[]).unwrap()),
+            );
+            let target = AuthorizedFrameTarget {
+                target: &window,
+                authority: &authority,
+            };
+            let mut accepted = hint;
+            write_interactive_frame(
+                &target,
+                &mut accepted,
+                frame,
+                set_size,
+                FrameSource::Viewport,
+                || window.calls.borrow_mut().push("eui"),
+            );
+            let calls = window.calls.borrow();
+            assert_eq!(
+                calls.contains(&"size"),
+                expected_resize,
+                "bounded={bounded}, set_size={set_size}"
+            );
+            assert_eq!(
+                calls.contains(&"eui"),
+                expected_resize,
+                "bounded={bounded}, set_size={set_size}"
+            );
+            if let Some(size) = calls.iter().position(|call| *call == "size") {
+                assert!(
+                    calls[..size].contains(&"eui"),
+                    "suppression must precede native resize"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn position_only_batches_do_not_request_enhanced_ui_suppression() {
         let wid = WindowId::new(1, 1);
         let request = |mode, enabled| {
@@ -3141,6 +3209,7 @@ mod frame_tests {
                     rect(x, 1726., 1103., 800.),
                     false,
                     FrameSource::Viewport,
+                    || {},
                 );
             }
             assert!(window.calls.borrow().iter().all(|call| *call == "position"));
@@ -3177,6 +3246,7 @@ mod frame_tests {
                     rect(x, 1726., width, 800.),
                     true,
                     FrameSource::Viewport,
+                    || {},
                 );
                 assert_eq!(accepted, window.frame.get());
                 assert!(window.calls.borrow().contains(&"size"));
@@ -3190,6 +3260,7 @@ mod frame_tests {
                 rect(x, 1726., 1500., 800.),
                 false,
                 FrameSource::Viewport,
+                || {},
             );
             assert!(window.calls.borrow().iter().all(|call| *call == "position"));
             assert_eq!(accepted.size, window.frame.get().size);
@@ -3235,6 +3306,7 @@ mod frame_tests {
                         frame,
                         set_size,
                         FrameSource::Viewport,
+                        || {},
                     );
                     assert_eq!(accepted, frame, "set_size={set_size}");
                     assert_eq!(window.frame.get(), frame);
@@ -3263,6 +3335,7 @@ mod frame_tests {
                 rect(100., requested, 400., 800.),
                 false,
                 FrameSource::Viewport,
+                || {},
             );
             assert_eq!(accepted.origin.y, expected);
             assert_eq!(window.frame.get(), accepted);
@@ -3308,7 +3381,7 @@ mod frame_tests {
             authority: &authority,
         };
         let mut accepted = from;
-        write_interactive_frame(&target, &mut accepted, to, true, FrameSource::Viewport);
+        write_interactive_frame(&target, &mut accepted, to, true, FrameSource::Viewport, || {});
         assert_eq!(accepted, to);
         assert!(
             window
@@ -3336,7 +3409,7 @@ mod frame_tests {
             authority: &authority,
         };
         let mut accepted = from;
-        write_interactive_frame(&target, &mut accepted, to, true, FrameSource::Viewport);
+        write_interactive_frame(&target, &mut accepted, to, true, FrameSource::Viewport, || {});
         assert_eq!(accepted, to);
         let placements = window.placements.borrow();
         assert!(
@@ -3361,7 +3434,7 @@ mod frame_tests {
             authority: &authority,
         };
         let mut accepted = from;
-        write_interactive_frame(&target, &mut accepted, to, true, FrameSource::Viewport);
+        write_interactive_frame(&target, &mut accepted, to, true, FrameSource::Viewport, || {});
         assert_eq!(accepted, to);
         let placements = window.placements.borrow();
         assert!(
@@ -3399,6 +3472,7 @@ mod frame_tests {
             rect(690., 0., 420., 600.),
             true,
             FrameSource::Viewport,
+            || {},
         );
         assert_eq!(accepted, rect(400., 0., 600., 600.));
         let placements = window.placements.borrow();
@@ -3449,6 +3523,7 @@ mod frame_tests {
             target,
             true,
             FrameSource::Viewport,
+            || {},
         );
         reconcile_frame(
             &fenced,
