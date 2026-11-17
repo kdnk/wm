@@ -252,7 +252,7 @@ impl RaiseManager {
 
         // Send all raise requests with completion notification
         let mut pending_raises = HashSet::default();
-        let raise_token = mouse_token.unwrap_or_default();
+        let raise_token = mouse_token.map(|token| token.child_token()).unwrap_or_default();
         if raise_token.is_cancelled() {
             return;
         }
