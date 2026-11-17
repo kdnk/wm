@@ -664,7 +664,9 @@ pub(crate) fn get_window_with_transient(id: WindowServerId) -> Option<(WindowSer
 fn native_window_is_transient(tags: SLSWindowTags, parent: u32) -> bool {
     !tags.contains(SLSWindowTags::IGNORE_FOR_EVENTS)
         && (tags.contains(SLSWindowTags::MODAL)
-            || (parent != 0 && tags.contains(SLSWindowTags::ATTACHED))
+            || (parent != 0
+                && tags.contains(SLSWindowTags::ATTACHED)
+                && !tags.contains(SLSWindowTags::PREVENTS_ACTIVATION))
             || tags.contains(
                 SLSWindowTags::FLOATING
                     | SLSWindowTags::HIDE_ON_DEACTIVATE
@@ -1252,6 +1254,16 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn nonactivating_attached_surfaces_do_not_block_hover_focus() {
+        let tags = SLSWindowTags::from_bits_retain(0x00002003000d2081);
+        assert!(!super::native_window_is_transient(tags, 1800));
+        assert!(super::native_window_is_transient(
+            tags | SLSWindowTags::MODAL,
+            1800
+        ));
     }
 
     #[test]
