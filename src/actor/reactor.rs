@@ -4487,6 +4487,11 @@ impl Reactor {
                 outcome.arrange.passes = 1;
             }
         }
+        // Topology changes expose displays in finalize_space_change, after restoration.
+        // A config-only pin change has no topology finalization, so expose it here.
+        if pins_only.is_some() {
+            self.expose_all_spaces();
+        }
         if preserve_membership {
             let engine = &self.layout_manager.layout_engine;
             let intents: Vec<_> = self
@@ -6700,6 +6705,7 @@ impl Reactor {
         &self,
         origin: CGPoint,
         direction: Direction,
+        excluded_origin: Option<CGPoint>,
     ) -> Option<&ScreenInfo> {
         fn interval_gap(a_min: f64, a_max: f64, b_min: f64, b_max: f64) -> f64 {
             if a_max < b_min {
@@ -6716,7 +6722,8 @@ impl Reactor {
         for screen in &self.space_state.screens {
             let frame = screen.frame;
 
-            if frame.contains(origin) {
+            if frame.contains(origin) || excluded_origin.is_some_and(|point| frame.contains(point))
+            {
                 continue;
             }
 
@@ -6768,7 +6775,7 @@ impl Reactor {
         match selector {
             DisplaySelector::Direction(direction) => {
                 let origin = origin_override.or_else(|| self.current_screen_center())?;
-                self.screen_for_direction_from_point(origin, *direction)
+                self.screen_for_direction_from_point(origin, *direction, None)
             }
             DisplaySelector::Index(index) => self.screens_in_physical_order().get(*index).copied(),
             DisplaySelector::Uuid(uuid) => {
@@ -6824,7 +6831,10 @@ impl Reactor {
                     + 1.0,
             ),
         };
-        self.screen_for_direction_from_point(wrapped_origin, *direction)
+        // The source can be the outermost display on both edges when displays
+        // overlap along this axis (for example, vertically stacked displays).
+        // Wrapping must still choose another display.
+        self.screen_for_direction_from_point(wrapped_origin, *direction, Some(origin))
     }
 
     fn frame_on_display(
@@ -6874,8 +6884,8 @@ impl Reactor {
         self.apply_event_outcome(outcome);
     }
 
-    /// Moves one window into the destination's active workspace; a destination
-    /// without one rejects the move, which never relocates a workspace.
+    /// Moves one window into the destination's active workspace. Accepted visible
+    /// topology seeds empty displays without relocating an existing workspace.
     fn move_window_to_display(
         &mut self,
         window: WindowId,
