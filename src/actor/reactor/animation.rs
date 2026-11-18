@@ -1461,7 +1461,8 @@ impl AnimationManager {
                 }
                 let (_, target) = layout.iter().find(|(wid, _)| *wid == owner)?;
                 let owner = reactor.state.windows.window(owner)?.frame_monotonic;
-                let target_x = target.round().origin.x;
+                let target = target.round();
+                let target_x = bounds.map_or(target, |bounds| bounds.apply(target)).origin.x;
                 if target_x == owner.origin.x {
                     return None;
                 }
@@ -1485,6 +1486,9 @@ impl AnimationManager {
                 continue;
             };
             let target_frame = target_frame.round();
+            let target_frame = bounds
+                .filter(|_| constrained)
+                .map_or(target_frame, |bounds| bounds.apply(target_frame));
             let current_frame = window.frame_monotonic;
             if !force_frames && target_frame.same_as(current_frame) {
                 continue;
@@ -2281,6 +2285,83 @@ mod tests {
     }
 
     #[test]
+    fn dragged_dialog_reverses_with_its_editor_at_neighboring_display_edges() {
+        use super::super::testing::*;
+        use crate::actor::reactor::{Event, Requested};
+        use crate::common::config::{AppWorkspaceRule, VirtualWorkspaceSettings};
+        use crate::sys::event::MouseState;
+
+        let mut reactor = test_reactor_with_workspace_settings(&VirtualWorkspaceSettings {
+            app_rules: vec![AppWorkspaceRule {
+                title_regex: Some("^Live Grep$".into()),
+                manage: Some(false),
+                follow_parent: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let space = SpaceId::new(1);
+        reactor.handle_event(space_state_event(
+            [0., -1000., 1000.].map(|x| rect(x, 0., 1000., 800.)).to_vec(),
+            [1, 2, 3].map(|id| Some(SpaceId::new(id))).to_vec(),
+        ));
+        let mut apps = Apps::new();
+        apps.make_app_and_settle(&mut reactor, 1, make_windows(1));
+        let editor = WindowId::new(1, 1);
+        let dialog = WindowId::new(1, 2);
+        let editor_x = reactor.state.windows.window(editor).unwrap().frame_monotonic.origin.x;
+        let mut picker = make_window(2);
+        picker.title = "Live Grep".into();
+        picker.ax_role = Some("AXWindow".into());
+        picker.frame = rect(editor_x + 100., 140., 280., 330.);
+        reactor.handle_event(Event::WindowCreated(dialog, picker, None, None));
+        let dragged = rect(editor_x + 35., 160., 280., 330.);
+        reactor.handle_event(Event::WindowFrameChanged(
+            dialog,
+            dragged,
+            None,
+            Requested(false),
+            Some(MouseState::Down),
+        ));
+        apps.requests();
+        for (target_x, expected_x) in [(1400., 635.), (-1400., 35.), (150., 210.)] {
+            AnimationManager::instant_layout(
+                &mut reactor,
+                space,
+                &[(editor, rect(target_x, 20., 400., 650.))],
+                None,
+            );
+            let mut written = Vec::new();
+            for request in apps.requests() {
+                if let Request::InteractiveFramesPending(queue) = request {
+                    queue.drain_with(|id, frame, resize, _, source, _, _| {
+                        if id == dialog {
+                            assert_eq!(source, FrameSource::DialogPosition);
+                            assert!(!resize);
+                            written.push(frame);
+                        }
+                    });
+                }
+            }
+            assert_eq!(
+                written,
+                [rect(expected_x, 160., 280., 330.)],
+                "editor x={target_x}"
+            );
+            if target_x == -1400. {
+                // The editor is physically stopped at x=0 on the middle display.
+                reactor.handle_event(Event::WindowFrameChanged(
+                    dialog,
+                    rect(60., 160., 280., 330.),
+                    None,
+                    Requested(false),
+                    Some(MouseState::Down),
+                ));
+            }
+        }
+    }
+
+    #[test]
     fn viewport_samples_translate_only_dialog_x_after_owner_clamping() {
         let (handle, mut rx) = AppThreadHandle::channel();
         let editor = rect(150., 20., 650., 700.);
@@ -2290,14 +2371,14 @@ mod tests {
         child.parent_offset = Some((camera.windows[0].wid, 37.));
         child.wid = WindowId::new(1, 2);
         camera.windows.push(child);
-        let mut last_x = editor.origin.x;
-        let mut deltas = Vec::new();
-        for offset in [130., -130., 70.] {
+        let screen = rect(0., 0., 1000., 800.);
+        let bound = super::super::managers::ScrollingDisplayBounds::for_screen(screen, &[
+            screen,
+            rect(-1000., 0., 1000., 800.),
+            rect(1000., 0., 1000., 800.),
+        ]);
+        for (offset, expected_x) in [(2000., 0.), (-2000., 350.), (2000., 0.), (0., 150.)] {
             let mut batch = FrameBatch::default();
-            let bound = super::super::managers::ScrollingDisplayBounds::for_screen(
-                rect(0., 0., 1000., 800.),
-                &[rect(0., 0., 1000., 800.)],
-            );
             stage_windows(
                 &mut camera.windows,
                 Sample::Viewport {
@@ -2312,23 +2393,23 @@ mod tests {
                 &mut batch,
             );
             batch.flush();
-            let parent_x = camera.windows[0].frame.origin.x;
-            deltas.push(parent_x - last_x);
-            last_x = parent_x;
             let (_, Request::InteractiveFramesPending(queue)) = rx.try_recv().unwrap() else {
                 panic!("expected position publication")
             };
             let mut child_frame = None;
+            let mut editor_x = None;
             queue.drain_with(|id, frame, size, _, source, _, _| {
                 if id == camera.windows[1].wid {
                     assert!(!size);
                     assert_eq!(source, FrameSource::DialogPosition);
                     child_frame = Some(frame);
+                } else if id == camera.windows[0].wid {
+                    editor_x = Some(frame.origin.x);
                 }
             });
-            assert_eq!(child_frame.unwrap(), rect(parent_x + 37., 121., 410., 360.));
+            assert_eq!(editor_x, Some(expected_x));
+            assert_eq!(child_frame.unwrap(), rect(expected_x + 37., 121., 410., 360.));
         }
-        assert!(deltas.iter().any(|&dx| dx > 0.) && deltas.iter().any(|&dx| dx < 0.));
     }
 
     fn motion_camera(handle: &AppThreadHandle, from: CGRect, to: CGRect) -> CameraAnimation {
