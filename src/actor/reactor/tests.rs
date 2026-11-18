@@ -6032,6 +6032,7 @@ fn fullscreen_startup_fixture(
             size: None,
             focus: false,
             manage: Some(true),
+            track_focus: false,
             app_name: None,
             title_regex: None,
             title_substring: None,
@@ -11861,6 +11862,85 @@ fn presentation_inventory_tracks_visibility_without_forgetting_layout() {
         reactor.handle_event(Event::WindowDestroyed(wid));
         assert!(reactor.query_window_info(wid).is_none());
         assert!(!reactor.state.windows.contains_window(wid));
+    }
+}
+
+#[test]
+fn unmanaged_dialog_tracks_hover_and_keyboard_focus_without_joining_layout() {
+    for hover in [false, true] {
+        let settings = crate::common::config::VirtualWorkspaceSettings {
+            app_rules: vec![crate::common::config::AppWorkspaceRule {
+                app_id: Some("com.testapp1".into()),
+                title_regex: Some("^Fuzzy Finder$".into()),
+                manage: Some(false),
+                track_focus: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut reactor = test_reactor_with_workspace_settings(&settings);
+        let mut apps = Apps::new();
+        let space = SpaceId::new(1);
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+        reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+        let editor = WindowId::new(1, 1);
+        let dialog = WindowId::new(1, 2);
+        let mut windows = make_windows(2);
+        windows[1].title = "Fuzzy Finder".into();
+        windows[1].ax_role = Some("AXWindow".into());
+        windows[1].ax_subrole = Some("AXStandardWindow".into());
+        let dialog_frame = windows[1].frame;
+        make_active_app(&mut apps, &mut reactor, 1, windows, Some(editor));
+        reactor.handle_event(Event::WindowServerFocusChanged(editor, space));
+        apps.simulate_until_quiet(&mut reactor);
+        let wsid = reactor.test_window_server_id(dialog);
+        let (input_tx, mut input_rx) = actor::channel();
+        reactor.communication_manager.input_tx = Some(input_tx);
+        let (raise_tx, mut raise_rx) = actor::channel();
+        reactor.communication_manager.raise_manager_tx = raise_tx;
+        reactor.config.settings.mouse_follows_focus = true;
+        if hover {
+            reactor.handle_event(Event::MouseMoved(wsid));
+            assert!(matches!(
+                raise_rx.try_recv().expect("hover raises the dialog").1,
+                raise_manager::Event::MouseRaiseRequest(request, _)
+                    if request.focus_window.map(|(window, _)| window) == Some(dialog)
+            ));
+        } else {
+            reactor.handle_event(Event::PointerFocusIntent(None, Instant::now()));
+        }
+        reactor.handle_event(Event::WindowServerFocusChanged(dialog, space));
+        let destinations: Vec<_> = std::iter::from_fn(|| input_rx.try_recv().ok())
+            .filter_map(|(_, request)| match request {
+                input::Request::FocusPointer(pointer) => Some(pointer.visible.mid()),
+                input::Request::Warp(point) => Some(point),
+                input::Request::WarpRelative { .. } => panic!("unexpected relative warp"),
+                _ => None,
+            })
+            .collect();
+        if hover {
+            assert!(destinations.is_empty(), "hover must leave the pointer in place");
+        } else {
+            assert_eq!(destinations, [dialog_frame.mid()]);
+        }
+        assert!(reactor.test_workspace_for_window(space, dialog).is_none());
+        assert!(!has_window_in_layout(&mut reactor, space, screen, dialog));
+        assert!(has_window_in_layout(&mut reactor, space, screen, editor));
+        assert_eq!(
+            reactor.state.windows.window(dialog).unwrap().frame_monotonic,
+            dialog_frame
+        );
+        if !hover {
+            reactor.handle_event(Event::WindowDestroyed(dialog));
+            reactor.handle_event(Event::WindowServerFocusChanged(editor, space));
+            assert!(
+                std::iter::from_fn(|| input_rx.try_recv().ok()).any(|(_, request)| matches!(
+                    request,
+                    input::Request::FocusPointer(_) | input::Request::Warp(_)
+                )),
+                "closing the dialog should follow keyboard focus back to the editor"
+            );
+        }
     }
 }
 

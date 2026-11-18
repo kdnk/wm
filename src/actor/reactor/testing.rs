@@ -270,6 +270,7 @@ impl Reactor {
             frame_monotonic: frame,
             is_manageable,
             manage_override: None,
+            track_focus: false,
         });
     }
 }

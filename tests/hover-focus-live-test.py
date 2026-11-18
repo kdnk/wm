@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Modified by kdnk for wm on 2026-11-15. Original attribution is preserved in LICENSE.
-"""Check native hover focus after the final motion crosses a window boundary."""
+"""Check native hover focus for tiled windows and opt-in unmanaged dialogs."""
 
 import argparse
 import ctypes
@@ -19,6 +19,55 @@ def helper(name, filename):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def check_unmanaged_dialog(pid, source, target, snapshot, move, query_windows, keyboard_open):
+    title = source["title"].rsplit("-", 1)[0] + "-dialog"
+
+    def wait_for(check, message):
+        deadline = time.monotonic() + 4
+        while True:
+            observation = snapshot()
+            if check(observation):
+                return observation
+            assert time.monotonic() < deadline, f"{message}: {observation}"
+            time.sleep(0.04)
+
+    def center(frame):
+        return [frame[0] + frame[2] / 2, frame[1] + frame[3] / 2]
+
+    def inside(point, frame):
+        x, y, width, height = frame
+        return x <= point[0] < x + width and y <= point[1] < y + height
+
+    before = wait_for(lambda state: state["native"]["focused_window"] == source["title"]
+                      and inside(state["pointer"], state["native"]["frames"][source["title"]]),
+                      "Keyboard source did not receive focus and pointer")
+    frames = before["native"]["frames"]
+    assert not inside(before["pointer"], frames[target["title"]])
+    keyboard_open()
+    opened = wait_for(lambda state: state["native"]["focused_window"] == title
+                      and inside(state["pointer"], state["native"]["frames"][title]),
+                      "Pointer did not follow the keyboard-opened dialog")
+    frame = opened["native"]["frames"][title]
+    assert not inside(before["pointer"], frame), "Pointer was already over the dialog"
+    assert inside(center(frame), frames[target["title"]])
+    assert abs(frame[2] - 220) <= 2 and 140 <= frame[3] <= 180, "Dialog lost its requested size"
+    move(center(frames[source["title"]]))
+    away = wait_for(lambda state: state["native"]["focused_window"] == source["title"],
+                    "Hover did not refocus the source")
+    move(center(frame))
+    back = wait_for(lambda state: state["native"]["focused_window"] == title,
+                    "Hover did not refocus the unmanaged dialog")
+    for state in (opened, away, back):
+        actual = state["native"]["frames"]
+        assert all(actual[name] == expected for name, expected in frames.items()), "Managed windows moved"
+        assert actual[title] == frame, "Dialog moved during hover"
+    current = [window for window in query_windows() if window["id"]["pid"] == pid]
+    assert {w["title"]: w["layout_position"] for w in current if w["layout_position"]} == {
+        w["title"]: w["layout_position"] for w in (source, target)
+    }, "Workspace columns changed after opening the unmanaged dialog"
+    return {"before": before, "opened": opened, "hover_source": away, "hover_dialog": back}
 
 
 def run(args):
@@ -52,13 +101,19 @@ def run(args):
     overrides = {
         "settings.animate": False,
         "settings.layout.scrolling.animate": False,
-        "settings.mouse_follows_focus": False,
+        "settings.mouse_follows_focus": args.unmanaged_dialog,
         "settings.mouse_hides_on_focus": False,
         "settings.focus_follows_mouse": True,
         "settings.layout.scrolling.preserve_window_sizes": False,
         "settings.layout.scrolling.column_width_ratio": 0.5,
     }
     original_settings = {}
+    if args.unmanaged_dialog:
+        assert any(rule.get("title_regex") == "^wm-hover-[0-9a-f]+-dialog$"
+                   and rule.get("manage") is False and rule.get("track_focus") is True
+                   for rule in config["virtual_workspaces"]["app_rules"]), (
+            "Candidate configuration needs a ^wm-hover-[0-9a-f]+-dialog$ title rule "
+            "with manage=false and track_focus=true")
     for key in overrides:
         value = config
         for part in key.split("."):
@@ -134,7 +189,8 @@ def run(args):
             str(args.qt_python), "-u", str(Path(__file__).with_name("rift-content-render-live-test.py")),
             "--fixture", label,
         ], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
-            env=dict(os.environ, PYTHONPATH=str(args.qt_packages), WM_FIXTURE_WINDOW_COUNT="2"))
+            env=dict(os.environ, PYTHONPATH=str(args.qt_packages), WM_FIXTURE_WINDOW_COUNT="2",
+                     WM_FIXTURE_FOCUS_DIALOG="1" if args.unmanaged_dialog else ""))
         assert reply()["pid"] == fixture.pid
         deadline = time.monotonic() + 10
         while len(windows()) != 2:
@@ -144,6 +200,16 @@ def run(args):
         target, source = ordered
         report["source"] = source
         report["target"] = target
+        if args.unmanaged_dialog:
+            focus(source)
+            # The previously focused window can already be the source on a fresh workspace.
+            frame = command("snapshot")["frames"][source["title"]]
+            move([frame[0] + frame[2] / 2, frame[1] + frame[3] / 2])
+            report["dialog"] = check_unmanaged_dialog(
+                fixture.pid, source, target, snapshot, move, lambda: query("windows"),
+                lambda: command("dialog_key"))
+            print("PASS unmanaged dialog retains native placement and follows keyboard and hover focus", flush=True)
+            return
         for trial in range(args.trials):
             focus(source)
             deadline = time.monotonic() + 3
@@ -232,6 +298,8 @@ if __name__ == "__main__":
     parser.add_argument("--client", type=Path, default=Path("~/.local/bin/wm"))
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--trials", type=int, default=5)
+    parser.add_argument("--unmanaged-dialog", action="store_true",
+                        help="Check a keyboard-opened modeless dialog with a track_focus rule")
     parser.add_argument("--gap-ms", type=float, default=4.0)
     parser.add_argument("--qt-python", type=Path, default=Path("/Applications/Anki.app/Contents/Frameworks/Python.framework/Versions/3.13/bin/python3.13"))
     parser.add_argument("--qt-packages", type=Path, default=Path("/Applications/Anki.app/Contents/Resources/app_packages"))

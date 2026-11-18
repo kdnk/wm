@@ -88,6 +88,7 @@ pub(crate) struct WindowState {
     pub(crate) is_manageable: bool,
     pub(crate) native_transient: bool,
     pub(crate) manage_override: Option<bool>,
+    pub(crate) track_focus: bool,
 }
 
 impl From<WindowInfo> for WindowState {
@@ -98,6 +99,7 @@ impl From<WindowInfo> for WindowState {
             is_manageable: false,
             native_transient: false,
             manage_override: None,
+            track_focus: false,
         }
     }
 }
@@ -135,6 +137,13 @@ impl WindowState {
             && !self.info.is_minimized
             && (!crate::sys::app::is_ax_transient(&self.info) || explicitly_managed_dialog)
             && manage_override.unwrap_or(self.is_manageable)
+    }
+
+    pub(crate) fn tracks_unmanaged_focus(&self) -> bool {
+        self.manage_override == Some(false)
+            && self.track_focus
+            && !self.info.is_minimized
+            && self.info.ax_role.as_deref() == Some("AXWindow")
     }
 
     pub(crate) fn can_reconcile_admission(&self) -> bool { !self.info.is_minimized }

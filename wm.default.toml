@@ -322,9 +322,10 @@ workspace_names = [
 #   - size ({ w, h }): initial size in logical pixels. Either dimension may be omitted.
 #     Windows receive a one-time resize after insertion.
 #   - focus (boolean): focus the window after applying the rule, switching to its virtual workspace.
-#   - manage (boolean): optional explicit management override. Set to false to ignore the
-#     matching window completely, or true to override Wm/macOS manageability heuristics
-#     for a visible window. When omitted, normal heuristics apply. Minimized windows remain unmanaged.
+#   - manage (boolean): false leaves window placement to the application; true overrides the
+#     normal manageability heuristics for a visible window. Minimized windows remain unmanaged.
+#   - track_focus (boolean, default false): with manage = false, include the window in
+#     focus_follows_mouse and mouse_follows_focus when the corresponding settings are on.
 #
 # Matching behavior (summary):
 #   1. All rules that match a window are evaluated.
@@ -372,9 +373,9 @@ workspace_names = [
 #         { app_id = "com.example.X", size = { w = 640, h = 480 }, focus = true },
 #       ]
 #
-#   - Accessibility example: leave an app's dialog windows unmanaged:
+#   - Let an app place its dialogs and keep mouse and focus tracking:
 #       app_rules = [
-#         { app_id = "com.example.X", ax_subrole = "AXDialog", manage = false },
+#         { app_id = "com.example.X", ax_subrole = "AXDialog", manage = false, track_focus = true },
 #       ]
 #
 # By default there are no app rules; add or uncomment rules below as needed.

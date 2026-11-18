@@ -41,9 +41,11 @@ pub fn handle_window_created(
         state.windows.track_window_server_info(info);
     }
 
-    let rule_override = state.windows.window(wid).and_then(|window| window.manage_override);
     let mut window_state: WindowState = window.into();
-    window_state.manage_override = rule_override;
+    if let Some(previous) = state.windows.window(wid) {
+        window_state.manage_override = previous.manage_override;
+        window_state.track_focus = previous.track_focus;
+    }
     if let Some(wsid) = window_state.info.sys_id {
         transactions.store_txid(
             wsid,

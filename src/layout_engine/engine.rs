@@ -4094,12 +4094,7 @@ mod tests {
             size: Some(AppRuleSize { w: Some(234.0), h: None }),
             focus: false,
             manage: Some(true),
-            app_name: None,
-            title_regex: None,
-            title_substring: None,
-            ax_role: None,
-            ax_subrole: None,
-            window_tags: None,
+            ..Default::default()
         }];
         let mut layout_settings = LayoutSettings::default();
         layout_settings.scrolling.min_column_width_ratio = 0.1;

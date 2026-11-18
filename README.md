@@ -58,7 +58,9 @@ wm uses niri-style scrolling columns. Columns can contain multiple windows. Othe
 layout modes, anchored navigation, and floating controls are removed. When updating
 an older configuration, remove their settings and keybindings. Redundant
 `floating = false` app-rule settings are ignored. Use `manage = false` to leave a
-window unmanaged.
+window unmanaged. Add `track_focus = true` to the same rule to enable
+`focus_follows_mouse` and `mouse_follows_focus` for that window when the
+corresponding settings are on. The application still controls its position and size.
 
 Stop other window managers and grant wm Accessibility access.
 

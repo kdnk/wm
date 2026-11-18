@@ -97,7 +97,7 @@ use crate::model::broadcast::{
 };
 use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
 use crate::model::tx_store::WindowTxStore;
-use crate::model::window_store::NativeFullscreenTransition;
+use crate::model::window_store::{NativeFullscreenTransition, WindowVisibility};
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt, SameAs};
@@ -502,6 +502,8 @@ pub struct Reactor {
     spaces_tx: Option<crate::actor::spaces::Sender>,
     topology_guard: crate::actor::spaces::TopologyGuard,
     main_window_tracker: MainWindowTracker,
+    native_focus_awaiting_inventory: Option<(WindowId, SpaceId)>,
+    last_unmanaged_focus: Option<WindowId>,
     pending_mouse_focus: Option<(WindowId, Instant)>,
     overview_focus: Option<(SpaceId, WindowId, Instant)>,
     mouse_focus_warp_requested_at: Option<u64>,
@@ -607,6 +609,8 @@ impl Reactor {
             last_screen_frames: HashMap::default(),
             space_activation_policy: SpaceActivationPolicy::new(),
             main_window_tracker: MainWindowTracker::default(),
+            native_focus_awaiting_inventory: None,
+            last_unmanaged_focus: None,
             pending_mouse_focus: None,
             overview_focus: None,
             mouse_focus_warp_requested_at: None,
@@ -1426,8 +1430,20 @@ impl Reactor {
     }
 
     fn handle_event(&mut self, event: Event) {
+        let inventory_changed = matches!(
+            event,
+            Event::ApplicationLaunched { .. }
+                | Event::WindowCreated(..)
+                | Event::WindowsDiscovered { .. }
+        );
         let event = match event {
             Event::WindowServerFocusChanged(native, space) => {
+                // The native child can receive focus before AX supplies its title and rules.
+                let id = WindowServerId::new(native.idx.get());
+                self.native_focus_awaiting_inventory =
+                    (!self.state.windows.contains_window(native)
+                        && self.state.windows.tracked_window_id(id).is_none())
+                    .then_some((native, space));
                 Event::WindowServerFocusChanged(self.resolve_native_focus(native), space)
             }
             event => event,
@@ -1436,6 +1452,8 @@ impl Reactor {
         // not commit camera presentations or trigger layout/focus side effects.
         if matches!(event, Event::KeyboardInput) {
             self.suppress_auto_workspace_switch_until_input = false;
+            self.pointer_focus_intent = None;
+            self.hover_focus_intents.clear();
             self.recording_manager.record.on_event(&event);
             return;
         }
@@ -1443,6 +1461,23 @@ impl Reactor {
             self.handle_event_inner(event);
         } else {
             self.handle_event_traced(event);
+        }
+        if inventory_changed && let Some((native, space)) = self.native_focus_awaiting_inventory {
+            let id = WindowServerId::new(native.idx.get());
+            if let Some(window) = self
+                .state
+                .windows
+                .tracked_window_id(id)
+                .or_else(|| self.state.windows.contains_window(native).then_some(native))
+            {
+                self.native_focus_awaiting_inventory = None;
+                if window.pid == native.pid
+                    && self.main_window_tracker.is_globally_frontmost(native.pid)
+                    && self.can_follow_unmanaged_focus(window)
+                {
+                    self.handle_event_traced(Event::WindowServerFocusChanged(window, space));
+                }
+            }
         }
     }
 
@@ -1810,6 +1845,7 @@ impl Reactor {
             })
             && !self.state.windows.is_admitted(*window)
             && !self.state.windows.is_claimed(*window)
+            && !self.can_follow_unmanaged_focus(*window)
         {
             return Ok(EventOutcome::no_change());
         }
@@ -1874,17 +1910,23 @@ impl Reactor {
                 if quiet == Quiet::No && self.main_window_tracker.is_globally_frontmost(pid) {
                     // Use only the app thread's resolved main window; pending
                     // AX admission can leave the previous main window cached.
+                    let native_dialog = self
+                        .main_window_tracker
+                        .window_server_focus()
+                        .filter(|wid| wid.pid == pid && self.can_follow_unmanaged_focus(*wid));
                     let activation_window = if self.state.windows.has_pending_window_for_pid(pid) {
                         None
                     } else {
-                        self.main_window_tracker.app_main_window(pid)
+                        native_dialog.or_else(|| self.main_window_tracker.app_main_window(pid))
                     };
                     outcome.absorb(self.auto_switch_to_window_workspace(activation_window));
                     outcome.focused_window = activation_window;
                     if self.config.settings.mouse_follows_focus
                         && !self.suppress_auto_workspace_switch_until_input
                         && let Some(window) = activation_window
-                        && self.window_is_standard(window)
+                        && (self.window_is_standard(window)
+                            || self.can_follow_unmanaged_focus(window))
+                        && self.last_unmanaged_focus != Some(window)
                         && self.is_window_on_active_space(window)
                         && !self.focus_was_pointer_driven(window)
                     {
@@ -1922,6 +1964,7 @@ impl Reactor {
                 return Ok(EventOutcome::focus_changed(None, should_update_notifications));
             }
             Event::WindowServerFocusChanged(window, reported_space) => {
+                let previous_dialog = self.last_unmanaged_focus.take();
                 if self.window_needs_inventory(window) {
                     // Recover stale admission before the cached-layout-focus
                     // fast path as well, without rescanning excluded windows.
@@ -1932,9 +1975,21 @@ impl Reactor {
                     && self.space_state.screen_by_space(reported_space).is_some()
                 {
                     self.space_state.command_space = Some(reported_space);
+                    if self.can_follow_unmanaged_focus(window) {
+                        self.last_unmanaged_focus = Some(window);
+                        if previous_dialog != Some(window)
+                            && self.config.settings.mouse_follows_focus
+                            && !self.suppress_auto_workspace_switch_until_input
+                            && !self.focus_was_pointer_driven(window)
+                        {
+                            self.workspace_switch_manager.pending_focus_mouse_warp = Some(window);
+                        }
+                        return Ok(EventOutcome::default());
+                    }
                     // Same-app focus changes have no activation edge. Cross-app
                     // changes still wait for the app thread's resolved activation.
                     if previous_native_focus
+                        .or(previous_dialog)
                         .is_some_and(|previous| previous.pid == window.pid && previous != window)
                     {
                         if self.config.settings.mouse_follows_focus
@@ -2713,9 +2768,12 @@ impl Reactor {
                             })
                     })
                 });
-                let needs_layout_sync = window.is_some_and(|window| {
-                    self.layout_manager.layout_engine.focused_window() != Some(window)
-                });
+                let layout_space = active_space
+                    .filter(|_| !window.is_some_and(|wid| self.can_follow_unmanaged_focus(wid)));
+                let needs_layout_sync = layout_space.is_some()
+                    && window.is_some_and(|window| {
+                        self.layout_manager.layout_engine.focused_window() != Some(window)
+                    });
                 if self.mouse_raise_token.is_cancelled() {
                     self.mouse_raise_token = Default::default();
                 }
@@ -2731,7 +2789,7 @@ impl Reactor {
                                 || crate::sys::app::is_own_window_focused(window)
                         }),
                         needs_layout_sync,
-                        active_space,
+                        active_space: layout_space,
                     },
                     &self.mouse_raise_token,
                 )?;
@@ -5508,6 +5566,11 @@ impl Reactor {
     }
 
     fn send_layout_event(&mut self, event: LayoutEvent) {
+        if let LayoutEvent::WindowFocused(_, wid) = &event
+            && self.state.windows.window(*wid).is_some_and(WindowState::tracks_unmanaged_focus)
+        {
+            return;
+        }
         let event = self.layout_manager.layout_engine.normalize_event(&self.state.windows, event);
         // Discovery and title-rule refreshes share this effect boundary. Logical
         // assignment has already resolved the target, while native observations
@@ -5745,7 +5808,10 @@ impl Reactor {
             .tracked_window_id(server_id)
             .filter(|window| window.pid == native.pid)
             .unwrap_or(native);
-        if self.state.windows.is_claimed(tracked) || self.state.windows.is_admitted(tracked) {
+        if self.state.windows.is_claimed(tracked)
+            || self.state.windows.is_admitted(tracked)
+            || self.can_follow_unmanaged_focus(tracked)
+        {
             return tracked;
         }
         window_server::window_parent(server_id)
@@ -5764,12 +5830,24 @@ impl Reactor {
             t.visible
                 && self.main_window_tracker.is_globally_frontmost(t.pid)
                 && self.active_spaces.contains(&t.space)
-                && !self
-                    .state
-                    .windows
-                    .tracked_window_id(*id)
-                    .is_some_and(|wid| wid.pid == t.pid && self.state.windows.is_admitted(wid))
+                && !self.state.windows.tracked_window_id(*id).is_some_and(|wid| {
+                    wid.pid == t.pid
+                        && (self.state.windows.is_admitted(wid)
+                            || self.can_follow_unmanaged_focus(wid))
+                })
         })
+    }
+
+    fn can_follow_unmanaged_focus(&self, wid: WindowId) -> bool {
+        self.state.windows.window(wid).is_some_and(WindowState::tracks_unmanaged_focus)
+            && !self.state.windows.is_claimed(wid)
+            && !self.state.windows.is_temporarily_unavailable(wid)
+            && self.state.windows.record(wid).is_some_and(|r| {
+                !matches!(
+                    r.visibility(),
+                    WindowVisibility::Hidden | WindowVisibility::Minimized
+                )
+            })
     }
 
     // Returns true if the window should be raised on mouse over considering
@@ -5779,8 +5857,11 @@ impl Reactor {
             return false;
         };
 
+        let follow_unmanaged = self.can_follow_unmanaged_focus(wid);
         if self.state.windows.is_claimed(wid)
-            || (!window.is_admitted() && !self.layout_manager.layout_engine.is_window_floating(wid))
+            || (!follow_unmanaged
+                && !window.is_admitted()
+                && !self.layout_manager.layout_engine.is_window_floating(wid))
         {
             trace!(
                 ?wid,
@@ -5805,11 +5886,13 @@ impl Reactor {
             return false;
         }
 
-        if !self.layout_manager.layout_engine.workspaces().is_window_in_active_workspace(
-            &self.state.windows,
-            space,
-            wid,
-        ) {
+        if !follow_unmanaged
+            && !self.layout_manager.layout_engine.workspaces().is_window_in_active_workspace(
+                &self.state.windows,
+                space,
+                wid,
+            )
+        {
             trace!("Ignoring mouse over window {:?} - not in active workspace", wid);
             return false;
         }

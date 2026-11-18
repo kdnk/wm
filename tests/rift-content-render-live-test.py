@@ -155,6 +155,20 @@ def fixture(label):
                   paint_started_ns=started)
 
     class Window(QMainWindow):
+        def keyPressEvent(self, key_event):
+            if key_event.key() != Qt.Key.Key_J or not os.environ.get("WM_FIXTURE_FOCUS_DIALOG"):
+                return super().keyPressEvent(key_event)
+            from PyQt6.QtWidgets import QDialog
+            other = next(w for w, _ in windows if w is not self)
+            dialog = QDialog(self)
+            dialog.setWindowTitle(f"{label}-dialog")
+            dialog.resize(220, 140)
+            dialog.move(other.frameGeometry().center() - dialog.rect().center())
+            dialog.show()
+            dialog.activateWindow()
+            self.dialog = dialog
+            dialog.native = message(int(dialog.winId()), "window")
+
         def resizeEvent(self, resize_event):
             super().resizeEvent(resize_event)
             event("resize", self, old_size=[resize_event.oldSize().width(), resize_event.oldSize().height()])
@@ -184,11 +198,13 @@ def fixture(label):
         windows.append((window, content))
 
     def frames():
-        return {w.windowTitle(): native_frame(w) for w, _ in windows}
+        current = [w for w, _ in windows]
+        current.extend(w.dialog for w, _ in windows if hasattr(w, "dialog"))
+        return {w.windowTitle(): native_frame(w) for w in current}
 
     def focused_window():
-        return next((w.windowTitle() for w, _ in windows
-                     if message(w.native, "isKeyWindow", ctypes.c_bool)), None)
+        return next((w.windowTitle() for w in app.topLevelWidgets()
+                     if hasattr(w, "native") and message(w.native, "isKeyWindow", ctypes.c_bool)), None)
 
     def content_states():
         return {w.windowTitle(): {"generation": c.generation, "painted_size": c.painted_size,
@@ -209,6 +225,11 @@ def fixture(label):
         if op == "quit":
             app.quit()
             return
+        if op == "dialog_key" and os.environ.get("WM_FIXTURE_FOCUS_DIALOG"):
+            from PyQt6.QtTest import QTest
+            source = next(w for w, _ in windows if message(w.native, "isKeyWindow", ctypes.c_bool))
+            QTest.keyClick(source, Qt.Key.Key_J)
+            assert hasattr(source, "dialog"), "Keyboard event did not open fixture dialog"
         if op == "start":
             trace.clear()
             recording = True

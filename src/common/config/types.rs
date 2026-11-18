@@ -106,11 +106,14 @@ pub struct AppWorkspaceRule {
     /// Focus the window after applying this rule, switching virtual workspaces if needed.
     #[serde(default)]
     pub focus: bool,
-    /// An explicit management override. `false` makes the window invisible to Wm;
+    /// An explicit management override. `false` leaves placement to the application;
     /// `true` overrides normal manageability heuristics for a visible window. When
     /// omitted, the matching rule leaves Wm's normal manageability decision intact.
     #[serde(default)]
     pub manage: Option<bool>,
+    /// With `manage = false`, let the configured mouse and focus tracking include this window.
+    #[serde(default)]
+    pub track_focus: bool,
     pub app_name: Option<String>,
     /// Optional: Regular expression to match window title (applies to window.title)
     ///

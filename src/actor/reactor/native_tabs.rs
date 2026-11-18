@@ -61,16 +61,22 @@ impl Reactor {
                 {
                     return None;
                 }
-                Some((old, window.frame_monotonic, window.manage_override, wsid))
+                Some((
+                    old,
+                    window.frame_monotonic,
+                    window.manage_override,
+                    window.track_focus,
+                    wsid,
+                ))
             })
             .collect();
-        let [(old, frame, manage_override, old_wsid)] = candidates.as_slice() else {
+        let &[(old, frame, manage_override, track_focus, old_wsid)] = candidates.as_slice() else {
             return;
         };
-        let (old, frame, manage_override, old_wsid) = (*old, *frame, *manage_override, *old_wsid);
         info.frame = frame;
         let mut replacement = WindowState::from(info.clone());
         replacement.manage_override = manage_override;
+        replacement.track_focus = track_focus;
         self.state.windows.insert_window(incoming, replacement);
         self.state.windows.transfer_persistent_window_metadata(old, incoming);
         self.layout_manager

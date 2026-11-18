@@ -1520,6 +1520,7 @@ impl WorkspaceStore {
             .unwrap_or(rule_override != Some(false));
         if let Some(window) = window_store.window_mut(window_id) {
             window.manage_override = rule_override;
+            window.track_focus = rule_decision.as_ref().is_some_and(|rule| rule.track_focus);
         }
         if !admitted {
             if !window_store.is_temporarily_unavailable(window_id) || rule_override == Some(false) {
@@ -2395,12 +2396,7 @@ mod tests {
             size: None,
             focus: false,
             manage: Some(false),
-            app_name: None,
-            title_regex: None,
-            title_substring: None,
-            ax_role: None,
-            ax_subrole: None,
-            window_tags: None,
+            ..Default::default()
         }];
         let mut manager = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
         let old_space = SpaceId::new(1);

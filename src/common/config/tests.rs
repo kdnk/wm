@@ -293,12 +293,7 @@ fn app_rule_geometry_validation_rejects_invalid_values() {
         }),
         focus: false,
         manage: Some(true),
-        app_name: None,
-        title_regex: None,
-        title_substring: None,
-        ax_role: None,
-        ax_subrole: None,
-        window_tags: None,
+        ..Default::default()
     });
 
     let issues = settings.validate();

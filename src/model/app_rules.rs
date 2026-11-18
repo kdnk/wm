@@ -22,6 +22,7 @@ pub struct WindowRuleContext<'a> {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct AppRuleDecision {
     pub manage: Option<bool>,
+    pub track_focus: bool,
     pub workspace: Option<WorkspaceSelector>,
     pub floating: bool,
     pub position: Option<AppRulePosition>,
@@ -278,6 +279,7 @@ impl CompiledRule {
             size,
             focus,
             manage,
+            track_focus,
             app_name,
             title_regex,
             title_substring,
@@ -322,6 +324,7 @@ impl CompiledRule {
         Some(Self {
             action: AppRuleDecision {
                 manage,
+                track_focus,
                 workspace,
                 floating: false,
                 position: None,
@@ -418,6 +421,28 @@ mod tests {
     }
 
     #[test]
+    fn unmanaged_focus_tracking_is_opt_in_per_matching_rule() {
+        let rule = r#"app_id = "com.example.Editor"
+                      manage = false"#;
+        for (option, expected) in [
+            ("", false),
+            ("track_focus = false", false),
+            ("track_focus = true", true),
+        ] {
+            let rule = toml::from_str(&format!("{rule}\n{option}")).unwrap();
+            let engine = AppRuleEngine::new(&[rule]);
+            let decision = engine
+                .evaluate(WindowRuleContext {
+                    app_bundle_id: Some("com.example.Editor"),
+                    ..Default::default()
+                })
+                .unwrap();
+            assert_eq!(decision.manage, Some(false));
+            assert_eq!(decision.track_focus, expected);
+        }
+    }
+
+    #[test]
     fn evaluates_without_workspace_or_layout_state() {
         let rule = AppWorkspaceRule {
             app_id: Some("com.example.Editor".into()),
@@ -437,6 +462,7 @@ mod tests {
             }),
             Some(AppRuleDecision {
                 manage: Some(true),
+                track_focus: false,
                 workspace: None,
                 floating: false,
                 position: None,
