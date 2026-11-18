@@ -11858,6 +11858,60 @@ fn presentation_inventory_tracks_visibility_without_forgetting_layout() {
 }
 
 #[test]
+fn late_picker_registration_respects_the_latest_native_focus() {
+    for focus_returned_to_editor in [false, true] {
+        let settings = crate::common::config::VirtualWorkspaceSettings {
+            app_rules: vec![crate::common::config::AppWorkspaceRule {
+                app_id: Some("com.testapp1".into()),
+                title_regex: Some("^(Fuzzy Finder|Live Grep)$".into()),
+                manage: Some(false),
+                track_focus: true,
+                follow_parent: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut reactor = test_reactor_with_workspace_settings(&settings);
+        let mut apps = Apps::new();
+        let space = SpaceId::new(1);
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+        reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+        let editor = WindowId::new(1, 1);
+        make_active_app(&mut apps, &mut reactor, 1, make_windows(1), Some(editor));
+        reactor.handle_event(Event::WindowServerFocusChanged(editor, space));
+        reactor.config.settings.mouse_follows_focus = true;
+        reactor.handle_event(Event::PointerFocusIntent(None, Instant::now()));
+        let dialog = WindowId::new(1, 2);
+        let native_id = 10_002;
+        reactor.handle_event(Event::WindowServerFocusChanged(
+            WindowId::new(1, native_id),
+            space,
+        ));
+        if focus_returned_to_editor {
+            reactor.handle_event(Event::WindowServerFocusChanged(editor, space));
+        }
+        let (input_tx, mut input_rx) = actor::channel();
+        reactor.communication_manager.input_tx = Some(input_tx);
+        let mut info = make_window(2);
+        info.sys_id = Some(WindowServerId::new(native_id));
+        info.ax_role = Some("AXWindow".into());
+        info.ax_subrole = Some("AXDialog".into());
+        info.title = "Live Grep".into();
+        let center = info.frame.mid();
+        reactor.handle_event(Event::WindowCreated(dialog, info, None, None));
+        let moved_to_picker =
+            std::iter::from_fn(|| input_rx.try_recv().ok()).any(|(_, request)| match request {
+                input::Request::FocusPointer(pointer) => pointer.visible.mid() == center,
+                input::Request::Warp(point) => point == center,
+                _ => false,
+            });
+        assert_eq!(moved_to_picker, !focus_returned_to_editor);
+        assert!(!has_window_in_layout(&mut reactor, space, screen, dialog));
+        assert!(has_window_in_layout(&mut reactor, space, screen, editor));
+    }
+}
+
+#[test]
 fn unmanaged_dialog_tracks_hover_and_keyboard_focus_without_joining_layout() {
     for hover in [false, true] {
         let settings = crate::common::config::VirtualWorkspaceSettings {
