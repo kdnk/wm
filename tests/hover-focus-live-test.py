@@ -45,11 +45,12 @@ def check_unmanaged_dialog(pid, source, target, snapshot, move, query_windows, k
                       "Keyboard source did not receive focus and pointer")
     frames = before["native"]["frames"]
     assert not inside(before["pointer"], frames[target["title"]])
-    keyboard_open()
+    requested = keyboard_open()["frames"][title]
     opened = wait_for(lambda state: state["native"]["focused_window"] == title
                       and inside(state["pointer"], state["native"]["frames"][title]),
                       "Pointer did not follow the keyboard-opened dialog")
     frame = opened["native"]["frames"][title]
+    assert frame == requested, f"Dialog opened at {frame} instead of its app-chosen frame {requested}"
     assert not inside(before["pointer"], frame), "Pointer was already over the dialog"
     assert inside(center(frame), frames[target["title"]])
     assert abs(frame[2] - 220) <= 2 and 140 <= frame[3] <= 180, "Dialog lost its requested size"
@@ -68,6 +69,53 @@ def check_unmanaged_dialog(pid, source, target, snapshot, move, query_windows, k
         w["title"]: w["layout_position"] for w in (source, target)
     }, "Workspace columns changed after opening the unmanaged dialog"
     return {"before": before, "opened": opened, "hover_source": away, "hover_dialog": back}
+
+
+def check_parent_following(command, execute, setting, query_windows, source, target, report):
+    owner = source["title"]
+    peer = target["title"]
+    title = owner.rsplit("-", 1)[0] + "-dialog"
+    start = command("snapshot")["frames"]
+    offset = [start[title][i] - start[owner][i] for i in (0, 1)]
+    size = start[title][2:]
+    setting("settings.animation_duration", 0.3)
+    setting("settings.animate", True)
+    setting("settings.layout.scrolling.animate", True)
+
+    def transition(name, operation):
+        before = command("snapshot")["frames"]
+        command("start")
+        execute(*operation)
+        time.sleep(0.85)
+        frames = [s["frames"] for s in command("trace") if s["kind"] == "sample"]
+        assert frames, f"No native frames sampled during {name}"
+        after = frames[-1]
+        compact = [{key: sample[window] for key, window in
+                    (("owner", owner), ("peer", peer), ("dialog", title))} for sample in frames]
+        report[name] = compact
+        movement = after[owner][0] - before[owner][0]
+        low, high = sorted((after[owner][0], before[owner][0]))
+        interior = [s for s in frames if low + 2 < s[owner][0] < high - 2]
+
+        def follows(sample):
+            return all(abs(sample[title][i] - sample[owner][i] - offset[i]) <= 2 for i in (0, 1))
+
+        assert all(s[title][2:] == size for s in frames), f"{name} resized the dialog"
+        assert all(follows(s) for s in frames[-4:]), f"{name} lost the dialog offset after settling"
+        if name in ("focus_left", "focus_right"):
+            assert abs(movement) > 50, f"{name} did not move the editor: {movement}"
+            assert any(follows(s) for s in interior), f"{name} dialog did not follow the moving editor"
+        tiles = [w["title"] for w in query_windows() if w["id"]["pid"] == source["id"]["pid"]
+                 and w["layout_position"]]
+        assert sorted(tiles) == sorted((owner, peer)), f"{name} changed the tiled windows: {tiles}"
+        return movement, after[peer][0] - before[peer][0]
+
+    left, _ = transition("focus_left", ("window", "focus", "left"))
+    right, _ = transition("focus_right", ("window", "focus", "right"))
+    assert left > 0 and right < 0, "Directional focus did not pan the editor both ways"
+    swap = ("layout", "swap-windows", json.dumps(source["id"]), json.dumps(target["id"]))
+    owner_dx, peer_dx = transition("swap_editors", swap)
+    assert abs(owner_dx - peer_dx) > 50, "Swap did not distinguish the editor from its same-app peer"
 
 
 def run(args):
@@ -105,15 +153,18 @@ def run(args):
         "settings.mouse_hides_on_focus": False,
         "settings.focus_follows_mouse": True,
         "settings.layout.scrolling.preserve_window_sizes": False,
-        "settings.layout.scrolling.column_width_ratio": 0.5,
+        "settings.layout.scrolling.column_width_ratio": 0.7 if args.follow_parent else 0.5,
     }
     original_settings = {}
+    if args.follow_parent:
+        overrides["settings.animation_duration"] = config["settings"]["animation_duration"]
     if args.unmanaged_dialog:
         assert any(rule.get("title_regex") == "^wm-hover-[0-9a-f]+-dialog$"
                    and rule.get("manage") is False and rule.get("track_focus") is True
+                   and (not args.follow_parent or rule.get("follow_parent") is True)
                    for rule in config["virtual_workspaces"]["app_rules"]), (
             "Candidate configuration needs a ^wm-hover-[0-9a-f]+-dialog$ title rule "
-            "with manage=false and track_focus=true")
+            "with manage=false, track_focus=true and follow_parent=true when testing parent motion")
     for key in overrides:
         value = config
         for part in key.split("."):
@@ -209,6 +260,11 @@ def run(args):
                 fixture.pid, source, target, snapshot, move, lambda: query("windows"),
                 lambda: command("dialog_key"))
             print("PASS unmanaged dialog retains native placement and follows keyboard and hover focus", flush=True)
+            if args.follow_parent:
+                report["parent_motion"] = {}
+                check_parent_following(command, execute, setting, lambda: query("windows"),
+                                       source, target, report["parent_motion"])
+                print("PASS dialog follows its editor across horizontal navigation and a same-app window swap", flush=True)
             return
         for trial in range(args.trials):
             focus(source)
@@ -300,10 +356,13 @@ if __name__ == "__main__":
     parser.add_argument("--trials", type=int, default=5)
     parser.add_argument("--unmanaged-dialog", action="store_true",
                         help="Check a keyboard-opened modeless dialog with a track_focus rule")
+    parser.add_argument("--follow-parent", action="store_true",
+                        help="Also check dialog offset and size during horizontal workspace movement")
     parser.add_argument("--gap-ms", type=float, default=4.0)
     parser.add_argument("--qt-python", type=Path, default=Path("/Applications/Anki.app/Contents/Frameworks/Python.framework/Versions/3.13/bin/python3.13"))
     parser.add_argument("--qt-packages", type=Path, default=Path("/Applications/Anki.app/Contents/Resources/app_packages"))
     args = parser.parse_args()
+    args.unmanaged_dialog |= args.follow_parent
     if args.trials < 1 or not 0 < args.gap_ms < 16:
         parser.error("trials must be positive and gap-ms must be between 0 and 16")
     run(args)

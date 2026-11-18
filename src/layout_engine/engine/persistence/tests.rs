@@ -55,7 +55,8 @@ fn live_state(window: WindowId) -> WindowState {
         frame_monotonic: frame,
         is_manageable: true,
         manage_override: None,
-        track_focus: false,
+        unmanaged: Default::default(),
+        has_following_dialog: false,
     }
 }
 

@@ -326,6 +326,8 @@ workspace_names = [
 #     normal manageability heuristics for a visible window. Minimized windows remain unmanaged.
 #   - track_focus (boolean, default false): with manage = false, include the window in
 #     focus_follows_mouse and mouse_follows_focus when the corresponding settings are on.
+#   - follow_parent (boolean, default false): with manage = false, move the window by the same
+#     horizontal distance as its parent during column scrolling. The application sets its size and offset.
 #
 # Matching behavior (summary):
 #   1. All rules that match a window are evaluated.
@@ -373,9 +375,9 @@ workspace_names = [
 #         { app_id = "com.example.X", size = { w = 640, h = 480 }, focus = true },
 #       ]
 #
-#   - Let an app place its dialogs and keep mouse and focus tracking:
+#   - Keep app-positioned dialogs with their parent during scrolling and enable focus tracking:
 #       app_rules = [
-#         { app_id = "com.example.X", ax_subrole = "AXDialog", manage = false, track_focus = true },
+#         { app_id = "com.example.X", ax_subrole = "AXDialog", manage = false, track_focus = true, follow_parent = true },
 #       ]
 #
 # By default there are no app rules; add or uncomment rules below as needed.

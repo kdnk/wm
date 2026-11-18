@@ -270,6 +270,7 @@ pub struct CameraAnimation {
 
 #[derive(Debug)]
 struct PresentedWindow {
+    parent_offset: Option<(WindowId, f64)>,
     handle: AppThreadHandle,
     wid: WindowId,
     wsid: Option<WindowServerId>,
@@ -390,7 +391,9 @@ impl PresentedWindow {
 }
 
 fn stage_windows(windows: &mut [PresentedWindow], sample: Sample<'_>, frames: &mut FrameBatch) {
-    for group in windows.chunk_by_mut(|a, b| {
+    let first_dialog = windows.partition_point(|w| w.parent_offset.is_none());
+    let (owners, dialogs) = windows.split_at_mut(first_dialog);
+    for group in owners.chunk_by_mut(|a, b| {
         a.wid.pid == b.wid.pid && a.handle.constrains_scrolling() == b.handle.constrains_scrolling()
     }) {
         let handle = group[0].handle.clone();
@@ -399,6 +402,29 @@ fn stage_windows(windows: &mut [PresentedWindow], sample: Sample<'_>, frames: &m
             group[0].wid.pid,
             group.iter_mut().filter_map(|window| window.sample(sample)),
         );
+    }
+    for dialog in dialogs {
+        let Some((parent, offset)) = dialog.parent_offset else {
+            continue;
+        };
+        let Some(owner) = owners.iter().find(|w| w.wid == parent) else {
+            continue;
+        };
+        let x = owner.frame.origin.x + offset;
+        if x != dialog.frame.origin.x {
+            dialog.frame.origin.x = x;
+            frames.extend(
+                &dialog.handle,
+                dialog.wid.pid,
+                std::iter::once((
+                    dialog.wid,
+                    dialog.frame,
+                    false,
+                    dialog.txid,
+                    FrameSource::DialogPosition,
+                )),
+            );
+        }
     }
 }
 
@@ -530,7 +556,7 @@ impl CameraAnimation {
         let camera_velocity = self.presentation.position_velocity(now).1;
         for window in &mut self.windows {
             window.motion = None;
-            if self.animate {
+            if self.animate && window.parent_offset.is_none() {
                 let base = self.presentation.frame_at_offset(
                     window.to,
                     window.fixed,
@@ -550,12 +576,15 @@ impl CameraAnimation {
     }
 
     fn begin(&mut self) {
-        self.windows.sort_unstable_by_key(|w| w.wid.pid);
+        self.windows.sort_unstable_by_key(|w| (w.parent_offset.is_some(), w.wid.pid));
         for window in &mut self.windows {
             window.announced = false;
             window.txid = window.wsid.map_or_else(TransactionId::default, |wsid| {
                 let txid = self.store.next_txid(wsid);
-                if self.gesture.is_none() && !self.presentation.gesturing() {
+                if window.parent_offset.is_none()
+                    && self.gesture.is_none()
+                    && !self.presentation.gesturing()
+                {
                     let frame = self.presentation.target_frame(window.to, window.fixed, self.scale);
                     let frame = self.bound.map_or(frame, |bounds| bounds.apply(frame));
                     self.store.insert(wsid, txid, frame);
@@ -649,7 +678,14 @@ impl Reactor {
         if windows.is_empty() {
             return;
         }
+        let dialogs: Vec<_> = self
+            .dialog_parents
+            .iter()
+            .filter_map(|(&dialog, parent)| windows.contains(&parent.window).then_some(dialog))
+            .collect();
+        windows.extend(dialogs);
         windows.sort_unstable();
+        windows.dedup();
         let mut frames = Vec::new();
         for camera in self.presentations.values_mut() {
             if let Some(state) = &mut camera.headless {
@@ -828,7 +864,7 @@ impl Reactor {
         });
         let now = Instant::now();
         let control = self.animation_tx.as_ref().map(|tx| tx.control.lock());
-        let windows = frames
+        let mut windows: Vec<_> = frames
             .into_iter()
             .filter_map(|(wid, base_frame, fixed)| {
                 if Some(wid) == skip {
@@ -840,6 +876,7 @@ impl Reactor {
                     control.frame(wid, window.frame_monotonic)
                 });
                 Some(PresentedWindow {
+                    parent_offset: None,
                     handle: app.handle.with_scrolling_bounds(bound),
                     wid,
                     wsid: window.info.sys_id,
@@ -855,6 +892,35 @@ impl Reactor {
                 })
             })
             .collect();
+        for (&dialog, parent) in &self.dialog_parents {
+            let Some(owner) = windows.iter().find(|w| w.wid == parent.window) else {
+                continue;
+            };
+            let Some(state) = self.state.windows.window(dialog) else {
+                continue;
+            };
+            if !self.can_move_dialog_with_parent(dialog) || Some(dialog) == skip {
+                continue;
+            }
+            let frame = control
+                .as_ref()
+                .map_or(state.frame_monotonic, |c| c.frame(dialog, state.frame_monotonic));
+            windows.push(PresentedWindow {
+                parent_offset: Some((parent.window, parent.offset_x)),
+                handle: owner.handle.with_scrolling_bounds(None),
+                wid: dialog,
+                wsid: state.info.sys_id,
+                from: frame,
+                to: frame,
+                fixed: true,
+                announced: false,
+                leased: false,
+                frame,
+                motion: None,
+                velocity: FrameVelocity::default(),
+                txid: TransactionId::default(),
+            });
+        }
         drop(control);
         if !animate {
             presentation.finish();
@@ -1381,7 +1447,29 @@ impl AnimationManager {
         let active = reactor.layout_manager.layout_engine.workspaces().active_workspace(space);
         let mut per_app: HashMap<(pid_t, bool), _> = HashMap::default();
         let mut any_frame_changed = false;
-
+        let dialogs: Vec<_> = reactor
+            .dialog_parents
+            .iter()
+            .filter_map(|(&dialog, parent)| {
+                let owner = parent.window;
+                if skip_wid == Some(dialog)
+                    || skip_wid == Some(owner)
+                    || !reactor.is_dialog_owner(owner, space)
+                    || !reactor.can_move_dialog_with_parent(dialog)
+                {
+                    return None;
+                }
+                let (_, target) = layout.iter().find(|(wid, _)| *wid == owner)?;
+                let owner = reactor.state.windows.window(owner)?.frame_monotonic;
+                let target_x = target.round().origin.x;
+                if target_x == owner.origin.x {
+                    return None;
+                }
+                let mut frame = reactor.state.windows.window(dialog)?.frame_monotonic;
+                frame.origin.x = target_x + parent.offset_x;
+                Some((dialog, frame))
+            })
+            .collect();
         for &(wid, target_frame) in layout {
             if skip_wid == Some(wid) {
                 trace!(?wid, "Skipping layout update for window currently being dragged");
@@ -1483,6 +1571,32 @@ impl AnimationManager {
             }
         }
 
+        for (dialog, frame) in dialogs {
+            let Some(app) = reactor.app_manager.apps.get(&dialog.pid) else {
+                continue;
+            };
+            let Some(window) = reactor.state.windows.window_mut(dialog) else {
+                continue;
+            };
+            let txid = window.info.sys_id.map_or_else(TransactionId::default, |id| {
+                let txid = reactor.transaction_manager.generate_next_txid(id);
+                reactor.transaction_manager.store_txid(id, txid, frame);
+                txid
+            });
+            let handle = &app.handle;
+            if handle.send(Request::BeginWindowAnimation(dialog, Default::default())).is_ok() {
+                handle.send_interactive_frames(std::iter::once((
+                    dialog,
+                    frame,
+                    false,
+                    txid,
+                    FrameSource::DialogPosition,
+                )));
+                let _ = handle.send(Request::EndWindowAnimation(dialog, Default::default()));
+                window.frame_monotonic.origin.x = frame.origin.x;
+                any_frame_changed = true;
+            }
+        }
         any_frame_changed
     }
 }
@@ -1702,6 +1816,7 @@ impl Animation {
         txid: TransactionId,
     ) {
         self.windows.push(PresentedWindow {
+            parent_offset: None,
             handle: handle.clone(),
             wid,
             wsid: None,
@@ -2165,6 +2280,57 @@ mod tests {
         assert_eq!(completed.windows()[0].frame, target);
     }
 
+    #[test]
+    fn viewport_samples_translate_only_dialog_x_after_owner_clamping() {
+        let (handle, mut rx) = AppThreadHandle::channel();
+        let editor = rect(150., 20., 650., 700.);
+        let dialog = rect(187., 121., 410., 360.);
+        let mut camera = motion_camera(&handle, editor, editor);
+        let mut child = motion_camera(&handle, dialog, dialog).windows.pop().unwrap();
+        child.parent_offset = Some((camera.windows[0].wid, 37.));
+        child.wid = WindowId::new(1, 2);
+        camera.windows.push(child);
+        let mut last_x = editor.origin.x;
+        let mut deltas = Vec::new();
+        for offset in [130., -130., 70.] {
+            let mut batch = FrameBatch::default();
+            let bound = super::super::managers::ScrollingDisplayBounds::for_screen(
+                rect(0., 0., 1000., 800.),
+                &[rect(0., 0., 1000., 800.)],
+            );
+            stage_windows(
+                &mut camera.windows,
+                Sample::Viewport {
+                    presentation: &camera.presentation,
+                    offset,
+                    scale: 1.,
+                    bound,
+                    progress: 1.,
+                    duration: Duration::ZERO,
+                    camera_velocity: 0.,
+                },
+                &mut batch,
+            );
+            batch.flush();
+            let parent_x = camera.windows[0].frame.origin.x;
+            deltas.push(parent_x - last_x);
+            last_x = parent_x;
+            let (_, Request::InteractiveFramesPending(queue)) = rx.try_recv().unwrap() else {
+                panic!("expected position publication")
+            };
+            let mut child_frame = None;
+            queue.drain_with(|id, frame, size, _, source, _, _| {
+                if id == camera.windows[1].wid {
+                    assert!(!size);
+                    assert_eq!(source, FrameSource::DialogPosition);
+                    child_frame = Some(frame);
+                }
+            });
+            assert_eq!(child_frame.unwrap(), rect(parent_x + 37., 121., 410., 360.));
+        }
+        assert!(deltas.iter().any(|&dx| dx > 0.) && deltas.iter().any(|&dx| dx < 0.));
+    }
+
     fn motion_camera(handle: &AppThreadHandle, from: CGRect, to: CGRect) -> CameraAnimation {
         use crate::layout_engine::systems::ScrollingLayoutSystem;
         let wid = WindowId::new(1, 1);
@@ -2194,6 +2360,7 @@ mod tests {
         CameraAnimation {
             presentation,
             windows: vec![PresentedWindow {
+                parent_offset: None,
                 handle: handle.clone(),
                 wid,
                 wsid: None,
@@ -3054,6 +3221,7 @@ mod tests {
                         let frame =
                             control.frame(wid, native.iter().find(|(id, _)| *id == wid).unwrap().1);
                         PresentedWindow {
+                            parent_offset: None,
                             handle: handle.clone(),
                             wid,
                             wsid: None,
@@ -3286,6 +3454,7 @@ mod tests {
             geometry_progress: 0.0,
             duration: Duration::from_secs_f64(0.3),
             windows: vec![PresentedWindow {
+                parent_offset: None,
                 handle: handle.clone(),
                 wid,
                 wsid: Some(wsid),
@@ -3396,6 +3565,7 @@ mod tests {
             let mut base_frame = frames[0].1;
             base_frame.origin.x += 0.5;
             c.windows.push(PresentedWindow {
+                parent_offset: None,
                 handle,
                 wid,
                 wsid: None,

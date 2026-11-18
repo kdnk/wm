@@ -60,7 +60,10 @@ an older configuration, remove their settings and keybindings. Redundant
 `floating = false` app-rule settings are ignored. Use `manage = false` to leave a
 window unmanaged. Add `track_focus = true` to the same rule to enable
 `focus_follows_mouse` and `mouse_follows_focus` for that window when the
-corresponding settings are on. The application still controls its position and size.
+corresponding settings are on. To keep a dialog beside its parent as columns
+scroll, add `follow_parent = true`. The application sets the initial position
+and size. During horizontal scrolling wm moves the dialog by the same distance
+as its parent, preserving their offset.
 
 Stop other window managers and grant wm Accessibility access.
 

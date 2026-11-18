@@ -6029,16 +6029,8 @@ fn fullscreen_startup_fixture(
         workspace_cfg.app_rules = vec![crate::common::config::AppWorkspaceRule {
             app_id: Some("com.testapp1".to_string()),
             workspace: Some(crate::common::config::WorkspaceSelector::Index(1)),
-            size: None,
-            focus: false,
             manage: Some(true),
-            track_focus: false,
-            app_name: None,
-            title_regex: None,
-            title_substring: None,
-            ax_role: None,
-            ax_subrole: None,
-            window_tags: None,
+            ..Default::default()
         }];
     }
 

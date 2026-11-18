@@ -1520,7 +1520,10 @@ impl WorkspaceStore {
             .unwrap_or(rule_override != Some(false));
         if let Some(window) = window_store.window_mut(window_id) {
             window.manage_override = rule_override;
-            window.track_focus = rule_decision.as_ref().is_some_and(|rule| rule.track_focus);
+            window.unmanaged.track_focus =
+                rule_decision.as_ref().is_some_and(|rule| rule.track_focus);
+            window.unmanaged.follow_parent =
+                rule_decision.as_ref().is_some_and(|rule| rule.follow_parent);
         }
         if !admitted {
             if !window_store.is_temporarily_unavailable(window_id) || rule_override == Some(false) {

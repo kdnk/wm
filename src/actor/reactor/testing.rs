@@ -270,7 +270,8 @@ impl Reactor {
             frame_monotonic: frame,
             is_manageable,
             manage_override: None,
-            track_focus: false,
+            unmanaged: Default::default(),
+            has_following_dialog: false,
         });
     }
 }

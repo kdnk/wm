@@ -160,14 +160,16 @@ def fixture(label):
                 return super().keyPressEvent(key_event)
             from PyQt6.QtWidgets import QDialog
             other = next(w for w, _ in windows if w is not self)
-            dialog = QDialog(self)
+            dialog = QDialog()
             dialog.setWindowTitle(f"{label}-dialog")
             dialog.resize(220, 140)
-            dialog.move(other.frameGeometry().center() - dialog.rect().center())
+            visible = other.frameGeometry().intersected(other.screen().availableGeometry())
+            dialog.move(visible.center() - dialog.rect().center())
             dialog.show()
             dialog.activateWindow()
             self.dialog = dialog
             dialog.native = message(int(dialog.winId()), "window")
+            assert not message(dialog.native, "parentWindow"), "AppKit would move this dialog with its parent"
 
         def resizeEvent(self, resize_event):
             super().resizeEvent(resize_event)

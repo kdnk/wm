@@ -333,6 +333,19 @@ pub(crate) enum FrameSource {
     Ordinary,
     Drag,
     Viewport,
+    DialogPosition,
+}
+
+impl FrameSource {
+    fn from_viewport(self) -> bool { matches!(self, Self::Viewport | Self::DialogPosition) }
+
+    fn target(self, requested: CGRect, current: CGRect) -> CGRect {
+        if self == Self::DialogPosition {
+            CGRect::new(CGPoint::new(requested.origin.x, current.origin.y), current.size)
+        } else {
+            requested
+        }
+    }
 }
 
 #[derive(Default)]
@@ -797,7 +810,7 @@ struct AppWindowState {
     is_animating: bool,
     animation_eui_held: bool,
     animation_authority: FrameAuthority,
-    last_animation_frame: Option<(CGRect, FrameAuthority)>,
+    last_animation_frame: Option<(CGRect, FrameAuthority, FrameSource)>,
     // Latest observed or intended geometry; only a hint for choosing AX setters.
     last_known_frame: CGRect,
     frame_source: FrameSource,
@@ -1017,6 +1030,8 @@ fn write_interactive_frame(
     source: FrameSource,
     mut before_resize: impl FnMut(),
 ) {
+    frame = source.target(frame, *hint);
+    let set_size = set_size && source != FrameSource::DialogPosition;
     let bounds = elem.scrolling_bounds().map(|bounds| bounds.for_motion(*hint));
     if let Some(bounds) = bounds {
         if set_size {
@@ -1340,7 +1355,7 @@ impl State {
         window.last_seen_txid = txid;
         window.frame_source = source;
         // Release reapplies this frame, including position-only viewport writes.
-        window.last_animation_frame = Some((frame, authority.clone()));
+        window.last_animation_frame = Some((frame, authority.clone(), source));
         let mut suppress_native_animation = || {
             if !window.animation_eui_held {
                 enhanced_ui.acquire(app);
@@ -1348,7 +1363,7 @@ impl State {
             }
         };
         if window.is_animating
-            && source == FrameSource::Viewport
+            && source.from_viewport()
             && frame.origin.x != window.last_known_frame.origin.x
         {
             suppress_native_animation();
@@ -1642,7 +1657,7 @@ impl State {
                         && window
                             .last_animation_frame
                             .as_ref()
-                            .is_some_and(|(_, owner)| !authority.is_older_than(owner))
+                            .is_some_and(|(_, owner, _)| !authority.is_older_than(owner))
                     {
                         window.last_animation_frame = None;
                     }
@@ -1668,7 +1683,7 @@ impl State {
                             if window
                                 .last_animation_frame
                                 .as_ref()
-                                .is_some_and(|(_, owner)| authority.is_older_than(owner))
+                                .is_some_and(|(_, owner, _)| authority.is_older_than(owner))
                             {
                                 None
                             } else {
@@ -1705,10 +1720,16 @@ impl State {
                 // Intermediate AX writes can be clamped while a growing column
                 // still overlaps the screen edge. The intended-frame cache is
                 // only a hint: repair against observed geometry once motion ends.
-                if let Some((target, authority)) = last_animation_frame
+                if let Some((requested, authority, source)) = last_animation_frame
                     && authority.is_current()
-                    && !frame.same_as(target)
+                    && !frame.same_as(source.target(requested, frame))
                 {
+                    let target = source.target(requested, frame);
+                    let mode = if source == FrameSource::DialogPosition {
+                        FrameMode::Position
+                    } else {
+                        FrameMode::Full
+                    };
                     let result = trace("set_frame", &elem, || {
                         reconcile_frame(
                             &AuthorizedFrameTarget {
@@ -1717,7 +1738,7 @@ impl State {
                             },
                             frame,
                             target,
-                            FrameMode::Full,
+                            mode,
                             authority.1,
                             || {
                                 if *eui == BatchEui::NotRequested {
@@ -1830,7 +1851,7 @@ impl State {
 
                 let (txid, source) = match self.window(wid) {
                     Ok(window) => {
-                        if window.is_animating || window.frame_source == FrameSource::Viewport {
+                        if window.is_animating || window.frame_source.from_viewport() {
                             trace!(?wid, ?notif, "Ignoring notification during owned frame writes");
                             return;
                         }
@@ -3043,6 +3064,28 @@ mod frame_tests {
             window.scrolling_bounds(),
             || {},
         )
+    }
+
+    #[test]
+    fn scrolling_a_dialog_writes_only_x_even_with_stale_requested_geometry() {
+        let app_frame = rect(100., 30., 820., 630.);
+        let dialog = FakeWindow {
+            frame: Cell::new(app_frame),
+            ..Default::default()
+        };
+        let stale = rect(350., 50., 500., 400.);
+        let mut accepted = app_frame;
+        write_interactive_frame(
+            &dialog,
+            &mut accepted,
+            stale,
+            true,
+            FrameSource::DialogPosition,
+            || panic!("unexpected resize"),
+        );
+        assert_eq!(dialog.calls.borrow().as_slice(), ["position"]);
+        assert_eq!(dialog.frame.get(), rect(350., 30., 820., 630.));
+        assert_eq!(FrameSource::DialogPosition.target(stale, accepted), accepted);
     }
 
     #[test]

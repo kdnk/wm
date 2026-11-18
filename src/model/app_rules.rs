@@ -23,6 +23,7 @@ pub struct WindowRuleContext<'a> {
 pub struct AppRuleDecision {
     pub manage: Option<bool>,
     pub track_focus: bool,
+    pub follow_parent: bool,
     pub workspace: Option<WorkspaceSelector>,
     pub floating: bool,
     pub position: Option<AppRulePosition>,
@@ -280,6 +281,7 @@ impl CompiledRule {
             focus,
             manage,
             track_focus,
+            follow_parent,
             app_name,
             title_regex,
             title_substring,
@@ -325,6 +327,7 @@ impl CompiledRule {
             action: AppRuleDecision {
                 manage,
                 track_focus,
+                follow_parent,
                 workspace,
                 floating: false,
                 position: None,
@@ -421,13 +424,15 @@ mod tests {
     }
 
     #[test]
-    fn unmanaged_focus_tracking_is_opt_in_per_matching_rule() {
+    fn unmanaged_focus_tracking_and_parent_following_are_independent() {
         let rule = r#"app_id = "com.example.Editor"
                       manage = false"#;
-        for (option, expected) in [
-            ("", false),
-            ("track_focus = false", false),
-            ("track_focus = true", true),
+        for (option, track_focus, follow_parent) in [
+            ("", false, false),
+            ("track_focus = false\nfollow_parent = false", false, false),
+            ("track_focus = true", true, false),
+            ("follow_parent = true", false, true),
+            ("track_focus = true\nfollow_parent = true", true, true),
         ] {
             let rule = toml::from_str(&format!("{rule}\n{option}")).unwrap();
             let engine = AppRuleEngine::new(&[rule]);
@@ -438,7 +443,8 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(decision.manage, Some(false));
-            assert_eq!(decision.track_focus, expected);
+            assert_eq!(decision.track_focus, track_focus);
+            assert_eq!(decision.follow_parent, follow_parent);
         }
     }
 
@@ -463,6 +469,7 @@ mod tests {
             Some(AppRuleDecision {
                 manage: Some(true),
                 track_focus: false,
+                follow_parent: false,
                 workspace: None,
                 floating: false,
                 position: None,

@@ -114,6 +114,9 @@ pub struct AppWorkspaceRule {
     /// With `manage = false`, let the configured mouse and focus tracking include this window.
     #[serde(default)]
     pub track_focus: bool,
+    /// With `manage = false`, move the window horizontally with its parent as columns scroll.
+    #[serde(default)]
+    pub follow_parent: bool,
     pub app_name: Option<String>,
     /// Optional: Regular expression to match window title (applies to window.title)
     ///

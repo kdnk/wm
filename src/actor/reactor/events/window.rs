@@ -44,7 +44,8 @@ pub fn handle_window_created(
     let mut window_state: WindowState = window.into();
     if let Some(previous) = state.windows.window(wid) {
         window_state.manage_override = previous.manage_override;
-        window_state.track_focus = previous.track_focus;
+        window_state.unmanaged = previous.unmanaged;
+        window_state.has_following_dialog = previous.has_following_dialog;
     }
     if let Some(wsid) = window_state.info.sys_id {
         transactions.store_txid(

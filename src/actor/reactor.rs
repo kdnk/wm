@@ -7,6 +7,7 @@
 
 mod animation;
 mod claims;
+mod dialog_parent;
 mod events;
 mod gesture;
 pub(crate) use crate::layout_engine::WorkspaceDropRequest as OverviewDrop;
@@ -503,6 +504,8 @@ pub struct Reactor {
     topology_guard: crate::actor::spaces::TopologyGuard,
     main_window_tracker: MainWindowTracker,
     native_focus_awaiting_inventory: Option<(WindowId, SpaceId)>,
+    dialog_parents: HashMap<WindowId, dialog_parent::DialogParent>,
+    last_focused_editor: HashMap<pid_t, WindowId>,
     last_unmanaged_focus: Option<WindowId>,
     pending_mouse_focus: Option<(WindowId, Instant)>,
     overview_focus: Option<(SpaceId, WindowId, Instant)>,
@@ -610,6 +613,8 @@ impl Reactor {
             space_activation_policy: SpaceActivationPolicy::new(),
             main_window_tracker: MainWindowTracker::default(),
             native_focus_awaiting_inventory: None,
+            dialog_parents: HashMap::default(),
+            last_focused_editor: HashMap::default(),
             last_unmanaged_focus: None,
             pending_mouse_focus: None,
             overview_focus: None,
@@ -1430,6 +1435,21 @@ impl Reactor {
     }
 
     fn handle_event(&mut self, event: Event) {
+        let refresh_dialog_parents = matches!(
+            event,
+            Event::ApplicationLaunched { .. }
+                | Event::WindowCreated(..)
+                | Event::WindowsDiscovered { .. }
+                | Event::WindowTitleChanged(..)
+                | Event::WindowDestroyed(..)
+                | Event::WindowClosed(..)
+                | Event::WindowServerHidden(..)
+                | Event::WindowServerUnhidden(..)
+                | Event::WindowMinimized(..)
+                | Event::WindowDeminiaturized(..)
+                | Event::ApplicationThreadTerminated(..)
+                | Event::ConfigUpdated(..)
+        );
         let inventory_changed = matches!(
             event,
             Event::ApplicationLaunched { .. }
@@ -1461,6 +1481,9 @@ impl Reactor {
             self.handle_event_inner(event);
         } else {
             self.handle_event_traced(event);
+        }
+        if refresh_dialog_parents {
+            self.refresh_dialog_parents();
         }
         if inventory_changed && let Some((native, space)) = self.native_focus_awaiting_inventory {
             let id = WindowServerId::new(native.idx.get());
@@ -1548,6 +1571,21 @@ impl Reactor {
         command: layout::LayoutCommand,
         command_space: Option<SpaceId>,
     ) -> anyhow::Result<EventOutcome> {
+        if matches!(
+            command,
+            layout::LayoutCommand::MoveFocus(_)
+                | layout::LayoutCommand::NextWindow
+                | layout::LayoutCommand::PrevWindow
+        ) && let Some(space) = command_space
+            && let Some(owner) = self
+                .main_window()
+                .and_then(|wid| self.dialog_parents.get(&wid))
+                .map(|parent| parent.window)
+            && self.is_dialog_owner(owner, space)
+            && self.layout_manager.layout_engine.focused_window() != Some(owner)
+        {
+            self.send_layout_event(LayoutEvent::WindowFocused(space, owner));
+        }
         let post_arrange_mouse_warp =
             self.config.settings.mouse_follows_focus.then(|| self.main_window()).flatten();
         let is_move_node = matches!(command, layout::LayoutCommand::MoveNode(_));
@@ -2329,6 +2367,14 @@ impl Reactor {
                     .map(|window| (window.info.sys_id, window.frame_monotonic))
                     .unwrap_or((None, new_frame));
                 let old_space = self.geometry_space_for_window(&old_frame, server_id);
+                if !requested.0
+                    && effective_mouse_state == Some(MouseState::Down)
+                    && old_frame.origin.x != new_frame.origin.x
+                    && let Some(parent) = self.dialog_parents.get_mut(&wid)
+                    && let Some(owner) = self.state.windows.window(parent.window)
+                {
+                    parent.offset_x = new_frame.origin.x - owner.frame_monotonic.origin.x;
+                }
                 let new_space = self.geometry_space_for_window(&new_frame, server_id);
                 let resized = !old_frame.size.same_as(new_frame.size);
                 // Native space lookup is only needed for a resize. Position
@@ -5566,6 +5612,11 @@ impl Reactor {
     }
 
     fn send_layout_event(&mut self, event: LayoutEvent) {
+        if let LayoutEvent::WindowFocused(space, wid) = &event
+            && self.is_dialog_owner(*wid, *space)
+        {
+            self.last_focused_editor.insert(wid.pid, *wid);
+        }
         if let LayoutEvent::WindowFocused(_, wid) = &event
             && self.state.windows.window(*wid).is_some_and(WindowState::tracks_unmanaged_focus)
         {

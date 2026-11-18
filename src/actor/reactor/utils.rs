@@ -46,7 +46,7 @@ pub(crate) fn rejection_needs_removal(
 pub(crate) fn clear_rule_admission(state: &mut WmState, wid: WindowId) {
     if let Some(window) = state.windows.window_mut(wid) {
         window.manage_override = None;
-        window.track_focus = false;
+        window.unmanaged = Default::default();
     }
 }
 
