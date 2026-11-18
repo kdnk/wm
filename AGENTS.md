@@ -11,6 +11,7 @@
 - Desktop tests under `tests/rift-*-live-test.py` require a running matching daemon and macOS permissions. Native geometry tests alone do not prove composited content rendering; retain display video and daemon traces for live resize verification.
 - Use `cargo run --locked --example menu-bar-window-list-check -- --interactive` for isolated native menu interaction checks without controlling the running daemon.
 - Native AppKit fixture runs must emit their expected PASS summaries. Exit status 0 without the fixture output does not establish a pass.
+- After changing native window borders, run `cargo run --locked --example window-borders-check` in a macOS GUI session with Screen Recording permission. The fixture uses its own windows to check composited borders without restarting the daemon.
 - After building the `menu-bar-window-list-check` example, use `python3 tests/menu-motion-live-test.py --output NEW_DIRECTORY` to record isolated menu motion without controlling the daemon.
 - Live motion tests must verify that synthetic drags commit a layout change, target fixture windows by PID and title, and restore runtime settings, workspace, and cursor position on failure.
 - Before temporarily replacing a running daemon for live tests, save its layout. After restarting the original daemon, wait for its original window inventory before loading the saved layout, then verify restored window order and sizes with fresh queries.
