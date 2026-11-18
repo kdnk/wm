@@ -54,11 +54,10 @@ impl Reactor {
             let Some(space) = self.best_space_for_window(&frame, wsid) else {
                 continue;
             };
-            let native = wsid
-                .and_then(window_server::window_parent)
-                .and_then(|id| self.state.windows.tracked_window_id(id));
-            let owner = if let Some(parent) = native {
-                (parent.pid == dialog.pid && self.is_dialog_owner(parent, space)).then_some(parent)
+            let owner = if let Some(parent_id) = wsid.and_then(window_server::window_parent) {
+                self.state.windows.tracked_window_id(parent_id).filter(|parent| {
+                    parent.pid == dialog.pid && self.is_dialog_owner(*parent, space)
+                })
             } else {
                 self.last_focused_editor
                     .get(&dialog.pid)
@@ -137,6 +136,132 @@ mod tests {
         Apps, make_window, make_windows, space_state_event, test_reactor_with_workspace_settings,
     };
     use crate::common::config::{AppWorkspaceRule, VirtualWorkspaceSettings};
+
+    fn projects() -> (Reactor, SpaceId, Apps) {
+        let mut reactor = test_reactor_with_workspace_settings(&VirtualWorkspaceSettings {
+            default_workspace_count: 2,
+            app_rules: vec![AppWorkspaceRule {
+                title_regex: Some("^(Fuzzy Finder|Live Grep)$".into()),
+                manage: Some(false),
+                follow_parent: true,
+                track_focus: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let space = SpaceId::new(1);
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1200., 800.));
+        let mut apps = Apps::new();
+        apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(2));
+        (reactor, space, apps)
+    }
+
+    fn open_picker(
+        reactor: &mut Reactor,
+        idx: u32,
+        title: &str,
+        parent: Option<WindowServerId>,
+    ) -> WindowId {
+        let mut info = make_window(idx as usize);
+        info.ax_role = Some("AXWindow".into());
+        info.title = title.into();
+        window_server::set_window_parent_override(info.sys_id.unwrap(), Some(parent));
+        let picker = WindowId::new(1, idx);
+        reactor.handle_event(Event::WindowCreated(picker, info, None, None));
+        picker
+    }
+
+    fn frame(reactor: &Reactor, wid: WindowId) -> CGRect {
+        reactor.state.windows.window(wid).unwrap().frame_monotonic
+    }
+
+    fn shift(reactor: &mut Reactor, space: SpaceId, window: WindowId, dx: f64) {
+        let mut target = frame(reactor, window);
+        target.origin.x += dx;
+        AnimationManager::instant_layout(reactor, space, &[(window, target)], None);
+    }
+
+    #[test]
+    fn two_projects_keep_separate_pickers_after_focus_and_close() {
+        let (mut reactor, space, mut apps) = projects();
+        apps.make_app_and_settle(&mut reactor, 2, make_windows(1));
+        let first = WindowId::new(1, 1);
+        let second = WindowId::new(1, 2);
+        let other_app = WindowId::new(2, 1);
+        reactor.handle_event(Event::WindowServerFocusChanged(first, space));
+        let finder = open_picker(&mut reactor, 3, "Fuzzy Finder", None);
+        reactor.handle_event(Event::WindowServerFocusChanged(second, space));
+        reactor.handle_event(Event::WindowServerFocusChanged(other_app, space));
+        let grep = open_picker(&mut reactor, 4, "Live Grep", None);
+        let finder_frame = frame(&reactor, finder);
+        let mut grep_frame = frame(&reactor, grep);
+        let grep_offset = grep_frame.origin.x - frame(&reactor, second).origin.x;
+
+        for (owner, dx, finder_dx, grep_dx) in [
+            (other_app, 30., 0., 0.),
+            (second, -70., 0., -70.),
+            (first, 45., 45., -70.),
+        ] {
+            shift(&mut reactor, space, owner, dx);
+            assert_eq!(
+                frame(&reactor, finder).origin.x,
+                finder_frame.origin.x + finder_dx
+            );
+            assert_eq!(frame(&reactor, grep).origin.x, grep_frame.origin.x + grep_dx);
+        }
+
+        reactor.handle_event(Event::WindowDestroyed(finder));
+        reactor.handle_event(Event::WindowDestroyed(first));
+        shift(&mut reactor, space, second, 80.);
+        grep_frame.origin.x = frame(&reactor, second).origin.x + grep_offset;
+        assert_eq!(frame(&reactor, grep), grep_frame);
+        for idx in [3, 4] {
+            window_server::set_window_parent_override(WindowServerId::new(idx), None);
+        }
+    }
+
+    #[test]
+    fn native_parent_discovered_after_picker_supersedes_focused_project() {
+        let (mut reactor, space, _apps) = projects();
+        let focused = WindowId::new(1, 1);
+        reactor.handle_event(Event::WindowServerFocusChanged(focused, space));
+        let owner_info = make_window(5);
+        let dialog = open_picker(&mut reactor, 3, "Live Grep", owner_info.sys_id);
+        let mut expected = frame(&reactor, dialog);
+        shift(&mut reactor, space, focused, 75.);
+        assert_eq!(frame(&reactor, dialog), expected, "wait for the named parent");
+
+        let owner = WindowId::new(1, 5);
+        reactor.handle_event(Event::WindowCreated(owner, owner_info, None, None));
+        expected = frame(&reactor, dialog);
+        shift(&mut reactor, space, owner, -35.);
+        expected.origin.x -= 35.;
+        assert_eq!(frame(&reactor, dialog), expected);
+        window_server::set_window_parent_override(WindowServerId::new(3), None);
+    }
+
+    #[test]
+    fn foreign_or_inactive_native_parent_does_not_bind_picker_to_active_editor() {
+        let (mut reactor, space, mut apps) = projects();
+        apps.make_app_and_settle(&mut reactor, 2, make_windows(1));
+        let active = WindowId::new(1, 1);
+        let hidden = WindowId::new(1, 2);
+        let foreign = WindowId::new(2, 1);
+        let workspace = reactor.test_workspace(space, 1);
+        assert!(reactor.assign_test_window_to_workspace(space, hidden, workspace));
+        reactor.handle_event(Event::WindowServerFocusChanged(active, space));
+
+        for (idx, parent) in [(3, foreign), (4, hidden)] {
+            let native = reactor.test_window_server_id(parent);
+            let dialog = open_picker(&mut reactor, idx, "Live Grep", Some(native));
+            let expected = frame(&reactor, dialog);
+            shift(&mut reactor, space, active, 40.);
+            shift(&mut reactor, space, parent, -35.);
+            assert_eq!(frame(&reactor, dialog), expected);
+            reactor.handle_event(Event::WindowDestroyed(dialog));
+            window_server::set_window_parent_override(WindowServerId::new(idx), None);
+        }
+    }
 
     #[test]
     fn dialog_follows_its_native_or_opening_editor_in_both_directions() {
