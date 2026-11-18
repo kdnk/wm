@@ -74,6 +74,22 @@ assignments, and scroll positions before stopping the daemon. If saving fails, t
 daemon stays running. A first start without a saved layout uses the normal initial
 layout. No restore option is required.
 
+## Show window borders
+
+To have wm draw rounded borders, enable them in `~/.config/wm/config.toml`.
+The colors use `0xAARRGGBB`, and the width is in points.
+
+```toml
+[settings.ui.window_borders]
+enabled = true
+width = 4.0
+active_color = 0xff9457eb
+inactive_color = 0xff23262c
+```
+
+If you run JankyBorders through Homebrew, stop it with `brew services stop borders`
+and remove any startup command or keybinding that restarts it.
+
 ## Close a window
 
 ```sh

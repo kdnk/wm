@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-19. Original attribution is preserved in LICENSE.
 // credits
 // https://github.com/asmagill/hs._asm.undocumented.spaces/blob/master/CGSSpace.h.
 // https://github.com/koekeishiya/yabai/blob/d55a647913ab72d8d8b348bee2d3e59e52ce4a5d/src/misc/extern.h.
@@ -392,6 +393,12 @@ unsafe extern "C" {
     pub fn SLSGetCurrentCursorLocation(cid: cid_t, point: *mut CGPoint) -> CGError;
     pub fn SLSWindowIsOrderedIn(cid: cid_t, wid: u32, ordered: *mut u8) -> CGError;
     pub fn SLSRegisterConnectionNotifyProc(
+        cid: cid_t,
+        callback: extern "C" fn(u32, *mut c_void, usize, *mut c_void, cid_t),
+        event: u32,
+        data: *mut c_void,
+    ) -> i32;
+    pub fn SLSRemoveConnectionNotifyProc(
         cid: cid_t,
         callback: extern "C" fn(u32, *mut c_void, usize, *mut c_void, cid_t),
         event: u32,

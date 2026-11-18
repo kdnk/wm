@@ -13,6 +13,7 @@ use core::ptr::{addr_of_mut, copy_nonoverlapping, null, null_mut};
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Mutex, Once};
 use std::vec::Vec;
 
 use tracing::{debug, error, info};
@@ -392,14 +393,18 @@ unsafe fn prepare_inline_send(
     header_ptr
 }
 
-static mut g_server_port: mach_port_t = MACH_PORT_NULL;
-static mut window_sub_level_error_logged: bool = false;
-static mut window_sub_level_invalid_msg_logged: bool = false;
+static SUBLEVEL_PORT: Mutex<mach_port_t> = Mutex::new(MACH_PORT_NULL);
+static SUBLEVEL_ERROR: Once = Once::new();
+static SUBLEVEL_INVALID_MESSAGE: Once = Once::new();
 
-pub fn init_window_sub_level_server_port() {
-    unsafe {
-        g_server_port = create_connection_server_port();
+pub fn init_window_sub_level_server_port() { window_sub_level_server_port(); }
+
+fn window_sub_level_server_port() -> mach_port_t {
+    let mut port = SUBLEVEL_PORT.lock().unwrap();
+    if *port == MACH_PORT_NULL {
+        *port = unsafe { create_connection_server_port() };
     }
+    *port
 }
 
 const LC_SEGMENT_64: u32 = 0x19;
@@ -618,11 +623,9 @@ const WINDOW_SUB_LEVEL_REQUEST_POST_TAHOE: i32 = 0x76E3;
 const WINDOW_SUB_LEVEL_RESPONSE_PRE_TAHOE: i32 = 0x7427;
 const WINDOW_SUB_LEVEL_RESPONSE_POST_TAHOE: i32 = 0x7747;
 pub unsafe fn mach_get_window_sub_level(wid: u32) -> c_int {
-    if g_server_port == MACH_PORT_NULL {
-        g_server_port = create_connection_server_port();
-        if g_server_port == MACH_PORT_NULL {
-            return 0;
-        }
+    let server_port = window_sub_level_server_port();
+    if server_port == MACH_PORT_NULL {
+        return 0;
     }
 
     let mut request = WINDOW_SUB_LEVEL_REQUEST_PRE_TAHOE;
@@ -634,7 +637,7 @@ pub unsafe fn mach_get_window_sub_level(wid: u32) -> c_int {
 
     let mut msg = aligned_message_t(zeroed::<get_window_sub_level_message_t>());
     msg.0.info.NDR_record = NDR_record;
-    msg.0.info.header.msgh_remote_port = g_server_port;
+    msg.0.info.header.msgh_remote_port = server_port;
     msg.0.info.header.msgh_local_port = mig_get_special_reply_port();
     msg.0.info.header.msgh_bits = MACH_MSGH_BITS_SET(
         MACH_MSG_TYPE_COPY_SEND,
@@ -667,28 +670,25 @@ pub unsafe fn mach_get_window_sub_level(wid: u32) -> c_int {
     );
 
     if error != KERN_SUCCESS {
-        if !window_sub_level_error_logged {
-            let server_port = g_server_port;
+        SUBLEVEL_ERROR.call_once(|| {
             eprintln!(
                 "SubLevel: Error receiving message (kr={}, server_port={}).",
                 error, server_port
             );
-            window_sub_level_error_logged = true;
-        }
+        });
         mig_dealloc_special_reply_port(local_port);
         return 0;
     }
 
     if msg.0.info.header.msgh_id != response {
-        if !window_sub_level_invalid_msg_logged {
+        SUBLEVEL_INVALID_MESSAGE.call_once(|| {
             let received_id =
                 core::ptr::read_unaligned(core::ptr::addr_of!(msg.0.info.header.msgh_id));
             eprintln!(
                 "SubLevel: Invalid message received (id=0x{:x}, expected=0x{:x}).",
                 received_id, response
             );
-            window_sub_level_invalid_msg_logged = true;
-        }
+        });
         mach_msg_destroy(header_ptr);
         return 0;
     }

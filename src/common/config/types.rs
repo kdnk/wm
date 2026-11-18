@@ -472,9 +472,31 @@ pub struct UiSettings {
     #[serde(default)]
     pub menu_bar: MenuBarSettings,
     #[serde(default)]
+    pub window_borders: WindowBorderSettings,
+    #[serde(default)]
     pub stack_line: StackLineSettings,
     #[serde(default)]
     pub mission_control: MissionControlSettings,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
+#[serde(default, deny_unknown_fields)]
+pub struct WindowBorderSettings {
+    pub enabled: bool,
+    pub width: f64,
+    pub active_color: u32,
+    pub inactive_color: u32,
+}
+
+impl Default for WindowBorderSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            width: 4.0,
+            active_color: 0xff9457eb,
+            inactive_color: 0xff23262c,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Default, PartialEq, Eq, Clone, Copy)]
@@ -1209,6 +1231,12 @@ impl Settings {
 
         issues.extend(self.layout.validate());
         issues.extend(self.ui.stack_line.validate());
+        let width = self.ui.window_borders.width;
+        if !(width > 0.0 && width <= 64.0) {
+            issues.push(format!(
+                "ui.window_borders.width must be positive and at most 64 points, got {width}"
+            ));
+        }
 
         if !(0.10..=0.45).contains(&self.drag_drop.drop_zone_fraction) {
             issues.push(format!(

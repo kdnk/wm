@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-19. Original attribution is preserved in LICENSE.
 #![allow(non_camel_case_types)]
 
 // based on https://github.com/koekeishiya/yabai/commit/6f9006dd957100ec13096d187a8865e85a164a9b#r148091577
@@ -13,7 +14,8 @@ use parking_lot::{Mutex, RwLock};
 use tracing::{debug, trace, warn};
 
 use super::skylight::{
-    CGSEventType, SLSRegisterConnectionNotifyProc, SLSRequestNotificationsForWindows, cid_t,
+    CGSEventType, SLSRegisterConnectionNotifyProc, SLSRemoveConnectionNotifyProc,
+    SLSRequestNotificationsForWindows, cid_t,
 };
 use crate::actor;
 use crate::common::collections::{HashMap, HashSet};
@@ -63,16 +65,12 @@ pub fn init(event: CGSEventType) -> i32 {
     let tx = EVENT_CHANNEL.0.clone();
 
     let mut callback_ctxs = CALLBACK_CTXS.write();
-    let callback_ctx = callback_ctxs.entry(event).or_insert_with(|| {
-        Box::new(CallbackContext {
-            event_type: event,
-            sender: tx.clone(),
-        })
-    });
-    callback_ctx.sender = tx;
+    let callback_ctx = callback_ctxs
+        .entry(event)
+        .or_insert_with(|| Box::new(CallbackContext { event_type: event, sender: tx }));
 
     let raw: u32 = event.into();
-    let callback_ctx_ptr = (&mut **callback_ctx as *mut CallbackContext).cast::<c_void>();
+    let callback_ctx_ptr = std::ptr::from_ref(&**callback_ctx).cast_mut().cast::<c_void>();
     let res = unsafe {
         SLSRegisterConnectionNotifyProc(*G_CONNECTION, connection_callback, raw, callback_ctx_ptr)
     };
@@ -85,6 +83,19 @@ pub fn init(event: CGSEventType) -> i32 {
         warn!("failed to register event {} (raw={}), res={}", event, raw, res);
     }
 
+    res
+}
+
+pub fn unsubscribe(event: CGSEventType) -> i32 {
+    let contexts = CALLBACK_CTXS.read();
+    let Some(context) = contexts.get(&event) else { return 0 };
+    let data = std::ptr::from_ref(&**context).cast_mut().cast::<c_void>();
+    let res = unsafe {
+        SLSRemoveConnectionNotifyProc(*G_CONNECTION, connection_callback, event.into(), data)
+    };
+    if res == 0 {
+        REGISTERED_EVENTS.lock().remove(&event);
+    }
     res
 }
 

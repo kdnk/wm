@@ -180,6 +180,14 @@ show_fullscreen_indicator = false
 # .ron files in this folder appear under Layout Files in the menu bar
 layout_folder = "~/.config/wm/layouts"
 
+[settings.ui.window_borders]
+# Draw a click-through rounded border around each visible window.
+enabled = false
+# Width in points (greater than 0 and at most 64). Colors are 0xAARRGGBB.
+width = 4.0
+active_color = 0xff9457eb
+inactive_color = 0xff23262c
+
 [settings.ui.stack_line]
 # native tabs beside stacked windows (defaults to on)
 enabled = true

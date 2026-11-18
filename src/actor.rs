@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-19. Original attribution is preserved in LICENSE.
 use tokio::sync::mpsc::error::SendError;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tracing::Span;
@@ -17,6 +18,7 @@ pub mod raise_manager;
 pub mod reactor;
 pub mod spaces;
 pub mod stack_line;
+pub mod window_borders;
 pub mod window_notify;
 pub mod wm_controller;
 

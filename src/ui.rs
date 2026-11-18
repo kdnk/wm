@@ -4,3 +4,4 @@ pub mod drag_preview;
 pub mod menu_bar;
 pub mod mission_control;
 pub(crate) mod motion;
+pub mod window_borders;

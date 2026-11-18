@@ -18,6 +18,7 @@ mod replay;
 pub mod transaction_manager;
 mod transient_focus;
 mod utils;
+mod window_borders;
 
 #[cfg(test)]
 pub(crate) mod testing;
@@ -523,6 +524,7 @@ pub struct Reactor {
     mouse_raise_token: tokio_util::sync::CancellationToken,
     active_spaces: HashSet<SpaceId>,
     startup_ready: Option<oneshot::Sender<()>>,
+    borders_tx: Option<actor::window_borders::Publisher>,
     pub animation_tx: Option<AnimationSender>,
     viewport_gesture: Option<gesture::ViewportSession>,
     presentations: HashMap<SpaceId, animation::ViewportHandle>,
@@ -545,6 +547,7 @@ impl Reactor {
         broadcast_tx: BroadcastSender,
         menu_tx: menu_bar::Sender,
         stack_line_tx: stack_line::Sender,
+        borders_tx: actor::window_borders::Publisher,
         window_notify: Option<(crate::actor::window_notify::Sender, WindowTxStore)>,
         one_space: bool,
         native_motion_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -561,6 +564,7 @@ impl Reactor {
             one_space,
         );
         reactor.startup_ready = Some(ready_tx);
+        reactor.borders_tx = Some(borders_tx);
         reactor.drag_manager.native_motion_active = native_motion_active;
         reactor.communication_manager.input_tx = Some(input_tx);
         reactor.menu_manager.menu_tx = Some(menu_tx);
@@ -670,6 +674,7 @@ impl Reactor {
             mouse_raise_token: Default::default(),
             active_spaces: HashSet::default(),
             startup_ready: None,
+            borders_tx: None,
             animation_tx: None,
             viewport_gesture: None,
             presentations: HashMap::default(),
@@ -1445,6 +1450,17 @@ impl Reactor {
     fn handle_event_traced(&mut self, event: Event) { self.handle_event_inner(event) }
 
     fn handle_event_inner(&mut self, event: Event) {
+        let border_visibility_changed = matches!(
+            event,
+            Event::WindowServerHidden(_)
+                | Event::WindowServerUnhidden(_)
+                | Event::WindowMinimized(_)
+                | Event::WindowDeminiaturized(_)
+                | Event::SpaceStateChanged(_)
+                | Event::TopologyInvalidated(_)
+                | Event::MissionControlNativeEntered
+                | Event::MissionControlNativeExited
+        );
         let transient_count = self.transient_focus.windows.len();
         self.observe_transient_lifecycle(&event);
         let may_make_ready = matches!(&event, Event::SpaceStateChanged(_));
@@ -1484,6 +1500,9 @@ impl Reactor {
                 }
             }
             Err(error) => warn!(%error, "reactor workflow failed"),
+        }
+        if border_visibility_changed {
+            self.publish_window_borders();
         }
         self.retire_presentations();
         self.drag_manager.sync_motion_gate();
@@ -3206,6 +3225,11 @@ impl Reactor {
         }
         let overview_notified =
             outcome.wm_events.iter().any(|e| matches!(e, WmEvent::OverviewChanged));
+        let border_inventory_changed = outcome.service_config_update.is_some()
+            || outcome.refresh_window_notifications
+            || !outcome.layout_responses.is_empty()
+            || outcome.arrange.passes > 0
+            || !outcome.topology_reassignments.is_empty();
         let overview_inventory_changed = outcome.refresh_window_notifications
             || outcome.broadcast_selection_changed
             || outcome.focused_window_broadcast.is_some()
@@ -3586,6 +3610,9 @@ impl Reactor {
 
                 self.notification_manager.last_sls_notification_ids = ids;
             }
+        }
+        if border_inventory_changed {
+            self.publish_window_borders();
         }
         if outcome.refresh_focus_follows_mouse {
             self.update_focus_follows_mouse_state();

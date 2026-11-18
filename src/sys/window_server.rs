@@ -204,6 +204,22 @@ impl WindowIterator {
     #[inline]
     pub fn bounds(&self) -> CGRect { unsafe { SLSWindowIteratorGetBounds(self.iter) } }
 
+    pub(crate) fn corner_radius(&self) -> Option<f64> {
+        type CornerRadii = unsafe extern "C" fn(*mut CFType) -> *mut CFArray<CFNumber>;
+        static CORNER_RADII: Lazy<Option<CornerRadii>> = Lazy::new(|| {
+            let symbol = NonNull::new(unsafe {
+                dlsym(RTLD_DEFAULT, c"SLSWindowIteratorGetCornerRadii".as_ptr())
+            })?;
+            Some(unsafe {
+                std::mem::transmute::<*mut std::ffi::c_void, CornerRadii>(symbol.as_ptr())
+            })
+        });
+        let radii = NonNull::new(unsafe { (*CORNER_RADII)?(self.iter) })?;
+        // Despite the Get name, SkyLight returns an owned array.
+        let radii = unsafe { CFRetained::from_raw(radii) };
+        radii.get(0)?.as_f64().filter(|r| r.is_finite() && *r > 0.0)
+    }
+
     #[inline]
     pub fn alpha(&self) -> f32 { unsafe { SLSWindowIteratorGetAlpha(self.iter) } }
 
@@ -533,6 +549,18 @@ pub fn window_space(id: WindowServerId) -> Option<crate::sys::screen::SpaceId> {
         .or_else(|| spaces.into_iter().next())
 }
 
+pub(crate) fn move_window_to_space(id: WindowServerId, space: SpaceId) -> Result<(), CGError> {
+    unsafe extern "C" {
+        fn SLSMoveWindowsToManagedSpace(cid: i32, windows: &CFArray<CFNumber>, space: u64);
+    }
+    if window_spaces(id).contains(&space) {
+        return Ok(());
+    }
+    let windows = cf_array_from_ids(&[id]);
+    unsafe { SLSMoveWindowsToManagedSpace(*G_CONNECTION, &windows, space.get()) };
+    window_spaces(id).contains(&space).then_some(()).ok_or(CGError::CannotComplete)
+}
+
 pub fn window_ordered_in(id: WindowServerId) -> Option<bool> {
     #[cfg(test)]
     if let Some(ordered) = TEST_WINDOW_ORDERED_IN_OVERRIDE
@@ -835,7 +863,16 @@ pub fn window_level(wid: u32) -> Option<NSWindowLevel> {
     Some(query.advance()?.level() as NSWindowLevel)
 }
 
-pub fn window_sub_level(wid: u32) -> c_int { unsafe { mach_get_window_sub_level(wid) } }
+pub fn window_sub_level(wid: u32) -> c_int {
+    unsafe extern "C" {
+        fn SLSGetWindowSubLevel(cid: i32, wid: u32) -> i32;
+    }
+    if objc2_core_graphics::CGPreflightScreenCaptureAccess() {
+        unsafe { SLSGetWindowSubLevel(*G_CONNECTION, wid) }
+    } else {
+        unsafe { mach_get_window_sub_level(wid) }
+    }
+}
 
 /// Returns the typed Skylight tags exposed by a window-query iterator.
 fn iterator_window_tags(iterator: *mut CFType) -> SLSWindowTags {

@@ -12,6 +12,26 @@ use crate::layout_engine::{LayoutCommand, ResizeOrientation};
 use crate::sys::hotkey::Modifiers;
 
 #[test]
+fn window_borders_are_opt_in_and_accept_argb_colors() {
+    let section = "[settings.ui.window_borders]";
+    let defaults = Config::parse("[settings]\n[keys]").unwrap();
+    assert!(!defaults.settings.ui.window_borders.enabled);
+    let cfg = Config::parse(&format!(
+        "{section}\nenabled = true\nactive_color = 0x809457eb\n[keys]"
+    ))
+    .unwrap();
+    let border = cfg.settings.ui.window_borders;
+    assert!(border.enabled);
+    assert_eq!(border.active_color, 0x809457eb);
+    assert_eq!(border.width, 4.0);
+    for width in ["0.0", "-1.0", "65.0", "nan", "inf"] {
+        let text = format!("{section}\nwidth = {width}\n[keys]");
+        let error = ConfigDocument::load(&text).err().expect("invalid border width");
+        assert!(error.to_string().contains("window_borders.width"), "{error}");
+    }
+}
+
+#[test]
 fn workspace_swipe_axis_defaults_to_horizontal_and_round_trips() {
     let defaults: GestureSettings = toml::from_str("").unwrap();
     assert_eq!(defaults.swipe_axis, SwipeAxis::Horizontal);

@@ -157,6 +157,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Wm."
     let (menu_tx, menu_rx) = wm::actor::channel();
     let (stack_line_tx, stack_line_rx) = wm::actor::channel();
     let (wnd_tx, wnd_rx) = wm::actor::channel();
+    let (borders_tx, borders_rx) = wm::actor::window_borders::channel();
     let window_tx_store = WindowTxStore::new();
     let native_motion_active: std::sync::Arc<std::sync::atomic::AtomicBool> = Default::default();
     let (reactor, startup_ready) = Reactor::spawn(
@@ -167,6 +168,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Wm."
         broadcast_tx.clone(),
         menu_tx.clone(),
         stack_line_tx.clone(),
+        borders_tx.clone(),
         Some((wnd_tx.clone(), window_tx_store.clone())),
         opt.one,
         native_motion_active.clone(),
@@ -259,9 +261,8 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Wm."
             CGSEventType::Known(KnownCGSEvent::WindowManagerGlobalFrontConnectionChanged),
             CGSEventType::Known(KnownCGSEvent::SpaceCreated),
             CGSEventType::Known(KnownCGSEvent::SpaceDestroyed),
-            //CGSEventType::Known(KnownCGSEvent::WindowMoved),
-            //CGSEventType::Known(KnownCGSEvent::WindowResized),
         ],
+        borders_tx,
         Some(window_tx_store.clone()),
     );
 
@@ -344,6 +345,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Wm."
             supervise("spaces", spaces_actor.run()),
             supervise("menu", menu.run()),
             supervise("stack_line", stack_line.run()),
+            supervise("window_borders", borders_rx.run(wnd_tx)),
             supervise("window_notify", wn_actor.run()),
             supervise("mc_native", mission_control_native.run()),
             async move {
