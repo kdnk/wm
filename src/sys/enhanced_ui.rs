@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-19. Original attribution is preserved in LICENSE.
 use objc2_application_services::AXError;
 
 use crate::sys::axuielement::{AXUIElement, Error as AxError};
@@ -25,7 +26,7 @@ impl EnhancedUi {
         }
 
         match app.bool_attribute(ATTRIBUTE) {
-            Ok(true) => match app.set_bool_attribute(ATTRIBUTE, false) {
+            Ok(true) => match set_enhanced_ui(app, false) {
                 Ok(()) => self.restore = true,
                 Err(err) if is_absent(&err) => self.absent = true,
                 Err(_) => {}
@@ -57,7 +58,7 @@ impl EnhancedUi {
             return;
         }
 
-        match app.set_bool_attribute(ATTRIBUTE, true) {
+        match set_enhanced_ui(app, true) {
             Ok(()) => self.restore = false,
             Err(err) if is_absent(&err) => {
                 self.restore = false;
@@ -65,6 +66,18 @@ impl EnhancedUi {
             }
             Err(_) => {}
         }
+    }
+}
+
+fn set_enhanced_ui(app: &AXUIElement, enabled: bool) -> Result<(), AxError> {
+    match app.set_bool_attribute(ATTRIBUTE, enabled) {
+        // AppKit can apply the change and still return NotImplemented.
+        Err(AxError::Ax(AXError::NotImplemented))
+            if app.bool_attribute(ATTRIBUTE).ok() == Some(enabled) =>
+        {
+            Ok(())
+        }
+        result => result,
     }
 }
 

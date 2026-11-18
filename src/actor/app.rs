@@ -1341,6 +1341,18 @@ impl State {
         window.frame_source = source;
         // Release reapplies this frame, including position-only viewport writes.
         window.last_animation_frame = Some((frame, authority.clone()));
+        let mut suppress_native_animation = || {
+            if !window.animation_eui_held {
+                enhanced_ui.acquire(app);
+                window.animation_eui_held = true;
+            }
+        };
+        if window.is_animating
+            && source == FrameSource::Viewport
+            && frame.origin.x != window.last_known_frame.origin.x
+        {
+            suppress_native_animation();
+        }
         write_interactive_frame(
             &AuthorizedFrameTarget {
                 target: &window.elem,
@@ -1350,12 +1362,7 @@ impl State {
             frame,
             set_size,
             source,
-            || {
-                if !window.animation_eui_held {
-                    enhanced_ui.acquire(app);
-                    window.animation_eui_held = true;
-                }
-            },
+            suppress_native_animation,
         );
         Ok(())
     }
