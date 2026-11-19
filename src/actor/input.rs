@@ -1081,10 +1081,11 @@ impl Input {
                     )
                 {
                     state.captured_button = Some(button);
+                    let point = CGEvent::location(Some(event));
                     self.events_tx.send(Event::ModifierMouseDown {
                         button,
-                        point: CGEvent::location(Some(event)),
-                        window: window_server::window_under_cursor(),
+                        point,
+                        window: window_server::get_window_at_point(point),
                         action,
                     });
                     return false;
