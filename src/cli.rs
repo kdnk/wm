@@ -1262,6 +1262,22 @@ mod tests {
     }
 
     #[test]
+    fn negative_resize_and_scroll_arguments_keep_their_sign() {
+        let resize =
+            Cli::try_parse_from(["wm", "execute", "window", "resize-by", "--amount", "-0.10"])
+                .unwrap();
+        assert!(matches!(resize.command, Some(Commands::Execute {
+            command: ExecuteCommands::Window { window_cmd: WindowCommands::ResizeBy { amount } },
+        }) if amount == -0.1));
+
+        let scroll = Cli::try_parse_from(["wm", "execute", "layout", "scroll-strip", "-0.25"])
+            .unwrap();
+        assert!(matches!(scroll.command, Some(Commands::Execute {
+            command: ExecuteCommands::Layout { layout_cmd: LayoutCommands::ScrollStrip { delta } },
+        }) if delta == -0.25));
+    }
+
+    #[test]
     fn execute_requests_use_typed_protocol_commands() {
         let request = build_execute_request(ExecuteCommands::Window {
             window_cmd: WindowCommands::Next,
