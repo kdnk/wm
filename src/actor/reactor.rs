@@ -1947,8 +1947,11 @@ impl Reactor {
                         .filter(|wid| wid.pid == pid && self.can_follow_unmanaged_focus(*wid));
                     let activation_window = if self.state.windows.has_pending_window_for_pid(pid) {
                         None
+                    } else if let Some(dialog) = native_dialog {
+                        // A windowless app switch can leave the previous native picker cached.
+                        (self.last_unmanaged_focus == Some(dialog)).then_some(dialog)
                     } else {
-                        native_dialog.or_else(|| self.main_window_tracker.app_main_window(pid))
+                        self.main_window_tracker.app_main_window(pid)
                     };
                     outcome.absorb(self.auto_switch_to_window_workspace(activation_window));
                     outcome.focused_window = activation_window;
@@ -1961,6 +1964,9 @@ impl Reactor {
                         && self.is_window_on_active_space(window)
                         && !self.focus_was_pointer_driven(window)
                     {
+                        if self.can_follow_unmanaged_focus(window) {
+                            self.last_unmanaged_focus = Some(window);
+                        }
                         self.workspace_switch_manager.pending_focus_mouse_warp = Some(window);
                     }
                 } else {
@@ -1972,9 +1978,11 @@ impl Reactor {
                 self.clear_menu_state_for_pid(pid);
             }
             Event::ApplicationGloballyDeactivated(pid) => {
+                self.last_unmanaged_focus = self.last_unmanaged_focus.filter(|wid| wid.pid != pid);
                 self.clear_menu_state_for_pid(pid);
             }
             Event::ApplicationGloballyActivated(pid) => {
+                self.last_unmanaged_focus = self.last_unmanaged_focus.filter(|wid| wid.pid == pid);
                 if duplicate_global_activation {
                     trace!(pid, "Ignoring duplicate global application activation");
                     return Ok(EventOutcome::focus_changed(None, should_update_notifications));
