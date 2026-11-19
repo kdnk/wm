@@ -419,6 +419,7 @@ pub enum Event {
     ModifierMouseDown {
         button: crate::actor::drag::MouseButton,
         point: CGPoint,
+        window: Option<WindowServerId>,
         action: crate::common::config::MouseAction,
     },
     #[serde(skip)]
@@ -2544,10 +2545,10 @@ impl Reactor {
             Event::DragCancel => {
                 return Ok(interaction_workflow::handle_cancel(&mut self.drag_manager));
             }
-            Event::ModifierMouseDown { button, point, action } => {
+            Event::ModifierMouseDown { button, point, window, action } => {
                 let session_id = self.drag_manager.actor.await_modifier(button, point, action);
-                let source = self
-                    .window_id_under_cursor()
+                let source = window
+                    .and_then(|wsid| self.state.windows.tracked_window_id(wsid))
                     .filter(|window| self.state.windows.is_admitted(*window));
                 let Some(window) = source else {
                     let _ = self.drag_manager.actor.resolve_start(
@@ -4698,7 +4699,7 @@ impl Reactor {
             .filter(|_| self.is_space_active(target))
             .map(|screen| screen.frame);
         let engine = &self.layout_manager.layout_engine;
-        let mut frame = self
+        let frame = self
             .state
             .windows
             .workspace_for_window(window)
@@ -4710,22 +4711,7 @@ impl Reactor {
                     self.frame_on_display(window, frame, source_frame, screen)
                 })
             });
-        if screen.is_some()
-            && self.layout_manager.layout_engine.workspaces().is_window_in_active_workspace(
-                &self.state.windows,
-                target,
-                window,
-            )
-            && !self.layout_manager.layout_engine.is_window_floating(window)
-        {
-            // Move directly into the destination tile. A source-sized placement
-            // followed immediately by a resize can lose one AX size component.
-            frame = LayoutManager::calculate_layout(self, Some(target))
-                .into_iter()
-                .flat_map(|(_, layout)| layout)
-                .find_map(|(wid, frame)| (wid == window).then_some(frame))
-                .or(frame);
-        }
+        let frame = self.destination_tile_frame(window, target).or(frame);
         command_workflow::request_window_transfer(
             &mut self.state,
             &mut self.layout_manager,
@@ -4734,6 +4720,23 @@ impl Reactor {
             frame,
             screen.is_some(),
         )
+    }
+
+    fn destination_tile_frame(&mut self, window: WindowId, target: SpaceId) -> Option<CGRect> {
+        let engine = &self.layout_manager.layout_engine;
+        if engine.is_window_floating(window)
+            || !engine.workspaces().is_window_in_active_workspace(
+                &self.state.windows,
+                target,
+                window,
+            )
+        {
+            return None;
+        }
+        LayoutManager::calculate_layout(self, Some(target))
+            .into_iter()
+            .flat_map(|(_, layout)| layout)
+            .find_map(|(wid, frame)| (wid == window).then_some(frame))
     }
 
     fn advance_workspace_transfers(&mut self) -> EventOutcome {
@@ -4770,17 +4773,23 @@ impl Reactor {
                         self.space_state.revision,
                         observed,
                     );
-                } else if let Some(operation) = self.state.windows.advance_transfer(
-                    window,
-                    self.space_state.revision,
-                    available,
-                ) && let Some(frame) = operation.requested_frame
+                } else if self.drag_manager.actor.source().is_none_or(|drag| drag.window != window)
+                    && let Some(operation) = self.state.windows.advance_transfer(
+                        window,
+                        self.space_state.revision,
+                        available,
+                    )
+                    && let Some(frame) = operation.requested_frame
                 {
-                    if let Some(screen) = self.space_state.screen_by_space(target) {
-                        // Intent recorded while unavailable may describe another display.
-                        let source = self.screen_for_point(frame.mid()).map(|source| source.frame);
-                        let frame = if was_unavailable {
-                            self.frame_on_display(window, frame, source, screen.frame)
+                    if let Some(screen) = self.space_state.screen_by_space(target).map(|s| s.frame)
+                    {
+                        let frame = if let Some(tile) = self.destination_tile_frame(window, target)
+                        {
+                            tile
+                        } else if was_unavailable {
+                            // Intent recorded while unavailable may describe another display.
+                            let source = self.screen_for_point(frame.mid()).map(|s| s.frame);
+                            self.frame_on_display(window, frame, source, screen)
                         } else {
                             frame
                         };
@@ -7121,7 +7130,7 @@ impl Reactor {
     }
 
     fn pending_display_move_frame(
-        &self,
+        &mut self,
         window: WindowId,
         assigned: SpaceId,
         selector: &DisplaySelector,
@@ -7134,13 +7143,29 @@ impl Reactor {
             return None;
         }
         let frame = transfer.requested_frame?;
-        let native = window_server::window_space(record.window_server_id()?)?;
+        let wsid = record.window_server_id()?;
+        let mut visible_spaces = window_server::window_spaces(wsid)
+            .into_iter()
+            .filter(|&space| self.space_state.screen_by_space(space).is_some());
+        let native = match (visible_spaces.next(), visible_spaces.next()) {
+            (Some(space), None) => {
+                self.state.windows.set_window_server_space(wsid, Some(space));
+                space
+            }
+            // Transitions can report neither display or both, in either order.
+            _ => self.state.windows.window_server_space(wsid)?,
+        };
         if native == assigned {
             return None;
         }
         let origin = self.space_state.screen_by_space(native)?.frame.mid();
         let target = self.screen_for_selector(selector, Some(origin))?.space?;
-        (target == assigned).then_some(frame)
+        if target != assigned {
+            return None;
+        }
+        let frame = self.destination_tile_frame(window, target).unwrap_or(frame);
+        self.state.windows.request_transfer(window, Some(frame), target, true);
+        Some(frame)
     }
 
     fn move_window_to_display(

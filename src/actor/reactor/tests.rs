@@ -2359,6 +2359,7 @@ fn dragging_on_the_original_display_supersedes_an_unapplied_keyboard_move() {
             reactor.handle_event(Event::ModifierMouseDown {
                 button: MouseButton::Left,
                 point: frame.mid(),
+                window: Some(wsid),
                 action: crate::common::config::MouseAction::Move,
             });
             reactor.handle_event(Event::DragMotion(DragMotion {
@@ -2451,6 +2452,7 @@ fn modifier_cross_display_drop_follows_the_pointer_across_the_edge() {
     reactor.handle_event(Event::ModifierMouseDown {
         button: MouseButton::Left,
         point: anchor,
+        window: Some(wsid),
         action: crate::common::config::MouseAction::Move,
     });
     let pointer = CGPoint::new(shared_right().min().x + 1., anchor.y);
@@ -2505,6 +2507,7 @@ fn floating_cross_display_drop_preserves_the_released_frame() {
         reactor.handle_event(Event::ModifierMouseDown {
             button: MouseButton::Left,
             point: anchor,
+            window: Some(wsid),
             action: crate::common::config::MouseAction::Move,
         });
         reactor.handle_event(Event::DragMotion(DragMotion { point: pointer }));
@@ -5935,13 +5938,12 @@ fn native_transfer_retries_leave_the_window_being_dragged_under_pointer_control(
         let outcome = reactor.move_window_to_display(window, left, right);
         reactor.apply_event_outcome(outcome);
     }
-    window_server::set_window_under_cursor_override(Some(Some(dragged_wsid)));
     reactor.handle_event(Event::ModifierMouseDown {
         button: MouseButton::Left,
         point: shared_left().mid(),
+        window: Some(dragged_wsid),
         action: crate::common::config::MouseAction::Move,
     });
-    window_server::set_window_under_cursor_override(None);
     assert!(reactor.is_in_drag());
     apps.requests();
     reactor.handle_event(snapshot(left));

@@ -3991,13 +3991,12 @@ mod tests {
         let (sender, _receiver) = AnimationSender::channel();
         sender.control.lock().frames.insert(wid, (handle, presented));
         reactor.animation_tx = Some(sender);
-        crate::sys::window_server::set_window_under_cursor_override(Some(Some(wsid)));
         let start = reactor.dispatch_workflow(Event::ModifierMouseDown {
             button: MouseButton::Left,
             point: presented.mid(),
+            window: Some(wsid),
             action: MouseAction::Move,
         });
-        crate::sys::window_server::set_window_under_cursor_override(None);
         reactor.apply_event_outcome(start.unwrap());
         collect_requests(&mut rx);
         let moved = reactor

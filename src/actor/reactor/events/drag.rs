@@ -98,8 +98,12 @@ pub fn handle_mouse_up(
         drag.release_preview();
     }
 
-    if commit.source.origin_space != payload.final_space {
-        needs_layout = true;
+    let moved_during_transfer = commit.source.origin_frame != commit.source.last_frame
+        && state
+            .windows
+            .record(window)
+            .is_some_and(|record| record.pending_transfer().is_some());
+    if commit.source.origin_space != payload.final_space || moved_during_transfer {
         let Some(space) = payload.final_space.filter(|_| state.windows.is_admitted(window)) else {
             if commit.source.origin_space.is_some() {
                 outcome = outcome.with_layout_event(LayoutEvent::WindowRemoved(window));
@@ -137,15 +141,22 @@ pub fn handle_mouse_up(
             }
         }
         state.windows.cancel_window_transfer(window);
-        if commit.kind == crate::actor::drag::DragKind::ModifierMove
-            && !engine.is_window_floating(window)
-        {
-            outcome.absorb(reactor.request_window_transfer(window, space, None));
-            return Ok(outcome.with_arrange_passes(1));
-        }
-        if let Some(server) = state.windows.window(window).and_then(|window| window.info.sys_id) {
-            state.windows.observe_native_space(server, space, true);
-        }
+        let placement = if engine.is_window_floating(window) {
+            state.windows.clear_floating_display_geometry(window);
+            super::command::request_window_transfer(
+                state,
+                layout,
+                window,
+                space,
+                Some(commit.source.last_frame),
+                true,
+            )
+        } else {
+            reactor.request_window_transfer(window, space, None)
+        };
+        outcome.absorb(placement);
+        reactor.request_space_snapshot();
+        return Ok(outcome.with_arrange_passes(1));
     }
     if let Some(space) = payload.final_space
         && layout.layout_engine.is_window_floating(window)

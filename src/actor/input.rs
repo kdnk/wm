@@ -129,7 +129,6 @@ pub struct Input {
     horizontal_mouse_warp: Cell<Option<HorizontalMouseWarp>>,
     warp_screens: RefCell<Vec<CGRect>>,
     mouse_focus_publisher: reactor::MouseFocusPublisher,
-    drag_motion_publisher: crate::actor::drag::DragMotionPublisher,
     native_motion_active: Arc<AtomicBool>,
     gesture_control: super::gesture::Control,
     gesture_filter: RefCell<gesture::Filter>,
@@ -172,6 +171,7 @@ struct State {
     mouse_features_enabled: bool,
     mouse_settings: DragDropSettings,
     captured_button: Option<crate::actor::drag::MouseButton>,
+    drag_motion_publisher: Option<crate::actor::drag::DragMotionPublisher>,
     gesture_settings: super::gesture::Settings,
 }
 
@@ -195,6 +195,7 @@ impl Default for State {
             mouse_features_enabled: false,
             mouse_settings: DragDropSettings::default(),
             captured_button: None,
+            drag_motion_publisher: None,
             gesture_settings: super::gesture::Settings::new(&Config::default()),
         }
     }
@@ -414,7 +415,6 @@ impl Input {
             horizontal_mouse_warp: Cell::new(config.settings.horizontal_mouse_warp),
             warp_screens: RefCell::new(Vec::new()),
             mouse_focus_publisher: reactor::MouseFocusPublisher::default(),
-            drag_motion_publisher: crate::actor::drag::DragMotionPublisher::default(),
             native_motion_active,
             gesture_control,
             gesture_filter: RefCell::new(gesture::Filter::default()),
@@ -656,9 +656,7 @@ impl Input {
                 state.converter = converter;
             }
             Request::SetEventProcessing(enabled) => {
-                if state.captured_button.take().is_some() {
-                    self.events_tx.send(Event::DragCancel);
-                }
+                self.cancel_captured_drag(&mut state);
                 state.event_processing_enabled = enabled;
                 if enabled {
                     self.reset_mouse_move_sample_gate();
@@ -696,12 +694,10 @@ impl Input {
                 if *self.binding_mode_specs.borrow() != new_config.binding_mode_specs {
                     self.install_binding_specs(new_config.binding_mode_specs.clone());
                 }
-                let cancel_captured_drag = state.captured_button.is_some()
-                    && (!new_config.settings.drag_drop.enabled
-                        || new_config.settings.drag_drop != state.mouse_settings);
-                if cancel_captured_drag {
-                    state.captured_button = None;
-                    self.events_tx.send(Event::DragCancel);
+                if !new_config.settings.drag_drop.enabled
+                    || new_config.settings.drag_drop != state.mouse_settings
+                {
+                    self.cancel_captured_drag(&mut state);
                 }
                 state.gesture_settings = super::gesture::Settings::new(&new_config);
                 let mouse_hides_on_focus = new_config.settings.mouse_hides_on_focus;
@@ -812,15 +808,20 @@ impl Input {
         self.deferred_hover.take();
     }
 
+    fn cancel_captured_drag(&self, state: &mut State) {
+        if state.captured_button.take().is_some() {
+            state.drag_motion_publisher = None;
+            self.events_tx.send(Event::DragCancel);
+        }
+    }
+
     fn reconcile_after_tap_reenabled(&self) {
         // A release may have been lost; do not activate from a later unrelated event.
         self.overview_hotkey.set(None);
         self.reset_mouse_move_sample_gate();
         let mut state = self.state.borrow_mut();
         self.reset_gestures();
-        if state.captured_button.take().is_some() {
-            self.events_tx.send(Event::DragCancel);
-        }
+        self.cancel_captured_drag(&mut state);
         let flags = CGEventSource::flags_state(CGEventSourceStateID::HIDSystemState);
         debug!(?flags, "Event tap was re-enabled; reconciling pressed keys");
         state.reconcile_after_event_tap_reenabled(flags);
@@ -1034,9 +1035,11 @@ impl Input {
                 let point = self
                     .maybe_horizontal_mouse_warp(event)
                     .unwrap_or_else(|| CGEvent::location(Some(event)));
-                let captured = self.state.borrow().captured_button == Some(button);
+                let mut state = self.state.borrow_mut();
+                let captured = state.captured_button == Some(button);
                 if captured || self.native_motion_active.load(Ordering::Acquire) {
-                    let publisher = &self.drag_motion_publisher;
+                    let publisher =
+                        state.drag_motion_publisher.get_or_insert_with(Default::default);
                     if publisher.publish(crate::actor::drag::DragMotion { point }) {
                         self.events_tx.send(Event::DragMotionPending(publisher.clone()));
                     }
@@ -1081,6 +1084,7 @@ impl Input {
                     self.events_tx.send(Event::ModifierMouseDown {
                         button,
                         point: CGEvent::location(Some(event)),
+                        window: window_server::window_under_cursor(),
                         action,
                     });
                     return false;
@@ -1094,6 +1098,7 @@ impl Input {
                 true
             }
             CGEventType::LeftMouseUp | CGEventType::RightMouseUp => {
+                self.state.borrow_mut().drag_motion_publisher = None;
                 if event_type == CGEventType::LeftMouseUp && self.mission_control_active.get() {
                     self.send_overview(super::mission_control::Event::Input(
                         super::mission_control::Input::PointerUp(CGEvent::location(Some(event))),
@@ -3263,7 +3268,7 @@ mod tests {
                 objc2_core_graphics::CGMouseButton::Right,
             ),
         ] {
-            let (input, _, _) = input();
+            let (input, _, mut events) = input();
             input.state.borrow_mut().captured_button = Some(button);
             let event =
                 CGEvent::new_mouse_event(None, event_type, CGPoint::new(99.0, 20.0), cg_button)
@@ -3272,7 +3277,10 @@ mod tests {
             // Horizontal warping rewrites the event before the drag publisher sees it.
             CGEvent::set_location(Some(&event), target);
             assert!(!input.on_event(event_type, &event, None));
-            assert_eq!(input.drag_motion_publisher.take_latest().unwrap().point, target);
+            let Event::DragMotionPending(publisher) = events.try_recv().unwrap().1 else {
+                panic!("expected drag motion");
+            };
+            assert_eq!(publisher.take_latest().unwrap().point, target);
         }
     }
 
@@ -3291,11 +3299,10 @@ mod tests {
 
         input.state.borrow_mut().captured_button = Some(crate::actor::drag::MouseButton::Left);
         assert!(!input.on_event(CGEventType::LeftMouseDragged, &event, None));
-        assert!(matches!(
-            events_rx.try_recv().unwrap().1,
-            Event::DragMotionPending(_)
-        ));
-        input.drag_motion_publisher.take_latest();
+        let Event::DragMotionPending(publisher) = events_rx.try_recv().unwrap().1 else {
+            panic!("expected captured drag motion");
+        };
+        publisher.take_latest();
 
         input.state.borrow_mut().captured_button = None;
         input.native_motion_active.store(true, Ordering::Release);
