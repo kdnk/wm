@@ -245,7 +245,7 @@ enum WindowCommands {
     ///   wm execute window resize-by --amount 0.05    # grow by 5%
     ///   wm execute window resize-by --amount -0.10   # shrink by 10%
     ResizeBy {
-        #[arg(long)]
+        #[arg(long, allow_negative_numbers = true)]
         amount: f64,
     },
     /// Close a window as if Command-W was pressed
@@ -343,7 +343,10 @@ enum LayoutCommands {
     /// Swap two windows by window id (`WindowId { pid: ..., idx: ... }`)
     SwapWindows { a: String, b: String },
     /// Scroll the strip by a normalized delta (scrolling layout only)
-    ScrollStrip { delta: f64 },
+    ScrollStrip {
+        #[arg(allow_negative_numbers = true)]
+        delta: f64,
+    },
     /// Snap the strip to the nearest column boundary (scrolling layout only)
     SnapStrip,
     /// Switch to the next preset column width (scrolling layout only).
@@ -1270,8 +1273,8 @@ mod tests {
             command: ExecuteCommands::Window { window_cmd: WindowCommands::ResizeBy { amount } },
         }) if amount == -0.1));
 
-        let scroll = Cli::try_parse_from(["wm", "execute", "layout", "scroll-strip", "-0.25"])
-            .unwrap();
+        let scroll =
+            Cli::try_parse_from(["wm", "execute", "layout", "scroll-strip", "-0.25"]).unwrap();
         assert!(matches!(scroll.command, Some(Commands::Execute {
             command: ExecuteCommands::Layout { layout_cmd: LayoutCommands::ScrollStrip { delta } },
         }) if delta == -0.25));
