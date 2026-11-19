@@ -1112,12 +1112,15 @@ impl Input {
                     crate::actor::drag::MouseButton::Right
                 };
                 let captured = self.state.borrow().captured_button == Some(button);
+                if captured {
+                    self.events_tx.send(Event::DragMotion(crate::actor::drag::DragMotion {
+                        point: CGEvent::location(Some(event)),
+                    }));
+                    self.state.borrow_mut().captured_button = None;
+                }
                 // Native AX moves/resizes acquire drag state even with drag/drop disabled.
                 // Always deliver releases so that state cannot keep layout writes blocked.
                 self.events_tx.send(Event::MouseUp(button));
-                if captured {
-                    self.state.borrow_mut().captured_button = None;
-                }
                 !captured
             }
             _ => true,

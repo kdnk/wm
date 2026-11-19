@@ -2510,18 +2510,24 @@ impl Reactor {
                 return Ok(EventOutcome::default());
             }
             Event::DragMotion(motion) => {
+                if self.drag_manager.actor.modifier_pointer() == Some(motion.point) {
+                    return Ok(EventOutcome::no_change());
+                }
                 let mut intent_changed = self.drag_manager.actor.motion(motion);
                 if self.drag_manager.actor.kind()
                     == Some(crate::actor::drag::DragKind::ModifierMove)
                 {
-                    let current_space =
-                        self.screen_for_point(motion.point)
-                            .and_then(|screen| screen.space)
-                            .or_else(|| {
-                                self.drag_manager.actor.source().and_then(|source| {
-                                    self.best_space_for_frame(&source.last_frame)
-                                })
-                            });
+                    let current_space = self.drag_manager.actor.source().and_then(|source| {
+                        // A tile joins the layout under the pointer. A floating window
+                        // stays at the released frame, even if it straddles the boundary.
+                        if source.tiled
+                            && let Some(space) =
+                                self.screen_for_point(motion.point).and_then(|s| s.space)
+                        {
+                            return Some(space);
+                        }
+                        self.best_space_for_frame(&source.last_frame)
+                    });
                     if self.drag_manager.actor.update_current_space(current_space) {
                         intent_changed |= self.drag_manager.actor.motion(motion);
                     }
@@ -2744,30 +2750,20 @@ impl Reactor {
             }
             Event::MouseUp(button) => {
                 let final_space = self.drag_manager.actor.source().and_then(|source| {
-                    let frame_space = || self.best_space_for_frame(&source.last_frame);
-                    if self.drag_manager.actor.kind()
-                        == Some(crate::actor::drag::DragKind::ModifierMove)
-                    {
-                        frame_space()
-                            .or(source.current_space)
-                            .or_else(|| self.best_space_for_window_id(source.window))
-                    } else {
-                        source
-                            .current_space
-                            .or_else(frame_space)
-                            .or_else(|| self.best_space_for_window_id(source.window))
-                    }
-                });
-                let focused = self.window_id_under_cursor().and_then(|window| {
-                    self.best_space_for_window_id(window).map(|space| (space, window))
+                    source
+                        .current_space
+                        .or_else(|| self.best_space_for_frame(&source.last_frame))
+                        .or_else(|| self.best_space_for_window_id(source.window))
                 });
                 let mut outcome = interaction_workflow::handle_mouse_up(
-                    &mut self.state,
-                    &mut self.layout_manager,
-                    &mut self.drag_manager,
+                    self,
                     interaction_workflow::MouseUpPayload { button, final_space },
                 )?;
-                if let Some((space, window)) = focused {
+                if let Some(window) = self.window_id_under_cursor()
+                    && let Some(space) = self
+                        .assigned_space_for_window_id(window)
+                        .or_else(|| self.best_space_for_window_id(window))
+                {
                     outcome = outcome.with_layout_event(LayoutEvent::WindowFocused(space, window));
                 }
                 return Ok(outcome);
@@ -3168,6 +3164,12 @@ impl Reactor {
                     );
                     return Ok(EventOutcome::no_change());
                 };
+                if let Some(frame) =
+                    self.pending_display_move_frame(window, source_space, &selector)
+                {
+                    return Ok(EventOutcome::no_change()
+                        .with_pre_layout_window_frame_write(window, frame, true));
+                }
                 let origin = self
                     .space_state
                     .screen_by_space(source_space)
@@ -7116,6 +7118,29 @@ impl Reactor {
         }
         let outcome = self.move_window_to_display(window, space, target_screen.space.unwrap());
         self.apply_event_outcome(outcome);
+    }
+
+    fn pending_display_move_frame(
+        &self,
+        window: WindowId,
+        assigned: SpaceId,
+        selector: &DisplaySelector,
+    ) -> Option<CGRect> {
+        let record = self.state.windows.record(window)?;
+        let transfer = record.pending_transfer()?;
+        if transfer.requested_space != assigned
+            || transfer.status == crate::model::window_store::TransferStatus::Unavailable
+        {
+            return None;
+        }
+        let frame = transfer.requested_frame?;
+        let native = window_server::window_space(record.window_server_id()?)?;
+        if native == assigned {
+            return None;
+        }
+        let origin = self.space_state.screen_by_space(native)?.frame.mid();
+        let target = self.screen_for_selector(selector, Some(origin))?.space?;
+        (target == assigned).then_some(frame)
     }
 
     fn move_window_to_display(

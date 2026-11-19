@@ -1,9 +1,9 @@
 // Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
-use tracing::{trace, warn};
+use tracing::trace;
 
-use crate::actor::reactor::LayoutEvent;
 use crate::actor::reactor::events::EventOutcome;
 use crate::actor::reactor::managers::{DragManager, LayoutManager};
+use crate::actor::reactor::{LayoutEvent, Reactor};
 use crate::model::WmState;
 use crate::sys::screen::SpaceId;
 
@@ -62,11 +62,12 @@ pub fn handle_cancel(drag: &mut DragManager) -> EventOutcome {
 }
 
 pub fn handle_mouse_up(
-    state: &mut WmState,
-    layout: &mut LayoutManager,
-    drag: &mut DragManager,
+    reactor: &mut Reactor,
     payload: MouseUpPayload,
 ) -> anyhow::Result<EventOutcome> {
+    let state = &mut reactor.state;
+    let layout = &mut reactor.layout_manager;
+    let drag = &mut reactor.drag_manager;
     let mut outcome = EventOutcome::layout_changed(false);
     let Some(commit) = drag.actor.finish(payload.button) else {
         return Ok(outcome);
@@ -98,39 +99,58 @@ pub fn handle_mouse_up(
     }
 
     if commit.source.origin_space != payload.final_space {
-        if commit.source.origin_space.is_some() {
-            outcome = outcome.with_layout_event(LayoutEvent::WindowRemoved(window));
-        }
-        if let Some(space) = payload.final_space
-            && state.windows.is_admitted(window)
-        {
-            if let Some(server_id) =
-                state.windows.window(window).and_then(|window| window.info.sys_id)
-            {
-                state.windows.observe_native_space(server_id, space, true);
-            }
-            if let Some(workspace) = layout.layout_engine.workspaces().active_workspace(space)
-                && !layout.layout_engine.workspaces_mut().assign_window_to_workspace(
-                    &mut state.windows,
-                    space,
-                    window,
-                    workspace,
-                )
-            {
-                warn!(?window, ?workspace, "failed to assign dragged window");
-            }
-            outcome = outcome.with_layout_event(LayoutEvent::WindowAdded(space, window));
-        }
         needs_layout = true;
+        let Some(space) = payload.final_space.filter(|_| state.windows.is_admitted(window)) else {
+            if commit.source.origin_space.is_some() {
+                outcome = outcome.with_layout_event(LayoutEvent::WindowRemoved(window));
+            }
+            return Ok(outcome.with_arrange_passes(1));
+        };
+        let Some(screen) = reactor.space_state.screen_by_space(space) else {
+            return Ok(outcome.with_arrange_passes(1));
+        };
+        let engine = &mut layout.layout_engine;
+        if engine.workspaces().active_workspace(space).is_none() {
+            return Ok(outcome.with_arrange_passes(1));
+        }
+        let source = state
+            .windows
+            .workspace_for_window(window)
+            .and_then(|workspace| engine.workspaces().workspace_space(workspace))
+            .or(commit.source.origin_space);
+        if let Some(source) = source {
+            if !engine
+                .move_window_to_space(&mut state.windows, source, space, screen.frame.size, window)
+                .changed
+            {
+                return Ok(outcome.with_arrange_passes(1));
+            }
+        } else {
+            let _ =
+                engine.handle_event(&mut state.windows, LayoutEvent::WindowAdded(space, window));
+            if engine
+                .workspaces()
+                .workspace_for_window(&state.windows, space, window)
+                .is_none()
+            {
+                return Ok(outcome.with_arrange_passes(1));
+            }
+        }
+        state.windows.cancel_window_transfer(window);
+        if commit.kind == crate::actor::drag::DragKind::ModifierMove
+            && !engine.is_window_floating(window)
+        {
+            outcome.absorb(reactor.request_window_transfer(window, space, None));
+            return Ok(outcome.with_arrange_passes(1));
+        }
+        if let Some(server) = state.windows.window(window).and_then(|window| window.info.sys_id) {
+            state.windows.observe_native_space(server, space, true);
+        }
     }
-
     if let Some(space) = payload.final_space
         && layout.layout_engine.is_window_floating(window)
     {
         state.windows.clear_floating_display_geometry(window);
-        if commit.source.origin_space != payload.final_space {
-            layout.layout_engine.remove_floating_position(window);
-        }
         if let Some(workspace) = layout
             .layout_engine
             .workspaces()
@@ -202,15 +222,10 @@ mod tests {
             reactor.drag_manager.actor.target().unwrap().intent.window,
             target
         );
-        handle_mouse_up(
-            &mut reactor.state,
-            &mut reactor.layout_manager,
-            &mut reactor.drag_manager,
-            MouseUpPayload {
-                button: MouseButton::Left,
-                final_space: Some(space),
-            },
-        )
+        handle_mouse_up(&mut reactor, MouseUpPayload {
+            button: MouseButton::Left,
+            final_space: Some(space),
+        })
         .unwrap()
     }
 

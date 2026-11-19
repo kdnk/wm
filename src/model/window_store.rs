@@ -511,6 +511,12 @@ impl WindowStore {
         previous
     }
 
+    pub(crate) fn cancel_window_transfer(&mut self, window: WindowId) {
+        if let Some(record) = self.windows.get_mut(&window) {
+            record.pending_transfer = None;
+        }
+    }
+
     pub(crate) fn observe_native_space(
         &mut self,
         wsid: WindowServerId,

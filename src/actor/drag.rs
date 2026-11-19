@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-19. Original attribution is preserved in LICENSE.
 //! Single-owner drag interaction primitives.
 //!
 //! The event tap only publishes the latest pointer value. Geometry and drag
@@ -205,6 +206,11 @@ impl DragActor {
     pub fn intent(&self) -> Option<DropIntent> { self.session()?.target.intent() }
 
     pub fn kind(&self) -> Option<DragKind> { self.session().map(|session| session.kind) }
+
+    pub fn modifier_pointer(&self) -> Option<CGPoint> {
+        let session = self.session()?;
+        (session.kind == DragKind::ModifierMove).then_some(session.pointer)
+    }
 
     /// Update reactor-resolved space membership and invalidate destination state.
     pub fn update_current_space(&mut self, current_space: Option<SpaceId>) -> bool {
