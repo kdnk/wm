@@ -11873,6 +11873,39 @@ fn late_picker_registration_respects_the_latest_native_focus() {
 
     let cases: &[(&[Step], usize)] = &[
         (&[NativeFocus(1), Register("Live Grep")], 1),
+        (
+            &[
+                Register("Live Grep"),
+                NativeFocus(1),
+                Deactivate,
+                Activate(2),
+                Activate(1),
+                FocusEditor,
+            ],
+            1,
+        ),
+        (
+            &[
+                Register("Live Grep"),
+                NativeFocus(1),
+                Deactivate,
+                Activate(2),
+                Activate(1),
+                NativeFocus(1),
+            ],
+            2,
+        ),
+        (
+            &[
+                Register("Live Grep"),
+                NativeFocus(1),
+                Deactivate,
+                Activate(2),
+                NativeFocus(1),
+                Activate(1),
+            ],
+            2,
+        ),
         (&[NativeFocus(1), FocusEditor, Register("Live Grep")], 0),
         (&[NativeFocus(1), Register(""), TitleChanged], 1),
         (&[Register(""), NativeFocus(1), TitleChanged], 1),
