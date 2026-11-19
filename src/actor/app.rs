@@ -1020,8 +1020,8 @@ fn reconcile_frame(
     Ok(frame)
 }
 
-/// Position-only frames avoid AX readback. Bounded resizes read the accepted
-/// size because apps can quantize it and otherwise lose their display intersection.
+/// Bounded resizes read the accepted size because apps can quantize it and
+/// otherwise lose their display intersection.
 fn write_interactive_frame(
     elem: &impl FrameTarget,
     hint: &mut CGRect,
@@ -1030,8 +1030,16 @@ fn write_interactive_frame(
     source: FrameSource,
     mut before_resize: impl FnMut(),
 ) {
-    frame = source.target(frame, *hint);
-    let set_size = set_size && source != FrameSource::DialogPosition;
+    if source == FrameSource::DialogPosition {
+        // AX sets both coordinates. The app may have moved the dialog vertically.
+        let Ok(current) = elem.frame() else { return };
+        *hint = current;
+        let target = source.target(frame, current);
+        if target.origin.x != current.origin.x && elem.set_position(target.origin).is_ok() {
+            hint.origin = target.origin;
+        }
+        return;
+    }
     let bounds = elem.scrolling_bounds().map(|bounds| bounds.for_motion(*hint));
     if let Some(bounds) = bounds {
         if set_size {
@@ -3074,7 +3082,7 @@ mod frame_tests {
             ..Default::default()
         };
         let stale = rect(350., 50., 500., 400.);
-        let mut accepted = app_frame;
+        let mut accepted = rect(100., 150., 500., 400.);
         write_interactive_frame(
             &dialog,
             &mut accepted,
@@ -3083,9 +3091,34 @@ mod frame_tests {
             FrameSource::DialogPosition,
             || panic!("unexpected resize"),
         );
-        assert_eq!(dialog.calls.borrow().as_slice(), ["position"]);
         assert_eq!(dialog.frame.get(), rect(350., 30., 820., 630.));
-        assert_eq!(FrameSource::DialogPosition.target(stale, accepted), accepted);
+        assert_eq!(accepted, dialog.frame.get());
+        assert_eq!(dialog.calls.borrow().as_slice(), ["frame", "position"]);
+        let release_frame = rect(345., 70., 840., 660.);
+        assert_eq!(
+            FrameSource::DialogPosition.target(stale, release_frame),
+            rect(350., 70., 840., 660.)
+        );
+    }
+
+    #[test]
+    fn scrolling_a_dialog_skips_position_when_native_frame_is_unavailable() {
+        let dialog = FakeWindow {
+            unresponsive: true,
+            ..Default::default()
+        };
+        let previous = rect(100., 150., 500., 400.);
+        let mut hint = previous;
+        write_interactive_frame(
+            &dialog,
+            &mut hint,
+            rect(350., 50., 500., 400.),
+            false,
+            FrameSource::DialogPosition,
+            || panic!("unexpected resize"),
+        );
+        assert_eq!(dialog.calls.borrow().as_slice(), ["frame"]);
+        assert_eq!(hint, previous);
     }
 
     #[test]
