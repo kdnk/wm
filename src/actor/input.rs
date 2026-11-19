@@ -3094,6 +3094,29 @@ mod tests {
     }
 
     #[test]
+    fn captured_release_delivers_its_own_pointer_position_before_mouse_up() {
+        use objc2_core_graphics::CGMouseButton;
+
+        use crate::actor::drag::MouseButton;
+
+        let (input, _, mut events) = input();
+        input.state.borrow_mut().captured_button = Some(MouseButton::Left);
+        let point = CGPoint::new(1441., 100.);
+        let release =
+            CGEvent::new_mouse_event(None, CGEventType::LeftMouseUp, point, CGMouseButton::Left)
+                .unwrap();
+        assert!(!input.on_event(CGEventType::LeftMouseUp, &release, None));
+        assert!(
+            matches!(events.try_recv().unwrap().1, Event::DragMotion(motion) if motion.point == point)
+        );
+        assert!(matches!(
+            events.try_recv().unwrap().1,
+            Event::MouseUp(MouseButton::Left)
+        ));
+        assert!(events.try_recv().is_err());
+    }
+
+    #[test]
     fn non_owning_release_does_not_clear_the_captured_button() {
         let (input, _, mut events_rx) = input();
         {

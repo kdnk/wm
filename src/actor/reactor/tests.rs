@@ -2329,6 +2329,114 @@ fn events_that_change_no_managed_layout_do_not_arrange() {
 }
 
 #[test]
+fn native_cross_display_drop_removes_the_source_tile() {
+    let (mut reactor, wid, _, left, right, frame, right_screen) =
+        reactor_with_window_on_space1_two_displays();
+    let left_screen = CGRect::new(CGPoint::ZERO, right_screen.size);
+    reactor.send_layout_event(LayoutEvent::WindowAdded(left, wid));
+    assert!(has_window_in_layout(&mut reactor, left, left_screen, wid));
+    assert!(reactor.state.windows.request_transfer(wid, Some(frame), left, true));
+    let moved = CGRect::new(CGPoint::new(right_screen.min().x + 100., 100.), frame.size);
+    reactor.handle_event(Event::WindowFrameChanged(
+        wid,
+        moved,
+        None,
+        Requested(false),
+        Some(MouseState::Down),
+    ));
+    window_server::set_window_under_cursor_override(Some(None));
+    reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+    window_server::set_window_under_cursor_override(None);
+
+    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(right));
+    assert!(reactor.state.windows.record(wid).unwrap().pending_transfer().is_none());
+    assert!(!has_window_in_layout(&mut reactor, left, left_screen, wid));
+    assert!(has_window_in_layout(&mut reactor, right, right_screen, wid));
+}
+
+#[test]
+fn modifier_cross_display_drop_follows_the_pointer_across_the_edge() {
+    use crate::actor::drag::{DragMotion, MouseButton};
+
+    let (mut apps, mut reactor, left, right) = two_displays(Default::default());
+    let wid = WindowId::new(1, 1);
+    let wsid = reactor.test_window_server_id(wid);
+    reactor.mark_test_window_visible_in_space(wsid, left);
+    let frame = reactor.state.windows.window(wid).unwrap().frame_monotonic;
+    let anchor = CGPoint::new(frame.max().x - 10., frame.mid().y);
+    window_server::set_window_spaces_override(wsid, Some(vec![left.get()]));
+    window_server::set_window_under_cursor_override(Some(Some(wsid)));
+    reactor.handle_event(Event::ModifierMouseDown {
+        button: MouseButton::Left,
+        point: anchor,
+        action: crate::common::config::MouseAction::Move,
+    });
+    let pointer = CGPoint::new(shared_right().min().x + 1., anchor.y);
+    reactor.handle_event(Event::DragMotion(DragMotion { point: pointer }));
+    assert!(frame.mid().x + pointer.x - anchor.x < shared_right().min().x);
+    apps.requests();
+    reactor.handle_event(Event::MouseUp(MouseButton::Left));
+    window_server::set_window_under_cursor_override(None);
+
+    let target = test_layout(&mut reactor, right, shared_right())
+        .into_iter()
+        .find_map(|(window, frame)| (window == wid).then_some(frame))
+        .expect("the right display must contain the dropped tile");
+    assert!(apps.requests().iter().any(|request| matches!(
+        request, Request::SetWindowFrames(frames, ..) if frames.iter().any(|&(window, frame)| window == wid && frame.same_as(target))
+    )));
+    assert_eq!(reactor.state.windows.native_space(wid), Some(left));
+    reactor.reconcile_authoritative_active_window_snapshot(vec![(wsid, Some(left))], false, &[]);
+    window_server::set_window_spaces_override(wsid, None);
+    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(right));
+    assert!(!has_window_in_layout(&mut reactor, left, shared_left(), wid));
+}
+
+#[test]
+fn floating_cross_display_drop_preserves_the_released_frame() {
+    use crate::actor::drag::{DragMotion, MouseButton};
+    for offset in [1., 600.] {
+        let (mut reactor, wid, wsid, left, right, _, right_screen) =
+            reactor_with_window_on_space1_two_displays();
+        let source = reactor.state.windows.workspace_for_window(wid).unwrap();
+        reactor.send_layout_event(LayoutEvent::WindowObserved(left, ResolvedWindow {
+            info: reactor.state.windows.window(wid).unwrap().layout_info(wid),
+            effects: crate::model::AppRuleEffects {
+                source_workspace: Some(source),
+                workspace_id: source,
+                floating: true,
+                position: None,
+                size: None,
+                was_rule_floating: false,
+                focus: false,
+            },
+        }));
+        let frame = reactor.state.windows.window(wid).unwrap().frame_monotonic;
+        let anchor = CGPoint::new(frame.max().x - 10., frame.mid().y);
+        let pointer = CGPoint::new(right_screen.min().x + offset, anchor.y);
+        let released = CGRect::new(
+            CGPoint::new(frame.origin.x + pointer.x - anchor.x, frame.origin.y),
+            frame.size,
+        );
+        window_server::set_window_under_cursor_override(Some(Some(wsid)));
+        reactor.handle_event(Event::ModifierMouseDown {
+            button: MouseButton::Left,
+            point: anchor,
+            action: crate::common::config::MouseAction::Move,
+        });
+        reactor.handle_event(Event::DragMotion(DragMotion { point: pointer }));
+        reactor.handle_event(Event::MouseUp(MouseButton::Left));
+        window_server::set_window_under_cursor_override(None);
+        let expected = if offset == 1. { left } else { right };
+        assert_eq!(reactor.assigned_space_for_window_id(wid), Some(expected));
+        let workspace = reactor.test_workspace(expected, 0);
+        let engine = &reactor.layout_manager.layout_engine;
+        assert!(engine.is_window_floating(wid));
+        assert_eq!(engine.get_floating_position(workspace, wid), Some(released));
+    }
+}
+
+#[test]
 fn layout_events_defer_arrangement_during_drag_except_removal() {
     for modifier in [false, true] {
         let (mut reactor, wid, _, space, _, frame) = reactor_with_window_on_space1();
@@ -5565,6 +5673,57 @@ fn display_index_selector_uses_physical_left_to_right_order() {
         .expect("expected display index 0 to resolve");
 
     assert_eq!(selected.frame, left);
+}
+
+#[test]
+fn display_move_retries_the_same_hop_until_native_arrival() {
+    let (mut apps, mut reactor, left, middle) = two_displays(Default::default());
+    let right = SpaceId::new(3);
+    let right_screen = CGRect::new(CGPoint::new(shared_right().max().x, 0.), shared_right().size);
+    reactor.handle_event(space_state_event(
+        vec![shared_left(), shared_right(), right_screen],
+        vec![Some(left), Some(middle), Some(right)],
+    ));
+    let moved = WindowId::new(1, 1);
+    let wsid = reactor.test_window_server_id(moved);
+    apps.requests();
+    let mut move_window = |native: SpaceId, selector, expected: Option<CGRect>| {
+        window_server::set_window_spaces_override(wsid, Some(vec![native.get()]));
+        reactor.handle_event(Event::Command(Command::Reactor(
+            ReactorCommand::MoveWindowToDisplay { selector, window_id: None },
+        )));
+        window_server::set_window_spaces_override(wsid, None);
+        let writes: Vec<_> = apps
+            .requests()
+            .into_iter()
+            .filter_map(|request| match request {
+                Request::SetWindowFrames(frames, ..) => Some(frames),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|(wid, frame)| (wid == moved).then_some(frame))
+            .collect();
+        if let Some(screen) = expected {
+            assert!(
+                !writes.is_empty() && writes.iter().all(|frame| screen.contains(frame.mid())),
+                "expected placement on {screen:?}, got {writes:?}"
+            );
+        } else {
+            assert!(writes.is_empty(), "unexpected placement: {writes:?}");
+        }
+    };
+    let rightward = DisplaySelector::Direction(Direction::Right);
+    move_window(left, rightward.clone(), Some(shared_right()));
+    move_window(left, rightward.clone(), Some(shared_right()));
+    move_window(left, DisplaySelector::Index(1), Some(shared_right()));
+    move_window(middle, rightward.clone(), Some(right_screen));
+    move_window(right, rightward.clone(), None);
+    move_window(
+        right,
+        DisplaySelector::Direction(Direction::Left),
+        Some(shared_right()),
+    );
+    move_window(right, rightward, Some(right_screen));
 }
 
 #[test]
