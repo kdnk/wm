@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-19. Original attribution is preserved in LICENSE.
 use super::*;
 
 /// Which saved destinations a live window may adopt.
@@ -29,6 +30,7 @@ impl LayoutEngine {
     /// veto a restarted application's unique title.
     fn fuzzy_saved_window(
         &self,
+        pid: pid_t,
         live: &WindowFingerprint,
         scope: MatchScope<'_>,
     ) -> Option<WindowId> {
@@ -37,7 +39,9 @@ impl LayoutEngine {
         let mut tied = false;
         for (&window, saved) in &self.persistence.pending {
             let fingerprint = &saved.fingerprint;
-            if !fingerprint.same_known_app(live)
+            if (!saved.pending_discovery_pids.is_empty()
+                && !saved.pending_discovery_pids.contains(&pid))
+                || !fingerprint.same_known_app(live)
                 || !fingerprint.same_title(live)
                 || !self.saved_window_in_scope(saved, scope)
             {
@@ -85,7 +89,7 @@ impl LayoutEngine {
                 })
                 .map(|(candidate, _)| *candidate)
         });
-        let selected = exact.or_else(|| self.fuzzy_saved_window(live, scope));
+        let selected = exact.or_else(|| self.fuzzy_saved_window(window.pid, live, scope));
         let stale = pending
             .iter()
             .filter(|(candidate, saved)| {
@@ -162,11 +166,10 @@ impl LayoutEngine {
     pub(crate) fn discard_unmatched_candidates_for_app(
         &mut self,
         pid: pid_t,
-        app_id: Option<&str>,
         discovered_spaces: &[SpaceId],
     ) -> usize {
         if self.persistence.awaiting_topology && !self.persistence.pending.is_empty() {
-            let discovery = (pid, app_id.map(str::to_owned), discovered_spaces.to_vec());
+            let discovery = (pid, discovered_spaces.to_vec());
             self.persistence.awaited_discoveries.push(discovery);
         }
         if !self.is_restoring() {
@@ -175,13 +178,12 @@ impl LayoutEngine {
         let finished = self
             .persistence
             .pending
-            .iter()
-            .filter(|(window, saved)| {
-                (window.pid == pid
-                    || app_id.is_some_and(|id| saved.fingerprint.app_id.as_deref() == Some(id)))
-                    && discovered_spaces.contains(&self.workspaces[saved.workspace].space)
+            .iter_mut()
+            .filter_map(|(&window, saved)| {
+                (discovered_spaces.contains(&self.workspaces[saved.workspace].space)
+                    && saved.finish_discovery(window, pid))
+                .then_some(window)
             })
-            .map(|(window, _)| *window)
             .collect();
         self.discard_saved_windows(finished)
     }
@@ -204,8 +206,8 @@ impl LayoutEngine {
                 self.add_window_to_layout(window_store, self.workspaces[owner].space, window);
             }
         }
-        for (pid, app_id, spaces) in std::mem::take(&mut self.persistence.awaited_discoveries) {
-            self.discard_unmatched_candidates_for_app(pid, app_id.as_deref(), &spaces);
+        for (pid, spaces) in std::mem::take(&mut self.persistence.awaited_discoveries) {
+            self.discard_unmatched_candidates_for_app(pid, &spaces);
         }
     }
 
@@ -216,28 +218,36 @@ impl LayoutEngine {
     pub(super) fn discard_unmatchable_startup_candidates(
         &mut self,
         mut window_server_identity_exists: impl FnMut(WindowId, u32) -> bool,
-        mut application_identity_exists: impl FnMut(&str) -> bool,
+        mut running_bundle_pids: impl FnMut(&str) -> Vec<pid_t>,
     ) -> usize {
-        let mut running: HashMap<&str, bool> = HashMap::default();
-        let unmatchable = self
-            .persistence
-            .pending
-            .iter()
-            .filter(|(window, saved)| {
-                let application_exists =
-                    saved.fingerprint.app_id.as_deref().is_some_and(|app_id| {
-                        *running
-                            .entry(app_id)
-                            .or_insert_with(|| application_identity_exists(app_id))
-                    });
-                !application_exists
-                    && !saved
-                        .fingerprint
-                        .window_server_id
-                        .is_some_and(|id| window_server_identity_exists(**window, id))
-            })
-            .map(|(window, _)| *window)
-            .collect();
+        let mut by_bundle = HashMap::default();
+        let mut unmatchable = Vec::new();
+        for (&window, saved) in &mut self.persistence.pending {
+            let pids = saved
+                .fingerprint
+                .app_id
+                .as_deref()
+                .map(|app_id| {
+                    by_bundle
+                        .entry(app_id)
+                        .or_insert_with(|| running_bundle_pids(app_id))
+                        .as_slice()
+                })
+                .unwrap_or_default();
+            if pids.contains(&window.pid) {
+                saved.pending_discovery_pids = vec![window.pid];
+            } else if !pids.is_empty() {
+                saved.pending_discovery_pids = pids.to_vec();
+            } else if saved
+                .fingerprint
+                .window_server_id
+                .is_some_and(|id| window_server_identity_exists(window, id))
+            {
+                saved.pending_discovery_pids = vec![window.pid];
+            } else {
+                unmatchable.push(window);
+            }
+        }
         self.discard_saved_windows(unmatchable)
     }
 }

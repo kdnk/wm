@@ -205,6 +205,7 @@ impl PersistedLayout {
                     fingerprint: entry.remove(),
                     workspace,
                     frame: Some(frame),
+                    pending_discovery_pids: Vec::new(),
                 });
             }
         }
@@ -223,6 +224,7 @@ impl PersistedLayout {
                             fingerprint,
                             workspace,
                             frame: None,
+                            pending_discovery_pids: Vec::new(),
                         });
                         true
                     }),

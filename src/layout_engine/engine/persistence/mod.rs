@@ -120,6 +120,17 @@ struct SavedWindow {
     fingerprint: WindowFingerprint,
     workspace: VirtualWorkspaceId,
     frame: Option<CGRect>,
+    pending_discovery_pids: Vec<pid_t>,
+}
+
+impl SavedWindow {
+    fn finish_discovery(&mut self, window: WindowId, pid: pid_t) -> bool {
+        if self.pending_discovery_pids.is_empty() {
+            return window.pid == pid;
+        }
+        self.pending_discovery_pids.retain(|owner| *owner != pid);
+        self.pending_discovery_pids.is_empty()
+    }
 }
 
 /// Restoration in progress. Live windows are described by `WindowStore` and have no entry here, so
@@ -131,7 +142,7 @@ pub(super) struct PersistenceState {
     awaiting_topology: bool,
     /// Application discoveries finished before that, in `discard_unmatched_candidates_for_app`'s
     /// terms, to replay once saved destinations mean something.
-    awaited_discoveries: Vec<(pid_t, Option<String>, Vec<SpaceId>)>,
+    awaited_discoveries: Vec<(pid_t, Vec<SpaceId>)>,
     /// Saved native Spaces not proven to exist. They are destinations for nothing, which keeps
     /// their workspaces intact for a display that may return.
     unresolved_spaces: BTreeSet<SpaceId>,
@@ -178,7 +189,13 @@ impl LayoutEngine {
     }
 
     pub(super) fn forget_persisted_app(&mut self, pid: pid_t) {
-        self.persistence.pending.retain(|window, _| window.pid != pid);
+        let finished = self
+            .persistence
+            .pending
+            .iter_mut()
+            .filter_map(|(&window, saved)| saved.finish_discovery(window, pid).then_some(window))
+            .collect();
+        self.discard_saved_windows(finished);
     }
 
     pub(super) fn forget_persisted_workspace(&mut self, workspace: VirtualWorkspaceId) {

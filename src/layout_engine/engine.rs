@@ -1964,12 +1964,8 @@ impl LayoutEngine {
                     };
                 }
             }
-            LayoutEvent::WindowDiscoveryCompleted(pid, app_id, discovered_spaces) => {
-                let ignored = self.discard_unmatched_candidates_for_app(
-                    pid,
-                    app_id.as_deref(),
-                    &discovered_spaces,
-                );
+            LayoutEvent::WindowDiscoveryCompleted(pid, _, discovered_spaces) => {
+                let ignored = self.discard_unmatched_candidates_for_app(pid, &discovered_spaces);
                 if ignored > 0 {
                     tracing::info!(
                         pid,

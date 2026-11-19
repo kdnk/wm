@@ -57,7 +57,7 @@ impl LayoutEngine {
                 )
                 .is_some_and(|info| info.pid == window.pid)
             },
-            crate::sys::app::is_bundle_running,
+            crate::sys::app::running_bundle_pids,
         );
         tracing::info!(
             path = %path.display(),

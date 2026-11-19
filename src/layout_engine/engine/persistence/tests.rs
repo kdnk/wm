@@ -485,10 +485,8 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
     let _ = engine.handle_event(&mut store, LayoutEvent::AppClosed(w1.pid));
     assert!(engine.persistence.pending.is_empty() && !in_any_tree(&engine, w1));
     let (mut engine, _) = start();
-    let running = engine.discard_unmatchable_startup_candidates(
-        |window, _| window == w1,
-        |app_id| app_id == "nothing running",
-    );
+    let running =
+        engine.discard_unmatchable_startup_candidates(|window, _| window == w1, |_| Vec::new());
     assert_eq!(running, 2, "a live server id alone keeps a candidate");
     assert!(pending(&engine, w1));
     let (mut engine, _) = start();
@@ -497,7 +495,7 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
         |_, _| panic!("needless query"),
         |_| {
             lookups += 1;
-            true
+            vec![w1.pid]
         },
     );
     assert_eq!(lookups, 1, "one lookup per application");
@@ -1080,4 +1078,85 @@ fn global_single_display_restore_stays_in_the_windows_native_space() {
         );
         assert_eq!(store.workspace_for_window(window), Some(target));
     }
+}
+
+#[test]
+fn same_bundle_instances_restore_their_own_columns() {
+    let settings = VirtualWorkspaceSettings::default();
+    let space = SpaceId::new(9);
+    let first = win(22, 1);
+    let second = win(23, 2);
+    let shared = String::from("com.example.editor");
+    let file = session(&settings, &[(space, "display", &[first, second])])
+        .replace("com.example.app22", &shared)
+        .replace("com.example.app23", &shared);
+    let evidence_for = |id| WindowFingerprint {
+        app_id: Some(shared.clone()),
+        ..evidence(id)
+    };
+    for owners in [vec![22, 23], vec![32, 33]] {
+        let (mut engine, mut store) = boot(&settings, &file);
+        engine.discard_unmatchable_startup_candidates(|_, _| unreachable!(), |_| owners.clone());
+        resolve(&mut engine, &mut store, &[(space, "display")], &[(
+            "display",
+            &[space],
+        )]);
+        let live_first = win(owners[0], 4);
+        let live_second = win(owners[1], 5);
+        let live_evidence = |id| WindowFingerprint {
+            window_server_id: None,
+            ..evidence_for(id)
+        };
+        if owners[0] == first.pid {
+            assert!(!observe(
+                &mut engine,
+                &mut store,
+                space,
+                live_first,
+                &live_evidence(second)
+            ));
+        }
+        assert!(observe(
+            &mut engine,
+            &mut store,
+            space,
+            live_first,
+            &live_evidence(first)
+        ));
+        let _ = engine.handle_event(
+            &mut store,
+            LayoutEvent::WindowDiscoveryCompleted(live_first.pid, Some(shared.clone()), vec![
+                space,
+            ]),
+        );
+        assert!(observe(
+            &mut engine,
+            &mut store,
+            space,
+            live_second,
+            &live_evidence(second)
+        ));
+        assert_eq!(tree(&engine, ws(&engine, space, 0)), [live_first, live_second]);
+    }
+}
+
+#[test]
+fn closed_windows_expire_after_the_last_replacement_instance_finishes() {
+    let settings = VirtualWorkspaceSettings::default();
+    let space = SpaceId::new(9);
+    let closed = win(22, 1);
+    let file = session(&settings, &[(space, "display", &[closed])]);
+    let (mut engine, mut store) = boot(&settings, &file);
+    engine.discard_unmatchable_startup_candidates(|_, _| unreachable!(), |_| vec![32, 33]);
+    resolve(&mut engine, &mut store, &[(space, "display")], &[(
+        "display",
+        &[space],
+    )]);
+    let _ = engine.handle_event(
+        &mut store,
+        LayoutEvent::WindowDiscoveryCompleted(32, Some("com.example.app22".into()), vec![space]),
+    );
+    assert!(in_any_tree(&engine, closed));
+    let _ = engine.handle_event(&mut store, LayoutEvent::AppClosed(33));
+    assert!(!in_any_tree(&engine, closed));
 }
