@@ -2513,6 +2513,55 @@ mod tests {
     }
 
     #[test]
+    fn queued_modifier_drag_moves_the_window_under_the_initial_press() {
+        use objc2_core_foundation::CGSize;
+        use objc2_core_graphics::CGMouseButton;
+
+        use crate::actor::app::WindowId;
+        use crate::actor::drag::DragMotion;
+        use crate::actor::reactor::testing::{make_windows, test_context};
+
+        let (mut apps, mut reactor) = test_context();
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+        apps.make_app_and_settle_on_screen(
+            &mut reactor,
+            screen,
+            SpaceId::new(1),
+            1,
+            make_windows(2),
+        );
+        let source = WindowId::new(1, 1);
+        let neighbor = WindowId::new(1, 2);
+        let initial = apps.windows[&source].frame;
+        let untouched = apps.windows[&neighbor].frame;
+        let (input, _, mut events) = input();
+        let press = CGEvent::new_mouse_event(
+            None,
+            CGEventType::LeftMouseDown,
+            initial.mid(),
+            CGMouseButton::Left,
+        )
+        .unwrap();
+        CGEvent::set_flags(Some(&press), CGEventFlags::MaskSecondaryFn);
+        window_server::set_window_under_cursor_override(Some(Some(
+            reactor.test_window_server_id(source),
+        )));
+        assert!(!input.on_event(CGEventType::LeftMouseDown, &press, None));
+        window_server::set_window_under_cursor_override(Some(Some(
+            reactor.test_window_server_id(neighbor),
+        )));
+        let point = untouched.mid();
+        reactor.handle_events(vec![
+            events.try_recv().unwrap().1,
+            Event::DragMotion(DragMotion { point }),
+        ]);
+        window_server::set_window_under_cursor_override(None);
+        apps.simulate_events();
+        assert_eq!(apps.windows[&source].frame.mid(), point);
+        assert_eq!(apps.windows[&neighbor].frame, untouched);
+    }
+
+    #[test]
     fn pointer_focus_intent_captures_click_before_window_is_raised() {
         let (input, _, mut events) = input();
         {
@@ -3143,6 +3192,61 @@ mod tests {
             events_rx.try_recv().unwrap().1,
             Event::MouseUp(crate::actor::drag::MouseButton::Right)
         ));
+    }
+
+    #[test]
+    fn queued_drags_deliver_each_gestures_last_motion() {
+        use objc2_core_graphics::CGMouseButton;
+
+        for (modifier, cancel) in [(false, false), (true, false), (true, true)] {
+            let (input, _, mut events) = input();
+            input.native_motion_active.store(!modifier, Ordering::Release);
+            window_server::set_window_under_cursor_override(Some(None));
+            window_server::set_window_at_point_regions(Some(vec![]));
+            for (event_type, x) in [
+                (CGEventType::LeftMouseDown, 100.),
+                (CGEventType::LeftMouseDragged, 110.),
+                (CGEventType::LeftMouseDragged, 120.),
+                (CGEventType::LeftMouseUp, 130.),
+                (CGEventType::LeftMouseDown, 1400.),
+                (CGEventType::LeftMouseDragged, 1410.),
+                (CGEventType::LeftMouseDragged, 1420.),
+            ] {
+                if cancel && event_type == CGEventType::LeftMouseUp {
+                    let (recovery, _) = tokio::sync::mpsc::unbounded_channel();
+                    input.on_request(Request::SetEventProcessing(true), &recovery);
+                    continue;
+                }
+                let event = CGEvent::new_mouse_event(
+                    None,
+                    event_type,
+                    CGPoint::new(x, 100.),
+                    CGMouseButton::Left,
+                )
+                .unwrap();
+                if modifier {
+                    CGEvent::set_flags(Some(&event), CGEventFlags::MaskSecondaryFn);
+                }
+                input.on_event(event_type, &event, None);
+            }
+            window_server::set_window_at_point_regions(None);
+            window_server::set_window_under_cursor_override(None);
+            let mut positions = Vec::new();
+            while let Ok((_, event)) = events.try_recv() {
+                match event {
+                    Event::DragMotionPending(publisher) => {
+                        positions.push(Some(publisher.take_latest().unwrap().point.x));
+                    }
+                    Event::MouseUp(_) | Event::DragCancel => positions.push(None),
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                positions,
+                [Some(120.), None, Some(1420.)],
+                "modifier={modifier} cancel={cancel}"
+            );
+        }
     }
 
     #[test]

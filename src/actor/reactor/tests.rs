@@ -2329,29 +2329,111 @@ fn events_that_change_no_managed_layout_do_not_arrange() {
 }
 
 #[test]
-fn native_cross_display_drop_removes_the_source_tile() {
-    let (mut reactor, wid, _, left, right, frame, right_screen) =
-        reactor_with_window_on_space1_two_displays();
-    let left_screen = CGRect::new(CGPoint::ZERO, right_screen.size);
-    reactor.send_layout_event(LayoutEvent::WindowAdded(left, wid));
-    assert!(has_window_in_layout(&mut reactor, left, left_screen, wid));
-    assert!(reactor.state.windows.request_transfer(wid, Some(frame), left, true));
-    let moved = CGRect::new(CGPoint::new(right_screen.min().x + 100., 100.), frame.size);
-    reactor.handle_event(Event::WindowFrameChanged(
-        wid,
-        moved,
-        None,
-        Requested(false),
-        Some(MouseState::Down),
-    ));
-    window_server::set_window_under_cursor_override(Some(None));
-    reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
-    window_server::set_window_under_cursor_override(None);
+fn dragging_on_the_original_display_supersedes_an_unapplied_keyboard_move() {
+    use crate::actor::drag::{DragMotion, MouseButton};
 
-    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(right));
-    assert!(reactor.state.windows.record(wid).unwrap().pending_transfer().is_none());
-    assert!(!has_window_in_layout(&mut reactor, left, left_screen, wid));
-    assert!(has_window_in_layout(&mut reactor, right, right_screen, wid));
+    for (modifier, dx) in [(false, 24.), (true, 24.), (true, 0.)] {
+        let (_apps, mut reactor, left, right) = two_displays(Default::default());
+        let wid = WindowId::new(1, 1);
+        let wsid = reactor.test_window_server_id(wid);
+        let frame = reactor.state.windows.window(wid).unwrap().frame_monotonic;
+        reactor.mark_test_window_visible_in_space(wsid, left);
+        window_server::set_window_spaces_override(wsid, Some(vec![left.get()]));
+        reactor.handle_event(Event::Command(Command::Reactor(
+            ReactorCommand::MoveWindowToDisplay {
+                selector: DisplaySelector::Direction(Direction::Right),
+                window_id: None,
+            },
+        )));
+        assert_eq!(reactor.assigned_space_for_window_id(wid), Some(right));
+        let transaction = reactor.transaction_manager.get_last_sent_txid(wsid);
+        reactor.handle_event(Event::WindowFrameChanged(
+            wid,
+            frame,
+            Some(transaction),
+            Requested(true),
+            Some(MouseState::Up),
+        ));
+        window_server::set_window_under_cursor_override(Some(Some(wsid)));
+        if modifier {
+            reactor.handle_event(Event::ModifierMouseDown {
+                button: MouseButton::Left,
+                point: frame.mid(),
+                action: crate::common::config::MouseAction::Move,
+            });
+            reactor.handle_event(Event::DragMotion(DragMotion {
+                point: CGPoint::new(frame.mid().x + dx, frame.mid().y),
+            }));
+        } else {
+            reactor.handle_event(Event::WindowFrameChanged(
+                wid,
+                CGRect::new(CGPoint::new(frame.origin.x + dx, frame.origin.y), frame.size),
+                Some(transaction),
+                Requested(false),
+                Some(MouseState::Down),
+            ));
+        }
+        reactor.handle_event(Event::MouseUp(MouseButton::Left));
+        window_server::set_window_under_cursor_override(None);
+        reactor
+            .reconcile_authoritative_active_window_snapshot(vec![(wsid, Some(left))], false, &[]);
+        window_server::set_window_spaces_override(wsid, None);
+        let dragged = dx != 0.;
+        assert_eq!(
+            has_window_in_layout(&mut reactor, left, shared_left(), wid),
+            dragged
+        );
+        assert_eq!(
+            has_window_in_layout(&mut reactor, right, shared_right(), wid),
+            !dragged
+        );
+    }
+}
+
+#[test]
+fn native_cross_display_drop_removes_the_source_tile() {
+    for already_arrived in [false, true] {
+        let (mut reactor, wid, wsid, left, right, frame, right_screen) =
+            reactor_with_window_on_space1_two_displays();
+        let left_screen = CGRect::new(CGPoint::ZERO, right_screen.size);
+        let snapshot = |space| {
+            space_state_event_with(
+                vec![left_screen, right_screen],
+                vec![Some(left), Some(right)],
+                |state| {
+                    state.active_window_spaces.insert(wsid, space);
+                    state.membership_complete = true;
+                },
+            )
+        };
+        reactor.send_layout_event(LayoutEvent::WindowAdded(left, wid));
+        assert!(has_window_in_layout(&mut reactor, left, left_screen, wid));
+        assert!(reactor.state.windows.request_transfer(wid, Some(frame), left, true));
+        let moved = CGRect::new(CGPoint::new(right_screen.min().x + 100., 100.), frame.size);
+        reactor.handle_event(Event::WindowFrameChanged(
+            wid,
+            moved,
+            None,
+            Requested(false),
+            Some(MouseState::Down),
+        ));
+        let at_release = if already_arrived { right } else { left };
+        window_server::set_window_spaces_override(wsid, Some(vec![at_release.get()]));
+        if already_arrived {
+            reactor.handle_event(snapshot(right));
+        }
+        window_server::set_window_under_cursor_override(Some(None));
+        reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+        window_server::set_window_under_cursor_override(None);
+        reactor.handle_event(snapshot(at_release));
+        assert_eq!(reactor.assigned_space_for_window_id(wid), Some(right));
+        window_server::set_window_spaces_override(wsid, Some(vec![right.get()]));
+        reactor.handle_event(snapshot(right));
+        window_server::set_window_spaces_override(wsid, None);
+        assert!(reactor.state.windows.record(wid).unwrap().pending_transfer().is_none());
+        assert!(!has_window_in_layout(&mut reactor, left, left_screen, wid));
+        assert!(has_window_in_layout(&mut reactor, right, right_screen, wid));
+    }
 }
 
 #[test]
@@ -2418,6 +2500,7 @@ fn floating_cross_display_drop_preserves_the_released_frame() {
             CGPoint::new(frame.origin.x + pointer.x - anchor.x, frame.origin.y),
             frame.size,
         );
+        window_server::set_window_spaces_override(wsid, Some(vec![left.get()]));
         window_server::set_window_under_cursor_override(Some(Some(wsid)));
         reactor.handle_event(Event::ModifierMouseDown {
             button: MouseButton::Left,
@@ -2427,12 +2510,43 @@ fn floating_cross_display_drop_preserves_the_released_frame() {
         reactor.handle_event(Event::DragMotion(DragMotion { point: pointer }));
         reactor.handle_event(Event::MouseUp(MouseButton::Left));
         window_server::set_window_under_cursor_override(None);
+        reactor
+            .reconcile_authoritative_active_window_snapshot(vec![(wsid, Some(left))], false, &[]);
+        window_server::set_window_spaces_override(wsid, None);
         let expected = if offset == 1. { left } else { right };
         assert_eq!(reactor.assigned_space_for_window_id(wid), Some(expected));
         let workspace = reactor.test_workspace(expected, 0);
         let engine = &reactor.layout_manager.layout_engine;
         assert!(engine.is_window_floating(wid));
         assert_eq!(engine.get_floating_position(workspace, wid), Some(released));
+        if expected == right {
+            let adjusted = CGRect::new(
+                CGPoint::new(released.origin.x + 30., released.origin.y),
+                released.size,
+            );
+            reactor.handle_event(Event::WindowFrameChanged(
+                wid,
+                adjusted,
+                None,
+                Requested(false),
+                Some(MouseState::Down),
+            ));
+            window_server::set_window_under_cursor_override(Some(None));
+            reactor.handle_event(Event::MouseUp(MouseButton::Left));
+            window_server::set_window_under_cursor_override(None);
+            reactor.handle_event(space_state_event_with(
+                vec![CGRect::new(CGPoint::ZERO, right_screen.size), right_screen],
+                vec![Some(left), Some(right)],
+                |state| {
+                    state.active_window_spaces.insert(wsid, left);
+                    state.membership_complete = true;
+                },
+            ));
+            assert_eq!(
+                reactor.layout_manager.layout_engine.get_floating_position(workspace, wid),
+                Some(adjusted)
+            );
+        }
     }
 }
 
@@ -5686,9 +5800,13 @@ fn display_move_retries_the_same_hop_until_native_arrival() {
     ));
     let moved = WindowId::new(1, 1);
     let wsid = reactor.test_window_server_id(moved);
+    reactor.reconcile_authoritative_active_window_snapshot(vec![(wsid, Some(left))], false, &[]);
     apps.requests();
-    let mut move_window = |native: SpaceId, selector, expected: Option<CGRect>| {
-        window_server::set_window_spaces_override(wsid, Some(vec![native.get()]));
+    let mut move_window = |native: &[SpaceId], selector, expected: Option<CGRect>| {
+        window_server::set_window_spaces_override(
+            wsid,
+            Some(native.iter().map(|space| space.get()).collect()),
+        );
         reactor.handle_event(Event::Command(Command::Reactor(
             ReactorCommand::MoveWindowToDisplay { selector, window_id: None },
         )));
@@ -5713,17 +5831,134 @@ fn display_move_retries_the_same_hop_until_native_arrival() {
         }
     };
     let rightward = DisplaySelector::Direction(Direction::Right);
-    move_window(left, rightward.clone(), Some(shared_right()));
-    move_window(left, rightward.clone(), Some(shared_right()));
-    move_window(left, DisplaySelector::Index(1), Some(shared_right()));
-    move_window(middle, rightward.clone(), Some(right_screen));
-    move_window(right, rightward.clone(), None);
+    move_window(&[left], rightward.clone(), Some(shared_right()));
+    move_window(&[], rightward.clone(), Some(shared_right()));
+    move_window(&[middle, left], rightward.clone(), Some(shared_right()));
+    move_window(&[left, middle], rightward.clone(), Some(shared_right()));
+    move_window(&[left], rightward.clone(), Some(shared_right()));
+    move_window(&[left], DisplaySelector::Index(1), Some(shared_right()));
     move_window(
-        right,
+        &[SpaceId::new(99), middle],
+        rightward.clone(),
+        Some(right_screen),
+    );
+    move_window(&[], rightward.clone(), Some(right_screen));
+    move_window(&[right], rightward.clone(), None);
+    move_window(
+        &[right],
         DisplaySelector::Direction(Direction::Left),
         Some(shared_right()),
     );
-    move_window(right, rightward, Some(right_screen));
+    move_window(&[right], rightward, Some(right_screen));
+}
+
+#[test]
+fn display_move_retry_keeps_a_resized_destination_tile() {
+    for explicit in [false, true] {
+        let (mut apps, mut reactor, left, right) = two_displays(Default::default());
+        let window = WindowId::new(1, 1);
+        let wsid = reactor.test_window_server_id(window);
+        let move_right = || {
+            Event::Command(Command::Reactor(ReactorCommand::MoveWindowToDisplay {
+                selector: DisplaySelector::Direction(Direction::Right),
+                window_id: Some(1),
+            }))
+        };
+        window_server::set_window_spaces_override(wsid, Some(vec![left.get()]));
+        reactor.handle_event(move_right());
+        let frame =
+            |reactor: &mut Reactor| laid_out_frame(reactor, right, shared_right(), window).unwrap();
+        let before = frame(&mut reactor);
+        reactor.space_state.command_space = Some(right);
+        window_server::set_cursor_location_override(Some(shared_right().mid()));
+        reactor.handle_test_layout_command(LayoutCommand::ResizeWindowBy { amount: 0.2 });
+        window_server::set_cursor_location_override(None);
+        let resized = frame(&mut reactor);
+        assert!(
+            resized.size.width > before.size.width,
+            "{before:?} -> {resized:?}"
+        );
+        apps.requests();
+        if explicit {
+            reactor.handle_event(move_right());
+        } else {
+            reactor.handle_event(space_state_event_with(
+                vec![shared_left(), shared_right()],
+                vec![Some(left), Some(right)],
+                |state| {
+                    state.membership_complete = true;
+                    state.active_window_spaces.insert(wsid, left);
+                },
+            ));
+        }
+        window_server::set_window_spaces_override(wsid, None);
+        let writes: Vec<_> = apps
+            .requests()
+            .into_iter()
+            .filter_map(|request| match request {
+                Request::SetWindowFrames(frames, ..) => Some(frames),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|(wid, frame)| (wid == window).then_some(frame))
+            .collect();
+        assert!(
+            !writes.is_empty() && writes.iter().all(|frame| *frame == resized),
+            "explicit={explicit}, expected {resized:?}, got {writes:?}"
+        );
+    }
+}
+
+#[test]
+fn native_transfer_retries_leave_the_window_being_dragged_under_pointer_control() {
+    use crate::actor::drag::MouseButton;
+
+    let (mut apps, mut reactor, left, right) = two_displays(Default::default());
+    let dragged = WindowId::new(1, 1);
+    let other = WindowId::new(2, 1);
+    make_active_app(&mut apps, &mut reactor, 2, make_windows(1), Some(other));
+    let dragged_wsid = reactor.test_window_server_id(dragged);
+    let other_wsid = reactor.test_window_server_id(other);
+    let snapshot = |dragged_space| {
+        space_state_event_with(
+            vec![shared_left(), shared_right()],
+            vec![Some(left), Some(right)],
+            |state| {
+                state.membership_complete = true;
+                state
+                    .active_window_spaces
+                    .extend([(dragged_wsid, dragged_space), (other_wsid, left)]);
+            },
+        )
+    };
+    for window in [dragged, other] {
+        let outcome = reactor.move_window_to_display(window, left, right);
+        reactor.apply_event_outcome(outcome);
+    }
+    window_server::set_window_under_cursor_override(Some(Some(dragged_wsid)));
+    reactor.handle_event(Event::ModifierMouseDown {
+        button: MouseButton::Left,
+        point: shared_left().mid(),
+        action: crate::common::config::MouseAction::Move,
+    });
+    window_server::set_window_under_cursor_override(None);
+    assert!(reactor.is_in_drag());
+    apps.requests();
+    reactor.handle_event(snapshot(left));
+    let writes: Vec<_> = apps
+        .requests()
+        .into_iter()
+        .filter_map(|request| match request {
+            Request::SetWindowFrames(frames, ..) => Some(frames),
+            _ => None,
+        })
+        .flatten()
+        .map(|(wid, _)| wid)
+        .collect();
+    assert!(writes.contains(&other));
+    assert!(!writes.contains(&dragged), "{writes:?}");
+    reactor.handle_event(snapshot(right));
+    assert!(reactor.state.windows.record(dragged).unwrap().pending_transfer().is_none());
 }
 
 #[test]
