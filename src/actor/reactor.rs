@@ -2179,6 +2179,14 @@ impl Reactor {
             }
             Event::WindowServerHidden(wsid) | Event::WindowServerUnhidden(wsid) => {
                 let visible = matches!(event, Event::WindowServerUnhidden(_));
+                if visible
+                    && let Some(dialog) = self.state.windows.tracked_window_id(wsid)
+                    && let Some(parent) = self.dialog_parents.get(&dialog)
+                    && let Some(native) = window_server::window_parent(wsid)
+                    && self.state.windows.tracked_window_id(native) != Some(parent.window)
+                {
+                    self.dialog_parents.remove(&dialog);
+                }
                 // WindowServer hidden/unhidden means ordered out/in, not AX
                 // minimization or application hiding. Keep lifecycle suspension
                 // independent of this native visibility evidence.

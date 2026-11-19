@@ -358,4 +358,30 @@ mod tests {
             window_server::set_window_parent_override(id, None);
         }
     }
+
+    #[test]
+    fn an_existing_picker_follows_its_new_native_parent_on_order_in() {
+        let (mut reactor, space, _apps) = projects();
+        let first = WindowId::new(1, 1);
+        let second = WindowId::new(1, 2);
+        reactor.handle_event(Event::WindowServerFocusChanged(first, space));
+        let dialog = open_picker(&mut reactor, 3, "Live Grep", None);
+        let native_dialog = reactor.test_window_server_id(dialog);
+
+        for (previous, owner) in [(first, second), (second, first)] {
+            let before = frame(&reactor, dialog);
+            let native_owner = reactor.test_window_server_id(owner);
+            window_server::set_window_parent_override(native_dialog, Some(Some(native_owner)));
+            reactor.handle_event(Event::WindowServerUnhidden(native_dialog));
+            shift(&mut reactor, space, previous, 40.);
+            assert_eq!(
+                frame(&reactor, dialog),
+                before,
+                "picker moved with its previous editor"
+            );
+            shift(&mut reactor, space, owner, 80.);
+            assert_eq!(frame(&reactor, dialog).origin.x, before.origin.x + 80.);
+        }
+        window_server::set_window_parent_override(native_dialog, None);
+    }
 }
