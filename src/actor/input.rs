@@ -2539,6 +2539,7 @@ mod tests {
         let neighbor = WindowId::new(1, 2);
         let initial = apps.windows[&source].frame;
         let untouched = apps.windows[&neighbor].frame;
+        let point = untouched.mid();
         let (input, _, mut events) = input();
         let press = CGEvent::new_mouse_event(
             None,
@@ -2548,19 +2549,19 @@ mod tests {
         )
         .unwrap();
         CGEvent::set_flags(Some(&press), CGEventFlags::MaskSecondaryFn);
-        window_server::set_window_under_cursor_override(Some(Some(
-            reactor.test_window_server_id(source),
-        )));
+        window_server::set_window_at_point_regions(Some(vec![
+            (initial, reactor.test_window_server_id(source)),
+            (untouched, reactor.test_window_server_id(neighbor)),
+        ]));
+        window_server::set_cursor_location_override(Some(point));
         assert!(!input.on_event(CGEventType::LeftMouseDown, &press, None));
-        window_server::set_window_under_cursor_override(Some(Some(
-            reactor.test_window_server_id(neighbor),
-        )));
-        let point = untouched.mid();
+        window_server::set_window_at_point_regions(Some(vec![]));
         reactor.handle_events(vec![
             events.try_recv().unwrap().1,
             Event::DragMotion(DragMotion { point }),
         ]);
-        window_server::set_window_under_cursor_override(None);
+        window_server::set_cursor_location_override(None);
+        window_server::set_window_at_point_regions(None);
         apps.simulate_events();
         assert_eq!(apps.windows[&source].frame.mid(), point);
         assert_eq!(apps.windows[&neighbor].frame, untouched);
