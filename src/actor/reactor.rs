@@ -503,7 +503,7 @@ pub struct Reactor {
     spaces_tx: Option<crate::actor::spaces::Sender>,
     topology_guard: crate::actor::spaces::TopologyGuard,
     main_window_tracker: MainWindowTracker,
-    native_focus_awaiting_inventory: Option<(WindowId, SpaceId)>,
+    pending_unmanaged_focus: Option<(WindowId, SpaceId)>,
     dialog_parents: HashMap<WindowId, dialog_parent::DialogParent>,
     last_focused_editor: HashMap<pid_t, WindowId>,
     last_unmanaged_focus: Option<WindowId>,
@@ -612,7 +612,7 @@ impl Reactor {
             last_screen_frames: HashMap::default(),
             space_activation_policy: SpaceActivationPolicy::new(),
             main_window_tracker: MainWindowTracker::default(),
-            native_focus_awaiting_inventory: None,
+            pending_unmanaged_focus: None,
             dialog_parents: HashMap::default(),
             last_focused_editor: HashMap::default(),
             last_unmanaged_focus: None,
@@ -1450,20 +1450,15 @@ impl Reactor {
                 | Event::ApplicationThreadTerminated(..)
                 | Event::ConfigUpdated(..)
         );
-        let inventory_changed = matches!(
-            event,
-            Event::ApplicationLaunched { .. }
-                | Event::WindowCreated(..)
-                | Event::WindowsDiscovered { .. }
-        );
+        let pending_focus = self.pending_unmanaged_focus_for_event(&event);
         let event = match event {
             Event::WindowServerFocusChanged(native, space) => {
                 // The native child can receive focus before AX supplies its title and rules.
                 let id = WindowServerId::new(native.idx.get());
-                self.native_focus_awaiting_inventory =
-                    (!self.state.windows.contains_window(native)
-                        && self.state.windows.tracked_window_id(id).is_none())
-                    .then_some((native, space));
+                let tracked = self.state.windows.tracked_window_id(id).unwrap_or(native);
+                self.pending_unmanaged_focus = (tracked.pid == native.pid
+                    && !self.accepts_native_focus(tracked))
+                .then_some((native, space));
                 Event::WindowServerFocusChanged(self.resolve_native_focus(native), space)
             }
             event => event,
@@ -1485,21 +1480,19 @@ impl Reactor {
         if refresh_dialog_parents {
             self.refresh_dialog_parents();
         }
-        if inventory_changed && let Some((native, space)) = self.native_focus_awaiting_inventory {
+        if let Some((native, space)) = pending_focus {
             let id = WindowServerId::new(native.idx.get());
             if let Some(window) = self
                 .state
                 .windows
                 .tracked_window_id(id)
                 .or_else(|| self.state.windows.contains_window(native).then_some(native))
+                && window.pid == native.pid
+                && self.main_window_tracker.is_globally_frontmost(native.pid)
+                && self.can_follow_unmanaged_focus(window)
             {
-                self.native_focus_awaiting_inventory = None;
-                if window.pid == native.pid
-                    && self.main_window_tracker.is_globally_frontmost(native.pid)
-                    && self.can_follow_unmanaged_focus(window)
-                {
-                    self.handle_event_traced(Event::WindowServerFocusChanged(window, space));
-                }
+                self.pending_unmanaged_focus = None;
+                self.handle_event_traced(Event::WindowServerFocusChanged(window, space));
             }
         }
     }
@@ -5660,12 +5653,20 @@ impl Reactor {
             | LayoutEvent::WindowSuspended(wid) => self.assigned_space_for_window_id(*wid),
             _ => None,
         };
-        let focus_desktop = matches!(
-            event,
-            LayoutEvent::WindowRemoved(wid)
-                if self.layout_manager.layout_engine.focused_window() == Some(wid)
-        );
-        self.prepare_refocus_before_removal(&event);
+        let focus_desktop = if let LayoutEvent::WindowRemoved(wid) = event
+            && self.main_window() == Some(wid)
+            && self.can_follow_unmanaged_focus(wid)
+        {
+            self.last_unmanaged_focus = Some(wid);
+            false
+        } else {
+            self.prepare_refocus_before_removal(&event);
+            matches!(
+                event,
+                LayoutEvent::WindowRemoved(wid)
+                    if self.layout_manager.layout_engine.focused_window() == Some(wid)
+            )
+        };
         let event_clone = event.clone();
         let layout_outcome =
             self.layout_manager.layout_engine.handle_event(&mut self.state.windows, event);
@@ -5846,6 +5847,49 @@ impl Reactor {
         }
     }
 
+    fn pending_unmanaged_focus_for_event(&mut self, event: &Event) -> Option<(WindowId, SpaceId)> {
+        let (native, space) = self.pending_unmanaged_focus?;
+        let id = WindowServerId::new(native.idx.get());
+        let matches_window = |wid: WindowId| {
+            wid.pid == native.pid
+                && (wid == native || self.state.windows.tracked_window_id(id) == Some(wid))
+        };
+        match event {
+            Event::ApplicationLaunched { pid, .. }
+            | Event::WindowsDiscovered { pid, .. }
+            | Event::ApplicationGloballyActivated(pid)
+                if *pid == native.pid =>
+            {
+                return Some((native, space));
+            }
+            Event::WindowCreated(wid, info, ..)
+                if wid.pid == native.pid && (*wid == native || info.sys_id == Some(id)) =>
+            {
+                return Some((native, space));
+            }
+            Event::WindowTitleChanged(wid, _) if matches_window(*wid) => {
+                return Some((native, space));
+            }
+            Event::ApplicationGloballyActivated(_)
+            | Event::SystemWoke
+            | Event::SessionDidBecomeActive => {}
+            Event::ApplicationGloballyDeactivated(pid)
+            | Event::ApplicationThreadTerminated(pid)
+                if *pid == native.pid => {}
+            Event::WindowClosed(window) | Event::WindowServerHidden(window) if *window == id => {}
+            Event::WindowDestroyed(wid) | Event::WindowMinimized(wid) if matches_window(*wid) => {}
+            _ => return None,
+        }
+        self.pending_unmanaged_focus = None;
+        None
+    }
+
+    fn accepts_native_focus(&self, window: WindowId) -> bool {
+        self.state.windows.is_claimed(window)
+            || self.state.windows.is_admitted(window)
+            || self.can_follow_unmanaged_focus(window)
+    }
+
     fn resolve_native_focus(&self, native: WindowId) -> WindowId {
         let server_id = self
             .state
@@ -5859,10 +5903,7 @@ impl Reactor {
             .tracked_window_id(server_id)
             .filter(|window| window.pid == native.pid)
             .unwrap_or(native);
-        if self.state.windows.is_claimed(tracked)
-            || self.state.windows.is_admitted(tracked)
-            || self.can_follow_unmanaged_focus(tracked)
-        {
+        if self.accepts_native_focus(tracked) {
             return tracked;
         }
         window_server::window_parent(server_id)

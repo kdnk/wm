@@ -11859,7 +11859,55 @@ fn presentation_inventory_tracks_visibility_without_forgetting_layout() {
 
 #[test]
 fn late_picker_registration_respects_the_latest_native_focus() {
-    for focus_returned_to_editor in [false, true] {
+    #[derive(Clone, Copy, Debug)]
+    enum Step {
+        NativeFocus(i32),
+        Register(&'static str),
+        RegisterStandard,
+        TitleChanged,
+        FocusEditor,
+        Deactivate,
+        Activate(i32),
+    }
+    use Step::*;
+
+    let cases: &[(&[Step], usize)] = &[
+        (&[NativeFocus(1), Register("Live Grep")], 1),
+        (&[NativeFocus(1), FocusEditor, Register("Live Grep")], 0),
+        (&[NativeFocus(1), Register(""), TitleChanged], 1),
+        (&[Register(""), NativeFocus(1), TitleChanged], 1),
+        (
+            &[
+                RegisterStandard,
+                NativeFocus(1),
+                TitleChanged,
+                NativeFocus(1),
+            ],
+            1,
+        ),
+        (&[NativeFocus(1), Register(""), FocusEditor, TitleChanged], 0),
+        (
+            &[
+                Deactivate,
+                NativeFocus(1),
+                Register("Live Grep"),
+                Activate(1),
+            ],
+            1,
+        ),
+        (&[NativeFocus(2), Register("Live Grep")], 0),
+        (
+            &[
+                NativeFocus(1),
+                Register(""),
+                Activate(2),
+                Activate(1),
+                TitleChanged,
+            ],
+            0,
+        ),
+    ];
+    for &(steps, expected_warps) in cases {
         let settings = crate::common::config::VirtualWorkspaceSettings {
             app_rules: vec![crate::common::config::AppWorkspaceRule {
                 app_id: Some("com.testapp1".into()),
@@ -11872,6 +11920,7 @@ fn late_picker_registration_respects_the_latest_native_focus() {
             ..Default::default()
         };
         let mut reactor = test_reactor_with_workspace_settings(&settings);
+        reactor.config.virtual_workspaces.reapply_app_rules_on_title_change = true;
         let mut apps = Apps::new();
         let space = SpaceId::new(1);
         let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
@@ -11883,29 +11932,64 @@ fn late_picker_registration_respects_the_latest_native_focus() {
         reactor.handle_event(Event::PointerFocusIntent(None, Instant::now()));
         let dialog = WindowId::new(1, 2);
         let native_id = 10_002;
-        reactor.handle_event(Event::WindowServerFocusChanged(
-            WindowId::new(1, native_id),
-            space,
-        ));
-        if focus_returned_to_editor {
-            reactor.handle_event(Event::WindowServerFocusChanged(editor, space));
-        }
+        crate::sys::window_server::set_window_parent_override(
+            WindowServerId::new(native_id),
+            Some(Some(reactor.test_window_server_id(editor))),
+        );
         let (input_tx, mut input_rx) = actor::channel();
         reactor.communication_manager.input_tx = Some(input_tx);
         let mut info = make_window(2);
         info.sys_id = Some(WindowServerId::new(native_id));
         info.ax_role = Some("AXWindow".into());
         info.ax_subrole = Some("AXDialog".into());
-        info.title = "Live Grep".into();
         let center = info.frame.mid();
-        reactor.handle_event(Event::WindowCreated(dialog, info, None, None));
-        let moved_to_picker =
-            std::iter::from_fn(|| input_rx.try_recv().ok()).any(|(_, request)| match request {
-                input::Request::FocusPointer(pointer) => pointer.visible.mid() == center,
-                input::Request::Warp(point) => point == center,
-                _ => false,
-            });
-        assert_eq!(moved_to_picker, !focus_returned_to_editor);
+        for &step in steps {
+            match step {
+                NativeFocus(pid) => reactor.handle_event(Event::WindowServerFocusChanged(
+                    WindowId::new(pid, native_id),
+                    space,
+                )),
+                Register(title) => {
+                    info.title = title.into();
+                    reactor.handle_event(Event::WindowCreated(dialog, info.clone(), None, None));
+                }
+                RegisterStandard => {
+                    info.title.clear();
+                    info.ax_subrole = Some("AXStandardWindow".into());
+                    reactor.handle_event(Event::WindowCreated(dialog, info.clone(), None, None));
+                    assert!(reactor.state.windows.is_admitted(dialog));
+                }
+                TitleChanged => {
+                    reactor.handle_event(Event::WindowTitleChanged(dialog, "Live Grep".into()))
+                }
+                FocusEditor => reactor.handle_event(Event::WindowServerFocusChanged(editor, space)),
+                Deactivate => reactor.handle_event(Event::ApplicationGloballyDeactivated(1)),
+                Activate(pid) => {
+                    reactor.handle_event(Event::ApplicationGloballyActivated(pid));
+                    reactor.handle_event(Event::ApplicationActivated(pid, Quiet::No));
+                }
+            }
+        }
+        crate::sys::window_server::set_window_parent_override(WindowServerId::new(native_id), None);
+        reactor.handle_event(Event::WindowTitleChanged(editor, "Edited file".into()));
+        let warps: Vec<_> = std::iter::from_fn(|| input_rx.try_recv().ok())
+            .filter_map(|(_, request)| match request {
+                input::Request::FocusPointer(pointer) => pointer.window,
+                input::Request::Warp(point) if point == center => {
+                    Some(WindowServerId::new(native_id))
+                }
+                _ => None,
+            })
+            .collect();
+        let picker_warps = warps.iter().filter(|id| id.as_u32() == native_id).count();
+        assert_eq!(picker_warps, expected_warps, "{steps:?}");
+        if matches!(steps.first(), Some(RegisterStandard)) {
+            assert_eq!(
+                warps,
+                [WindowServerId::new(native_id)],
+                "reclassifying a focused window must preserve native focus"
+            );
+        }
         assert!(!has_window_in_layout(&mut reactor, space, screen, dialog));
         assert!(has_window_in_layout(&mut reactor, space, screen, editor));
     }
