@@ -379,6 +379,10 @@ fn encode_reactor_response(reactor: &mut reactor::Reactor, request: WmRequest) -
             unreachable!("config requests run on config workers")
         }
 
+        WmRequest::CheckpointService { pid } => {
+            checkpoint_service(reactor, pid, crate::common::config::restore_file())
+        }
+
         WmRequest::ExecuteCommand { command } => match command {
             wm_protocol::WmCommand::Config(_) => {
                 unreachable!("config requests run on config workers")
@@ -414,6 +418,28 @@ fn query_space_for_display(
     })
 }
 
+fn checkpoint_service(
+    reactor: &mut reactor::Reactor,
+    pid: u32,
+    master: std::path::PathBuf,
+) -> Vec<u8> {
+    if pid != std::process::id() {
+        return encode_error(serde_json::json!({
+            "message": format!("IPC reached wm PID {}, but launchd reported PID {pid}", std::process::id())
+        }));
+    }
+    save_layout_response(reactor, master)
+}
+
+fn save_layout_response(reactor: &mut reactor::Reactor, path: std::path::PathBuf) -> Vec<u8> {
+    match reactor.save_layout(path) {
+        Ok(()) => encode_success("Layout saved"),
+        Err(error) => encode_error(serde_json::json!({
+            "message": format!("Could not save layout: {error}"),
+        })),
+    }
+}
+
 fn handle_reactor_command(
     reactor: &mut reactor::Reactor,
     command: crate::model::reactor::Command,
@@ -422,12 +448,7 @@ fn handle_reactor_command(
         path,
     }) = command
     {
-        return match reactor.save_layout(path) {
-            Ok(()) => encode_success("Layout saved"),
-            Err(error) => encode_error(serde_json::json!({
-                "message": format!("Could not save layout: {error}"),
-            })),
-        };
+        return save_layout_response(reactor, path);
     }
     reactor.handle_ipc_command(command);
     encode_success("Command executed successfully")

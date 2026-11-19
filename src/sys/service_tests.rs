@@ -33,7 +33,8 @@ impl ServiceControl for FixtureControl {
         }
     }
 
-    fn checkpoint(&mut self) -> io::Result<()> {
+    fn checkpoint(&mut self, pid: u32) -> io::Result<()> {
+        assert_eq!(Some(pid), self.pid);
         self.calls.push("checkpoint".into());
         if self.checkpoint_error {
             Err(io::Error::other("snapshot failed"))

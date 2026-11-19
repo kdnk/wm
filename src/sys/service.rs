@@ -11,9 +11,8 @@ use std::time::Duration;
 
 use clap::Subcommand;
 use nix::unistd::getuid;
-use wm_protocol::{ReactorCommand, WmCommand, WmRequest, WmResponse};
+use wm_protocol::{WmRequest, WmResponse};
 
-use crate::common::config::restore_file;
 use crate::ipc::WmMachClient;
 
 const LAUNCHCTL_PATH: &str = "/bin/launchctl";
@@ -21,7 +20,7 @@ const WM_PLIST: &str = wm_protocol::DEFAULT_SERVICE_NAME;
 
 trait ServiceControl {
     fn running_pid(&mut self) -> io::Result<Option<u32>>;
-    fn checkpoint(&mut self) -> io::Result<()>;
+    fn checkpoint(&mut self, pid: u32) -> io::Result<()>;
     fn start(&mut self) -> io::Result<()>;
     fn launchctl(&mut self, args: &[&str], suppress_output: bool) -> io::Result<i32>;
 }
@@ -59,15 +58,11 @@ impl ServiceControl for NativeServiceControl {
         }
     }
 
-    fn checkpoint(&mut self) -> io::Result<()> {
+    fn checkpoint(&mut self, pid: u32) -> io::Result<()> {
         let client = WmMachClient::connect().map_err(io::Error::other)?;
         let response = client
             .send_typed_request_with_timeout::<String>(
-                &WmRequest::ExecuteCommand {
-                    command: WmCommand::Reactor(ReactorCommand::SaveLayout {
-                        path: restore_file(),
-                    }),
-                },
+                &WmRequest::CheckpointService { pid },
                 Duration::from_secs(10),
             )
             .map_err(io::Error::other)?;
@@ -115,8 +110,8 @@ fn listed_service(jobs: &str) -> io::Result<ListedService> {
 }
 
 fn checkpoint_running_service(control: &mut impl ServiceControl) -> io::Result<bool> {
-    if control.running_pid()?.is_some() {
-        control.checkpoint().map_err(|error| {
+    if let Some(pid) = control.running_pid()? {
+        control.checkpoint(pid).map_err(|error| {
             io::Error::other(format!("could not save layout; wm is still running: {error}"))
         })?;
         return Ok(true);

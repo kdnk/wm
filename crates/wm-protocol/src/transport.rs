@@ -86,6 +86,10 @@ pub enum WmRequest {
     GetMetrics,
     GetBindingMode,
     GetConfig,
+    /// Save the daemon's master layout if launchd identified this process as the managed service.
+    CheckpointService {
+        pid: u32,
+    },
     ExecuteCommand {
         command: WmCommand,
     },

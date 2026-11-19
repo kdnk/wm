@@ -25,6 +25,27 @@ fn save(reactor: &mut Reactor, path: &Path) -> WmResponse {
 }
 
 #[test]
+fn only_the_launchd_process_can_checkpoint_its_master_layout() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1200., 800.));
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, SpaceId::new(1), 1, make_windows(1));
+    let directory = tempfile::tempdir().unwrap();
+    let master = directory.path().join("layout.ron");
+    std::fs::write(&master, "previous snapshot").unwrap();
+    let mut checkpoint = |pid| {
+        let bytes = checkpoint_service(&mut reactor, pid, master.clone());
+        serde_json::from_slice::<WmResponse>(bytes.strip_suffix(&[0]).unwrap()).unwrap()
+    };
+    let pid = std::process::id();
+    assert!(matches!(checkpoint(pid + 1), WmResponse::Error { .. }));
+    assert_eq!(std::fs::read_to_string(&master).unwrap(), "previous snapshot");
+    assert_eq!(checkpoint(pid), WmResponse::Success {
+        data: json!("Layout saved")
+    });
+    LayoutEngine::validate_file(master).unwrap();
+}
+
+#[test]
 fn save_layout_acknowledges_only_a_durable_snapshot() {
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1200., 800.));
