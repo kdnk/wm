@@ -20,6 +20,7 @@
 - `launchctl bootout` can return before launchd removes the job. Before bootstrapping a replacement plist with the same label, wait until `launchctl print gui/$(id -u)/git.kdnk.wm` reports that the service is absent.
 - Unit tests must isolate mouse-state reads from the real WindowServer. Synthetic frame-change events must specify the mouse state needed by the case.
 - Configuration watcher tests must use temporary paths and observe actual filesystem notifications and `ConfigUpdated` events. Do not use the user's configuration or start a daemon for these tests.
+- If a configuration watcher test times out waiting for `ConfigUpdated` in a sandbox, rerun the same test with access to macOS filesystem notifications before diagnosing a regression.
 - The fork's command is `wm`; use its `query`, `execute`, and `subscribe` subcommands to control the daemon. Keep Rift names in upstream attribution, archived import references, and historical verifier filenames.
 - Create dependent branches with `but branch new NAME --above BASE` so their changes can reference commits on the base branch.
 - Release signing uses the fixed identity prepared by `scripts/setup-release-signing.py` and pinned in `assets/release-signing.pem`. Restore the protected backup if local signing material is missing; do not generate a replacement for an established identity.
