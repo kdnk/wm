@@ -182,6 +182,62 @@ mod tests {
     }
 
     #[test]
+    fn picker_keeps_the_final_drag_position_when_the_move_arrives_after_mouse_up() {
+        use crate::actor::drag::MouseButton;
+        use crate::sys::event::MouseState;
+
+        for animation_readback_first in [false, true] {
+            let (mut reactor, space, _apps) = projects();
+            let editor = WindowId::new(1, 1);
+            let owner = reactor.test_window_server_id(editor);
+            let picker = open_picker(&mut reactor, 3, "Fuzzy Finder", Some(owner));
+            let mut dragged = frame(&reactor, picker);
+            dragged.origin.x += 26.;
+            reactor.handle_event(Event::WindowFrameChanged(
+                picker,
+                dragged,
+                None,
+                Requested(false),
+                Some(MouseState::Down),
+            ));
+            reactor.handle_event(Event::MouseUp(MouseButton::Left));
+            dragged.origin.x += 45.;
+            if animation_readback_first {
+                reactor.handle_event(Event::WindowFrameChanged(
+                    picker,
+                    dragged,
+                    None,
+                    Requested(true),
+                    Some(MouseState::Up),
+                ));
+            }
+            reactor.handle_event(Event::WindowFrameChanged(
+                picker,
+                dragged,
+                None,
+                Requested(false),
+                Some(MouseState::Up),
+            ));
+
+            let editor_start = frame(&reactor, editor);
+            shift(&mut reactor, space, editor, 120.);
+            let editor_dx = frame(&reactor, editor).origin.x - editor_start.origin.x;
+            assert!(editor_dx.abs() > 50.);
+            let mut expected = dragged;
+            expected.origin.x += editor_dx;
+            assert_eq!(
+                frame(&reactor, picker),
+                expected,
+                "readback first: {animation_readback_first}"
+            );
+            shift(&mut reactor, space, editor, -editor_dx);
+            assert_eq!(frame(&reactor, editor), editor_start);
+            assert_eq!(frame(&reactor, picker), dragged);
+            window_server::set_window_parent_override(WindowServerId::new(3), None);
+        }
+    }
+
+    #[test]
     fn two_projects_keep_separate_pickers_after_focus_and_close() {
         let (mut reactor, space, mut apps) = projects();
         apps.make_app_and_settle(&mut reactor, 2, make_windows(1));
