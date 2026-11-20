@@ -327,12 +327,11 @@ pub fn handle_window_frame_changed(
         layout.layout_engine.store_floating_position(workspace, wid, new_frame);
     }
 
-    let dragging = state.windows.is_admitted(wid)
-        && (mouse_state == Some(MouseState::Down) || drag.actor.is_active());
-    if dragging {
+    let starts_native_drag = !drag.actor.is_active() && mouse_state == Some(MouseState::Down);
+    if starts_native_drag || drag.actor.update_native(wid, new_frame, new_space) {
         let tiled = !layout.layout_engine.is_window_floating(wid);
         let native_resize = !old_frame.size.same_as(new_frame.size);
-        if !drag.actor.update_native(wid, new_frame, new_space) {
+        if starts_native_drag {
             // The start of a user drag is intent, even when no workspace changes.
             layout.layout_engine.forget_native_layout_for_window(&state.windows, wid);
             let session_id = drag.actor.await_native(wid);
