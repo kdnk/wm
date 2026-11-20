@@ -58,7 +58,9 @@ fn propagate_single_child_allocations(node: &mut ContainerTreeNode) {
     node.children.iter_mut().for_each(propagate_single_child_allocations);
 }
 
-fn logical_window_positions(tree: &ContainerTreeNode) -> HashMap<WindowId, WindowLayoutPosition> {
+fn logical_window_positions(
+    tree: &ContainerTreeNode,
+) -> impl Iterator<Item = (WindowId, WindowLayoutPosition)> + '_ {
     tree.children
         .iter()
         .enumerate()
@@ -72,7 +74,6 @@ fn logical_window_positions(tree: &ContainerTreeNode) -> HashMap<WindowId, Windo
                 }))
             })
         })
-        .collect()
 }
 
 /// Order windows by their logical layout position.
@@ -806,7 +807,7 @@ impl Reactor {
         space_id
             .and_then(|space| self.resolve_query_workspace(space, workspace_index))
             .and_then(|target| self.layout_manager.layout_engine.query_workspace_layout(target))
-            .map(|snapshot| logical_window_positions(&snapshot.container_tree))
+            .map(|snapshot| logical_window_positions(&snapshot.container_tree).collect())
             .unwrap_or_default()
     }
 
@@ -871,13 +872,19 @@ impl Reactor {
             if let crate::layout_engine::systems::LayoutSystemKind::Scrolling(system) =
                 &ws.layout_system
                 && let Some(layout) = engine.workspaces().active_layout(ws.space, workspace)
-                && let Some((camera, frames)) = system.presentation(layout)
-                && let Some((_, frame, fixed)) =
-                    frames.into_iter().find(|(id, _, _)| *id == window_id)
             {
-                let scale =
-                    self.space_state.screen_by_space(ws.space).map_or(1., |s| s.backing_scale);
-                data.layout_frame = Some(camera.target_frame(frame, fixed, scale));
+                if !data.is_floating {
+                    data.layout_position = logical_window_positions(&system.container_tree(layout))
+                        .find_map(|(id, position)| (id == window_id).then_some(position));
+                }
+                if let Some((camera, frames)) = system.presentation(layout)
+                    && let Some((_, frame, fixed)) =
+                        frames.into_iter().find(|(id, _, _)| *id == window_id)
+                {
+                    let scale =
+                        self.space_state.screen_by_space(ws.space).map_or(1., |s| s.backing_scale);
+                    data.layout_frame = Some(camera.target_frame(frame, fixed, scale));
+                }
             }
         }
         Some(data)

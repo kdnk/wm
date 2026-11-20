@@ -5221,6 +5221,12 @@ fn workspace_query_exposes_scrolling_order_for_inactive_workspace() {
             .collect::<Vec<_>>(),
         vec![Some((0, 0)), Some((1, 0)), Some((2, 0))]
     );
+    for window in &inactive.windows {
+        assert_eq!(
+            reactor.query_window_info(window.id).unwrap().layout_position,
+            window.layout_position
+        );
+    }
 }
 
 #[test]
@@ -5252,6 +5258,12 @@ fn windows_query_exposes_scrolling_order() {
             .collect::<Vec<_>>(),
         vec![Some((0, 0)), Some((1, 0)), Some((2, 0))]
     );
+    for window in queried {
+        assert_eq!(
+            reactor.query_window_info(window.id).unwrap().layout_position,
+            window.layout_position
+        );
+    }
 }
 
 #[test]
