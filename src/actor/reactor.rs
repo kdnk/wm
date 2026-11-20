@@ -2330,6 +2330,8 @@ impl Reactor {
                 return Ok(outcome);
             }
             Event::WindowFrameChanged(wid, new_frame, last_seen, requested, mouse_state) => {
+                use window_workflow::FrameChangeDisposition;
+
                 let mission_control_active = self.is_mission_control_active();
                 let mut effective_mouse_state = mouse_state;
                 // A delayed move from an app can invalidate a parked frame even when
@@ -2349,20 +2351,27 @@ impl Reactor {
                 {
                     self.transaction_manager.clear_target_for_window(wsid);
                 }
-                if matches!(
-                    window_workflow::classify_window_frame_change(
-                        &mut self.state,
-                        &self.transaction_manager,
-                        &mut self.drag_manager,
-                        wid,
-                        new_frame,
-                        last_seen,
-                        requested.0,
-                        &mut effective_mouse_state,
-                        mission_control_active,
-                    ),
-                    window_workflow::FrameChangeDisposition::Handled
-                ) {
+                let disposition = window_workflow::classify_window_frame_change(
+                    &mut self.state,
+                    &self.transaction_manager,
+                    &mut self.drag_manager,
+                    wid,
+                    new_frame,
+                    last_seen,
+                    requested.0,
+                    &mut effective_mouse_state,
+                    mission_control_active,
+                );
+                // A readback can cache the released position before its native move arrives.
+                if matches!(disposition, FrameChangeDisposition::Native { .. })
+                    && let Some(parent) = self.dialog_parents.get_mut(&wid)
+                    && let Some(owner) = self.state.windows.window(parent.window)
+                {
+                    parent.offset_x = new_frame.origin.x - owner.frame_monotonic.origin.x;
+                }
+                if !matches!(disposition, FrameChangeDisposition::Native {
+                    geometry_changed: true
+                }) {
                     let mut outcome = EventOutcome::no_change();
                     outcome.dispatch_mouse_up = effective_mouse_state
                         == Some(crate::sys::event::MouseState::Up)
@@ -2377,14 +2386,6 @@ impl Reactor {
                     .map(|window| (window.info.sys_id, window.frame_monotonic))
                     .unwrap_or((None, new_frame));
                 let old_space = self.geometry_space_for_window(&old_frame, server_id);
-                if !requested.0
-                    && effective_mouse_state == Some(MouseState::Down)
-                    && old_frame.origin.x != new_frame.origin.x
-                    && let Some(parent) = self.dialog_parents.get_mut(&wid)
-                    && let Some(owner) = self.state.windows.window(parent.window)
-                {
-                    parent.offset_x = new_frame.origin.x - owner.frame_monotonic.origin.x;
-                }
                 let new_space = self.geometry_space_for_window(&new_frame, server_id);
                 let resized = !old_frame.size.same_as(new_frame.size);
                 // Native space lookup is only needed for a resize. Position

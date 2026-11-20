@@ -178,7 +178,7 @@ pub struct WindowFrameChangedPayload {
 
 pub enum FrameChangeDisposition {
     Handled,
-    NeedsGeometryAnalysis,
+    Native { geometry_changed: bool },
 }
 
 pub fn classify_window_frame_change(
@@ -240,12 +240,12 @@ pub fn classify_window_frame_change(
 
     if old_frame.same_as(new_frame) {
         query_mouse_for_active_drag(drag, mouse_state);
-        return FrameChangeDisposition::Handled;
+        return FrameChangeDisposition::Native { geometry_changed: false };
     }
     if mouse_state.is_none() {
         *mouse_state = crate::sys::event::get_mouse_state();
     }
-    FrameChangeDisposition::NeedsGeometryAnalysis
+    FrameChangeDisposition::Native { geometry_changed: true }
 }
 
 fn query_mouse_for_active_drag(drag: &DragManager, mouse_state: &mut Option<MouseState>) {
