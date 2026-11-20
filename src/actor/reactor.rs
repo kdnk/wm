@@ -1940,8 +1940,7 @@ impl Reactor {
                     application_workflow::ApplicationActivatedPayload { pid, quiet },
                 )?;
                 if quiet == Quiet::No && self.main_window_tracker.is_globally_frontmost(pid) {
-                    // Use only the app thread's resolved main window; pending
-                    // AX admission can leave the previous main window cached.
+                    // Pending AX admission can leave the previous main window cached.
                     let native_dialog = self
                         .main_window_tracker
                         .window_server_focus()
@@ -1952,7 +1951,17 @@ impl Reactor {
                         // A windowless app switch can leave the previous native picker cached.
                         (self.last_unmanaged_focus == Some(dialog)).then_some(dialog)
                     } else {
-                        self.main_window_tracker.app_main_window(pid)
+                        self.main_window_tracker.app_main_window(pid).or_else(|| {
+                            let mut admitted = self
+                                .state
+                                .windows
+                                .window_ids_for_pid(pid)
+                                .filter(|wid| self.state.windows.is_admitted(*wid));
+                            let window = admitted.next()?;
+                            (admitted.next().is_none()
+                                && !self.state.windows.is_temporarily_unavailable(window))
+                            .then_some(window)
+                        })
                     };
                     outcome.absorb(self.auto_switch_to_window_workspace(activation_window));
                     outcome.focused_window = activation_window;
@@ -4348,6 +4357,13 @@ impl Reactor {
                 outcome.arrange.space_scope = screen.space;
             }
         }
+        let display_count = self.space_state.screens.len();
+        if display_count > 1 {
+            self.layout_manager
+                .layout_engine
+                .workspaces_mut()
+                .update_display_count(display_count);
+        }
         for (previous_space, space) in space_remaps {
             if let Some(frame) = self.last_screen_frames.remove(&previous_space) {
                 self.last_screen_frames.insert(space, frame);
@@ -4358,6 +4374,12 @@ impl Reactor {
                 previous_space,
                 space,
             );
+        }
+        if display_count == 1 {
+            self.layout_manager
+                .layout_engine
+                .workspaces_mut()
+                .update_display_count(display_count);
         }
         for screen in &self.space_state.screens {
             let (Some(space), Some(display_uuid)) = (screen.space, screen.display_uuid_opt())
@@ -4371,10 +4393,6 @@ impl Reactor {
         self.space_activation_policy
             .on_spaces_updated(activation_config, &self.space_state.screens);
         let previously_active = self.set_active_spaces_from_snapshot(&authoritative_spaces);
-        self.layout_manager
-            .layout_engine
-            .workspaces_mut()
-            .update_display_count(self.space_state.screens.len());
         let engine = &self.layout_manager.layout_engine;
         let mut refits = Vec::new();
         for screen in &self.space_state.screens {

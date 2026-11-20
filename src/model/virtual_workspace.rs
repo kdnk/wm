@@ -1040,17 +1040,13 @@ impl WorkspaceStore {
             return Vec::new();
         }
 
-        let deleted_target_workspace_ids = if self.settings.mode == WorkspaceMode::PerDisplay {
-            self.workspace_ids(new_space)
+        let deleted_target_workspace_ids = if self.effective_mode() == WorkspaceMode::PerDisplay
+            && self.workspaces_on(old_space).next().is_some()
+        {
+            self.remove_space(new_space)
         } else {
             Vec::new()
         };
-        for &id in &deleted_target_workspace_ids {
-            self.workspaces.remove(id);
-        }
-        if !deleted_target_workspace_ids.is_empty() {
-            self.order.retain(|id| !deleted_target_workspace_ids.contains(id));
-        }
         for workspace in
             self.workspaces.values_mut().filter(|workspace| workspace.space == old_space)
         {
@@ -2214,6 +2210,22 @@ mod tests {
         );
         assert!(window_store.workspace_windows(transient_ws).is_empty());
         assert!(manager.workspace_info(new_space, transient_ws).is_none());
+    }
+
+    #[test]
+    fn remap_space_replaces_existing_catalog_in_single_display_global_mode() {
+        let mut windows = WindowStore::default();
+        let mut store = WorkspaceStore::new();
+        store.settings.mode = WorkspaceMode::Global;
+        store.update_display_count(1);
+        let old = SpaceId::new(1);
+        let new = SpaceId::new(2);
+        let original = store.list_workspaces(old);
+        let placeholder = store.list_workspaces(new);
+        assert_ne!(original, placeholder);
+
+        store.remap_space(&mut windows, old, new);
+        assert_eq!(store.list_workspaces(new), original);
     }
 
     #[test]

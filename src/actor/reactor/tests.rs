@@ -5121,6 +5121,24 @@ fn focus_follows_mouse_raise_is_quiet_so_stale_main_window_cannot_switch_workspa
 }
 
 #[test]
+fn resolved_activation_without_main_window_follows_sole_admitted_window() {
+    let (_, mut reactor, space, main, _) = pending_activation_context();
+    reactor.handle_event(Event::ApplicationMainWindowChanged(main.pid, None, Quiet::No));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space),
+        Some(1)
+    );
+
+    reactor.handle_event(Event::ApplicationActivated(main.pid, Quiet::No));
+
+    assert_eq!(
+        reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space),
+        Some(0)
+    );
+    assert_eq!(reactor.layout_manager.layout_engine.focused_window(), Some(main));
+}
+
+#[test]
 fn resolved_activation_without_main_window_does_not_choose_arbitrary_app_window() {
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));

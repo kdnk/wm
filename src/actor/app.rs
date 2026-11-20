@@ -687,7 +687,7 @@ impl Request {
     #[inline]
     fn disables_enhanced_ui(&self) -> bool {
         match self {
-            Self::SetWindowFrames(_, _, FrameMode::Full, enabled, _) => *enabled,
+            Self::SetWindowFrames(_, _, _, enabled, _) => *enabled,
             _ => false,
         }
     }
@@ -956,15 +956,14 @@ fn write_frame(
 /// `hint` is the last observed or intended frame. It only selects setters: AX
 /// notifications are asynchronous, so it may be stale, and the returned frame is
 /// always read back, unless the app did not answer a setter: the readback would
-/// queue behind it and wait out the same timeout. `before_write` runs only
-/// before writes that include a resize.
+/// queue behind it and wait out the same timeout.
 fn reconcile_frame(
     elem: &impl FrameTarget,
     hint: CGRect,
     target: CGRect,
     mode: FrameMode,
     bounds: Option<ScrollingDisplayBounds>,
-    mut before_write: impl FnMut(),
+    mut before_write: impl FnMut(FrameWrites),
 ) -> Result<CGRect, AxError> {
     let constrain = |frame| bounds.map_or(frame, |bounds| bounds.apply(frame));
     let mut target = constrain(target);
@@ -974,9 +973,7 @@ fn reconcile_frame(
     let planned = FrameWrites::between(hint, target, mode);
     let mut failed = FrameWrites::default();
     if planned.any() {
-        if planned.size {
-            before_write();
-        }
+        before_write(planned);
         failed = write_frame(elem, hint, target, planned, bounds)?;
     }
     let mut frame = elem.frame()?;
@@ -994,8 +991,8 @@ fn reconcile_frame(
             position: !failed.position,
             size: missed.size,
         };
-        if fix.size {
-            before_write();
+        if fix.any() {
+            before_write(fix);
         }
         let fix_failed = write_frame(elem, frame, target, fix, bounds)?;
         failed.position |= fix_failed.position;
@@ -1006,6 +1003,7 @@ fn reconcile_frame(
     // Reuse the readback already required by reconciliation, never requested size.
     let constrained = constrain(CGRect::new(target.origin, frame.size));
     if !failed.position && !constrained.origin.same_as(frame.origin) && bounds.is_some() {
+        before_write(FrameWrites { position: true, size: false });
         elem.set_position(constrained.origin)?;
         frame = elem.frame()?;
     }
@@ -1043,14 +1041,13 @@ fn write_interactive_frame(
     let bounds = elem.scrolling_bounds().map(|bounds| bounds.for_motion(*hint));
     if let Some(bounds) = bounds {
         if set_size {
-            if let Ok(accepted) = reconcile_frame(
-                elem,
-                *hint,
-                frame,
-                FrameMode::Full,
-                Some(bounds),
-                &mut before_resize,
-            ) {
+            if let Ok(accepted) =
+                reconcile_frame(elem, *hint, frame, FrameMode::Full, Some(bounds), |writes| {
+                    if writes.size {
+                        before_resize();
+                    }
+                })
+            {
                 *hint = accepted;
             }
             return;
@@ -1607,7 +1604,7 @@ impl State {
                             desired,
                             mode,
                             authority.1,
-                            || self.hold_batch_eui(eui),
+                            |_| self.hold_batch_eui(eui),
                         )
                     });
                     let frame = match self.handle_ax_result(wid, result)? {
@@ -1748,7 +1745,10 @@ impl State {
                             target,
                             mode,
                             authority.1,
-                            || {
+                            |_| {
+                                if source == FrameSource::DialogPosition {
+                                    return;
+                                }
                                 if *eui == BatchEui::NotRequested {
                                     *eui = BatchEui::Deferred;
                                 }
@@ -3070,7 +3070,7 @@ mod frame_tests {
             target,
             FrameMode::Full,
             window.scrolling_bounds(),
-            || {},
+            |_| {},
         )
     }
 
@@ -3122,7 +3122,33 @@ mod frame_tests {
     }
 
     #[test]
-    fn enhanced_ui_is_suppressed_only_for_actual_resizes() {
+    fn position_reconciliation_suppresses_enhanced_ui_before_ax_write() {
+        let initial = rect(10., 20., 1024., 800.);
+        let target = rect(30., 40., 1024., 800.);
+        for (mode, hint) in [
+            (FrameMode::Position, initial),
+            (FrameMode::Position, target),
+            (FrameMode::Full, initial),
+        ] {
+            let window = FakeWindow {
+                frame: Cell::new(initial),
+                ..Default::default()
+            };
+            let actual = reconcile_frame(&window, hint, target, mode, None, |_| {
+                window.calls.borrow_mut().push("eui");
+            })
+            .unwrap();
+            let mut calls = vec!["eui", "position", "frame"];
+            if hint == target {
+                calls.insert(0, "frame");
+            }
+            assert_eq!(actual, target);
+            assert_eq!(*window.calls.borrow(), calls);
+        }
+    }
+
+    #[test]
+    fn reconciliation_reports_resize_before_the_native_write() {
         let initial = rect(10., 20., 1024., 800.);
         for (target, mode, hint, expected_resizes) in [
             (rect(30., 40., 1024., 800.), FrameMode::Full, initial, 0),
@@ -3141,8 +3167,8 @@ mod frame_tests {
                 ..Default::default()
             };
             let resizes = Cell::new(0);
-            reconcile_frame(&window, hint, target, mode, None, || {
-                resizes.set(resizes.get() + 1)
+            reconcile_frame(&window, hint, target, mode, None, |writes| {
+                resizes.set(resizes.get() + usize::from(writes.size));
             })
             .unwrap();
             assert_eq!(resizes.get(), expected_resizes);
@@ -3221,7 +3247,7 @@ mod frame_tests {
     }
 
     #[test]
-    fn position_only_batches_do_not_request_enhanced_ui_suppression() {
+    fn enhanced_ui_suppression_requests_apply_to_both_frame_modes() {
         let wid = WindowId::new(1, 1);
         let request = |mode, enabled| {
             Request::SetWindowFrames(
@@ -3232,7 +3258,8 @@ mod frame_tests {
                 Default::default(),
             )
         };
-        assert!(!request(FrameMode::Position, true).disables_enhanced_ui());
+        assert!(!request(FrameMode::Position, false).disables_enhanced_ui());
+        assert!(request(FrameMode::Position, true).disables_enhanced_ui());
         assert!(!request(FrameMode::Full, false).disables_enhanced_ui());
         assert!(request(FrameMode::Full, true).disables_enhanced_ui());
     }
@@ -3250,7 +3277,7 @@ mod frame_tests {
             target,
             FrameMode::Full,
             window.scrolling_bounds(),
-            || panic!("equal geometry needs no setter"),
+            |_| panic!("equal geometry needs no setter"),
         )
         .unwrap();
         assert_eq!(accepted, target);
@@ -3279,7 +3306,7 @@ mod frame_tests {
                 requested,
                 FrameMode::Full,
                 target.scrolling_bounds(),
-                || {},
+                |_| {},
             )
             .unwrap();
             assert_eq!(accepted, window.frame.get());
@@ -3443,7 +3470,7 @@ mod frame_tests {
             window.frame.get(),
             FrameMode::Full,
             target.scrolling_bounds(),
-            || {},
+            |_| {},
         )
         .unwrap();
         assert_eq!(accepted, rect(100., 0., 400., 800.));
@@ -3614,7 +3641,7 @@ mod frame_tests {
             target,
             FrameMode::Full,
             fenced.scrolling_bounds(),
-            || {},
+            |_| {},
         )
         .unwrap();
         assert!(

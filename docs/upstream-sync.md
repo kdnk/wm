@@ -1,8 +1,25 @@
 # Rift upstream integration
 
-The latest reviewed Rift revision is [ecdee64](https://github.com/acsandmann/rift/commit/ecdee64e52855b4fb8d13f4441b108cefd866c88), published on 2026-11-17. The November 17 integration reviews all eleven commits after [b571fe7](https://github.com/acsandmann/rift/commit/b571fe76dfc4c0cc29ce22ff478165adda7c0a62).
+The latest reviewed Rift revision is [7d0e5e3](https://github.com/acsandmann/rift/commit/7d0e5e3b5d0b00f9bd22270e4df431b3424f992e), published on 2026-11-20.
+
+## November 21 integration
+
+| Upstream change | wm disposition |
+| --- | --- |
+| [165e29a](https://github.com/acsandmann/rift/commit/165e29a567f5858aee2ed09fe9e2233b50b55576) | wm already honors `manage = true` for resizable root `AXDialog` windows that AX reports as nonmodal. Retain the existing modal and native transient safeguards. |
+| [f2f96e5](https://github.com/acsandmann/rift/commit/f2f96e56b150dfadb5314aebc32a986be1031a0c) | Follow the sole admitted window on app activation when `AXMainWindow` is absent. Preserve native picker precedence and wait for pending window admission. |
+| [48f5bbe](https://github.com/acsandmann/rift/commit/48f5bbe0f17e057a575b337eb747f252b77f7393) | Replace the destination catalog when a local desktop ID changes. Keep both catalogs when the old or new topology shares workspaces. |
+| [611c878](https://github.com/acsandmann/rift/commit/611c87843ed9bac68ee792a339884a0cf2bbe456), [989f6f7](https://github.com/acsandmann/rift/commit/989f6f77b7791f6b79703596be6233ef47247d21) | wm versions independently. |
+| [9bbe8fe](https://github.com/acsandmann/rift/commit/9bbe8fe04516cb98975b38d475190d872ed4b5f5) | wm already handles closed desktops in [60221aa](https://github.com/kdnk/wm/commit/60221aa188e73df01343e233126e426a4aa72682), including saved catalogs. |
+| [5bd2564](https://github.com/acsandmann/rift/commit/5bd25641abacf1728a0ebd6197746fba4356dbc3) | Suppress Enhanced UI before requested position-only layout writes. wm already suppresses it during horizontal viewport animation and verifies Firefox's attribute writes by reading back the value when AX reports `NotImplemented`. |
+| [eb14120](https://github.com/acsandmann/rift/commit/eb14120bba3072cb980d6e153f1424f104247844) | Retain wm's scrolling layout and saved-state format. wm already keeps native drags attached to their source window. Defer AX write retries because Rift's implementation depends on its rewritten frame transactions and animation reconciliation. |
+| [7d0e5e3](https://github.com/acsandmann/rift/commit/7d0e5e3b5d0b00f9bd22270e4df431b3424f992e) | Keep wm's event commit path. Rift's rewrite builds on the new layout backends and changes when geometry, focus, and notifications take effect. |
+
+The three new regression tests failed before the fixes and passed afterward. Both `scripts/verify-local.sh` and `scripts/verify-dot-port.sh` passed on macOS, including 981 library tests and the native menu bar and drag preview fixtures. Live behavior with an installed candidate daemon remains unverified.
 
 ## November 17 integration
+
+The November 17 integration reviewed all eleven commits after [b571fe7](https://github.com/acsandmann/rift/commit/b571fe76dfc4c0cc29ce22ff478165adda7c0a62), through [ecdee64](https://github.com/acsandmann/rift/commit/ecdee64e52855b4fb8d13f4441b108cefd866c88).
 
 | Upstream change | wm disposition |
 | --- | --- |
