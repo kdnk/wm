@@ -2266,7 +2266,7 @@ impl Reactor {
                     let space = resolved.unwrap_or(sid);
                     let windows = &self.state.windows;
                     self.transient_focus.native(info.id, info.pid, space, native);
-                    if !native
+                    if native.is_none()
                         && let Some(wid) =
                             windows.tracked_window_id(wsid).filter(|wid| wid.pid == info.pid)
                         && let Some(window) = windows.window(wid)
@@ -5031,7 +5031,9 @@ impl Reactor {
             })
             .collect();
         self.transient_focus.windows.retain(|id, t| {
-            t.native || t.pid != pid || self.state.windows.tracked_window_id(*id).is_some()
+            t.native.is_some()
+                || t.pid != pid
+                || self.state.windows.tracked_window_id(*id).is_some()
         });
         let active_spaces = self
             .space_state
@@ -5862,7 +5864,7 @@ impl Reactor {
             self.transient_focus
                 .windows
                 .get(&id)
-                .is_some_and(|t| t.native && t.pid == wid.pid)
+                .is_some_and(|t| t.native.is_some() && t.pid == wid.pid)
         }) && !crate::sys::app::is_ibkr_desktop_dialog(&window.info);
         if was_admitted && !window.is_admitted() {
             self.send_layout_event(LayoutEvent::WindowSuspended(wid));
@@ -5873,7 +5875,9 @@ impl Reactor {
         match *event {
             Event::WindowDestroyed(wid) => {
                 let id = self.state.windows.record(wid).and_then(|w| w.window_server_id());
-                self.transient_focus.windows.retain(|key, t| t.native || Some(*key) != id);
+                self.transient_focus
+                    .windows
+                    .retain(|key, t| t.native.is_some() || Some(*key) != id);
             }
             Event::WindowClosed(id) => {
                 self.transient_focus.windows.remove(&id);
@@ -5961,14 +5965,28 @@ impl Reactor {
 
     fn transient_blocks_mouse_focus(&self) -> bool {
         self.transient_focus.windows.iter().any(|(id, t)| {
-            t.visible
-                && self.main_window_tracker.is_globally_frontmost(t.pid)
-                && self.active_spaces.contains(&t.space)
-                && !self.state.windows.tracked_window_id(*id).is_some_and(|wid| {
-                    wid.pid == t.pid
-                        && (self.state.windows.is_admitted(wid)
-                            || self.can_follow_unmanaged_focus(wid))
-                })
+            if !t.visible
+                || !self.main_window_tracker.is_globally_frontmost(t.pid)
+                || !self.active_spaces.contains(&t.space)
+            {
+                return false;
+            }
+            let tracked = self.state.windows.tracked_window_id(*id).filter(|wid| wid.pid == t.pid);
+            if tracked.is_some_and(|wid| {
+                self.state.windows.is_admitted(wid) || self.can_follow_unmanaged_focus(wid)
+            }) {
+                return false;
+            }
+            !(t.native == Some(window_server::NativeTransient::AttachedControl)
+                && self
+                    .app_manager
+                    .apps
+                    .get(&t.pid)
+                    .is_some_and(|app| app.info.bundle_id.as_deref() == Some("com.google.Chrome"))
+                && tracked.and_then(|wid| self.state.windows.window(wid)).is_none_or(|window| {
+                    window.info.ax_role.as_deref() == Some("AXWindow")
+                        && window.info.ax_subrole.as_deref() == Some("AXUnknown")
+                }))
         })
     }
 

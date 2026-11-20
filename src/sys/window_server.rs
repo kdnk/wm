@@ -692,11 +692,30 @@ fn window_is_effectively_invisible(alpha: f32, layer: i32) -> bool {
     layer == 0 && alpha <= EFFECTIVELY_INVISIBLE_WINDOW_ALPHA
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativeTransient {
+    Blocking,
+    AttachedControl,
+}
+
 /// Appearance-only metadata and transient classification from one native query.
-pub(crate) fn get_window_with_transient(id: WindowServerId) -> Option<(WindowServerInfo, bool)> {
+pub(crate) fn get_window_with_transient(
+    id: WindowServerId,
+) -> Option<(WindowServerInfo, Option<NativeTransient>)> {
     #[cfg(test)]
     {
-        return get_windows(&[id]).into_iter().next().map(|info| (info, false));
+        return get_windows(&[id]).into_iter().next().map(|info| {
+            let transient = window_tags(id).and_then(|tags| {
+                let parent = TEST_WINDOW_PARENT_OVERRIDE
+                    .with(|parents| parents.borrow().get(&id.0).copied().flatten());
+                classify_native_transient(
+                    SLSWindowTags::from_bits_retain(tags),
+                    parent.map_or(0, WindowServerId::as_u32),
+                    info.layer,
+                )
+            });
+            (info, transient)
+        });
     }
     #[cfg(not(test))]
     {
@@ -704,13 +723,13 @@ pub(crate) fn get_window_with_transient(id: WindowServerId) -> Option<(WindowSer
         if query.count() != 1 || query.advance().is_none() {
             return None;
         }
-        Some((
-            window_info_from_query(&query)?,
-            native_window_is_transient(
-                SLSWindowTags::from_bits_retain(query.tags()),
-                query.parent_id(),
-            ),
-        ))
+        let info = window_info_from_query(&query)?;
+        let transient = classify_native_transient(
+            SLSWindowTags::from_bits_retain(query.tags()),
+            query.parent_id(),
+            info.layer,
+        );
+        Some((info, transient))
     }
 }
 
@@ -727,6 +746,30 @@ fn native_window_is_transient(tags: SLSWindowTags, parent: u32) -> bool {
                     | SLSWindowTags::HIDE_ON_DEACTIVATE
                     | SLSWindowTags::IGNORES_CYCLE,
             ))
+}
+
+fn classify_native_transient(
+    tags: SLSWindowTags,
+    parent: u32,
+    layer: i32,
+) -> Option<NativeTransient> {
+    native_window_is_transient(tags, parent).then(|| {
+        if parent != 0
+            && layer == 0
+            && tags.contains(
+                SLSWindowTags::ATTACHED
+                    | SLSWindowTags::FLOATING
+                    | SLSWindowTags::OPAQUE_FOR_EVENTS
+                    | SLSWindowTags::IGNORES_CYCLE
+                    | SLSWindowTags::DEFERS_ORDERING,
+            )
+            && !tags.intersects(SLSWindowTags::DOCUMENT | SLSWindowTags::MODAL)
+        {
+            NativeTransient::AttachedControl
+        } else {
+            NativeTransient::Blocking
+        }
+    })
 }
 
 #[cfg_attr(test, allow(dead_code))]
@@ -1303,7 +1346,7 @@ pub unsafe fn switch_space(direction: crate::layout_engine::Direction) {
 
 #[cfg(test)]
 mod tests {
-    use super::{SLSWindowTags, WindowServerId, key_window_in_z_order};
+    use super::{NativeTransient, SLSWindowTags, WindowServerId, key_window_in_z_order};
 
     #[test]
     fn native_transient_tags_match_observed_appkit_windows() {
@@ -1333,6 +1376,29 @@ mod tests {
             tags | SLSWindowTags::MODAL,
             1800
         ));
+    }
+
+    #[test]
+    fn native_find_bar_tags_identify_an_attached_control() {
+        let tags = SLSWindowTags::from_bits_retain(0x1400c2482);
+        assert_eq!(
+            super::classify_native_transient(tags, 42, 0),
+            Some(NativeTransient::AttachedControl),
+        );
+        for (tags, layer) in [
+            (tags, 1),
+            (tags | SLSWindowTags::MODAL, 0),
+            (tags | SLSWindowTags::DOCUMENT, 0),
+        ] {
+            assert_eq!(
+                super::classify_native_transient(tags, 42, layer),
+                Some(NativeTransient::Blocking),
+            );
+        }
+        assert_ne!(
+            super::classify_native_transient(tags, 0, 0),
+            Some(NativeTransient::AttachedControl),
+        );
     }
 
     #[test]

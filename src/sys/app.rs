@@ -485,7 +485,7 @@ impl WindowInfo {
             .or_else(|| identity.resolve(|| WindowServerId::try_from(element).ok()));
         let is_resizable = element.can_resize().unwrap_or(true);
         let is_modal = (ax_role.as_deref() == Some("AXWindow")
-            && ax_subrole.as_deref() == Some("AXDialog"))
+            && matches!(ax_subrole.as_deref(), Some("AXDialog" | "AXSystemDialog")))
         .then(|| element.bool_attribute("AXModal").ok())
         .flatten();
 
