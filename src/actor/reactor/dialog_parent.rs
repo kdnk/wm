@@ -182,6 +182,39 @@ mod tests {
     }
 
     #[test]
+    fn a_picker_parks_at_its_editors_edge_and_returns_to_its_offset() {
+        let (mut reactor, space, _apps) = projects();
+        let editor = WindowId::new(1, 1);
+        let owner = reactor.test_window_server_id(editor);
+        let picker = open_picker(&mut reactor, 3, "Fuzzy Finder", Some(owner));
+        let screen = reactor.space_state.screen_by_space(space).unwrap().frame;
+        let starting_editor = frame(&reactor, editor);
+        let starting_picker = frame(&reactor, picker);
+
+        for (dx, parking_x) in [
+            (
+                2.0 * screen.size.width,
+                screen.origin.x + screen.size.width - 1.0,
+            ),
+            (
+                -2.0 * screen.size.width,
+                screen.origin.x - starting_picker.size.width + 1.0,
+            ),
+        ] {
+            shift(&mut reactor, space, editor, dx);
+            let mut parked = starting_picker;
+            parked.origin.x = parking_x;
+            assert_eq!(frame(&reactor, picker), parked);
+
+            let return_dx = starting_editor.origin.x - frame(&reactor, editor).origin.x;
+            shift(&mut reactor, space, editor, return_dx);
+            assert_eq!(frame(&reactor, editor), starting_editor);
+            assert_eq!(frame(&reactor, picker), starting_picker);
+        }
+        window_server::set_window_parent_override(WindowServerId::new(3), None);
+    }
+
+    #[test]
     fn picker_keeps_the_final_drag_position_when_the_move_arrives_after_mouse_up() {
         use crate::actor::drag::MouseButton;
         use crate::sys::event::MouseState;
