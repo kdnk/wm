@@ -2392,6 +2392,33 @@ fn dragging_on_the_original_display_supersedes_an_unapplied_keyboard_move() {
 }
 
 #[test]
+fn unrelated_native_resize_does_not_steal_a_cross_display_drag() {
+    let (mut reactor, source, _, left, right, frame, right_screen) =
+        reactor_with_window_on_space1_two_displays();
+    let other = WindowId::new(source.pid, 2);
+    let workspace = reactor.state.windows.workspace_for_window(source).unwrap();
+    reactor.add_test_window(other, WindowServerId::new(122), Some(left), frame);
+    assert!(reactor.assign_test_window_to_workspace(left, other, workspace));
+    reactor.send_layout_event(LayoutEvent::WindowAdded(left, source));
+    reactor.send_layout_event(LayoutEvent::WindowAdded(left, other));
+
+    let moved = CGRect::new(CGPoint::new(right_screen.min().x + 100., 100.), frame.size);
+    let changed = |window, frame| {
+        Event::WindowFrameChanged(window, frame, None, Requested(false), Some(MouseState::Down))
+    };
+    reactor.handle_event(changed(source, moved));
+    let mut resized = reactor.state.windows.window(other).unwrap().frame_monotonic;
+    resized.size.width += 80.;
+    reactor.handle_event(changed(other, resized));
+    window_server::set_window_under_cursor_override(Some(None));
+    reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+    window_server::set_window_under_cursor_override(None);
+
+    assert_eq!(reactor.assigned_space_for_window_id(source), Some(right));
+    assert_eq!(reactor.assigned_space_for_window_id(other), Some(left));
+}
+
+#[test]
 fn native_cross_display_drop_removes_the_source_tile() {
     for already_arrived in [false, true] {
         let (mut reactor, wid, wsid, left, right, frame, right_screen) =

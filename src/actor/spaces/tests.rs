@@ -883,6 +883,49 @@ fn resizing_during_a_native_space_switch_preserves_both_workspace_catalogs() {
 }
 
 #[test]
+fn closing_a_native_desktop_preserves_the_surviving_workspace_catalog() {
+    use crate::common::config::{VirtualWorkspaceSettings, WorkspaceMode};
+
+    let settings = VirtualWorkspaceSettings {
+        mode: WorkspaceMode::Global,
+        default_workspace_count: 4,
+        workspace_names: (1..=4).map(|index| index.to_string()).collect(),
+        ..Default::default()
+    };
+    let mut rig = Rig::new();
+    let mut reactor = Reactor::new_for_test(crate::layout_engine::LayoutEngine::new(
+        &settings,
+        &Default::default(),
+        None,
+    ));
+    let (closed, surviving) = (SpaceId::new(1), SpaceId::new(2));
+    let mut snapshot = sample(vec![screen(1, "laptop", closed.get())]);
+    snapshot.inventory.insert("laptop".into(), vec![closed, surviving]);
+    for space in [closed, surviving] {
+        snapshot.screens[0].space = Some(space);
+        let state = rig.tick(0, Some(snapshot.clone())).unwrap();
+        reactor.handle_events(vec![reactor::Event::SpaceStateChanged(state)]);
+    }
+    let workspaces = |reactor: &mut Reactor| {
+        reactor
+            .query_workspaces(None)
+            .into_iter()
+            .map(|workspace| (workspace.workspace_id, workspace.name, workspace.is_active))
+            .collect::<Vec<_>>()
+    };
+    let expected = workspaces(&mut reactor);
+    assert_eq!(expected.len(), 4);
+
+    snapshot.inventory.insert("laptop".into(), vec![surviving]);
+    assert!(rig.tick(0, Some(snapshot.clone())).is_none());
+    let state = rig.tick(1, Some(snapshot)).unwrap();
+    assert!(state.membership_complete);
+    assert!(state.space_remaps.is_empty());
+    reactor.handle_events(vec![reactor::Event::SpaceStateChanged(state)]);
+    assert_eq!(workspaces(&mut reactor), expected);
+}
+
+#[test]
 fn queued_active_space_notification_waits_for_a_real_switch_or_bounded_membership_refresh() {
     for changed_space in [true, false] {
         let mut rig = Rig::new();
