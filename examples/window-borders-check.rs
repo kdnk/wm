@@ -16,7 +16,7 @@ use wm::common::config::WindowBorderSettings;
 use wm::sys::skylight::{CGSEventType, KnownCGSEvent};
 use wm::sys::window_notify;
 use wm::sys::window_server::{WindowIterator, WindowServerId};
-use wm::ui::window_borders::WindowBorders;
+use wm::ui::window_borders::{BorderTarget, WindowBorders};
 
 type Rgb = [u8; 3];
 const ACTIVE: Rgb = [255, 0, 255];
@@ -233,7 +233,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(window_notify::init(CGSEventType::Known(kind)), 0);
     }
     window_notify::update_window_notifications(&[first_id.0, second_id.0]);
-    let mut targets = [(first_id, left()), (second_id, right())];
+    let target = |window, frame| BorderTarget {
+        window,
+        frame,
+        follows_parent: false,
+    };
+    let mut targets = [target(first_id, left()), target(second_id, right())];
     let mut settings = WindowBorderSettings {
         enabled: true,
         width: 6.0,
@@ -269,7 +274,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("PASS native hit testing through the outline and its center");
 
     command("overlap")?;
-    targets[1].1 = observed_frame(&mut events, second_id, KnownCGSEvent::WindowMoved, overlap())?;
+    targets[1].frame =
+        observed_frame(&mut events, second_id, KnownCGSEvent::WindowMoved, overlap())?;
     borders.sync(&targets, Some(first_id), &settings, true);
     let number_at = |x| {
         NSWindow::windowNumberAtPoint_belowWindowWithWindowNumber(CGPoint::new(x, screen_y), 0, mtm)
@@ -281,8 +287,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (195, WHITE),
         (270, BLACK),
     ]);
+
+    targets[0].follows_parent = true;
+    borders.sync(&targets, Some(first_id), &settings, false);
+    check_screen("a focused dialog keeps its outline above the editor", &[
+        (183, ACTIVE),
+        (195, WHITE),
+    ])?;
+    borders.sync(&targets, Some(second_id), &settings, false);
+    check_screen(
+        "an inactive dialog restores target-relative outline ordering",
+        &[(169, ACTIVE), (183, WHITE)],
+    )?;
+    targets[0].follows_parent = false;
+
     command("separate")?;
-    targets[1].1 = observed_frame(&mut events, second_id, KnownCGSEvent::WindowMoved, right())?;
+    targets[1].frame = observed_frame(&mut events, second_id, KnownCGSEvent::WindowMoved, right())?;
     borders.sync(&targets, Some(second_id), &settings, true);
     check_screen("focus changes both outline colors", &[
         (127, INACTIVE),
@@ -290,7 +310,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ])?;
 
     command("resize")?;
-    targets[0].1 = observed_frame(&mut events, first_id, KnownCGSEvent::WindowResized, resized())?;
+    targets[0].frame =
+        observed_frame(&mut events, first_id, KnownCGSEvent::WindowResized, resized())?;
     borders.sync(&targets, Some(second_id), &settings, false);
     check_screen(
         "moving and resizing clears the old edge and draws both new edges",
@@ -314,7 +335,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(wm::sys::window_server::window_sub_level(id.0), 2);
     }
     command("overlap")?;
-    targets[1].1 = observed_frame(&mut events, second_id, KnownCGSEvent::WindowMoved, overlap())?;
+    targets[1].frame =
+        observed_frame(&mut events, second_id, KnownCGSEvent::WindowMoved, overlap())?;
     settings.enabled = true;
     borders.sync(&targets, Some(first_id), &settings, true);
     check_screen(

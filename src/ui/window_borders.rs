@@ -14,6 +14,12 @@ use crate::sys::screen::SpaceId;
 use crate::sys::skylight::SLSWindowTags;
 use crate::sys::window_server::{self, WindowIterator, WindowServerId};
 
+pub struct BorderTarget {
+    pub window: WindowServerId,
+    pub frame: CGRect,
+    pub follows_parent: bool,
+}
+
 #[derive(Default)]
 pub struct WindowBorders {
     borders: HashMap<WindowServerId, Border>,
@@ -22,7 +28,7 @@ pub struct WindowBorders {
 impl WindowBorders {
     pub fn sync(
         &mut self,
-        targets: &[(WindowServerId, CGRect)],
+        targets: &[BorderTarget],
         focused: Option<WindowServerId>,
         settings: &WindowBorderSettings,
         reorder: bool,
@@ -33,8 +39,14 @@ impl WindowBorders {
         }
 
         let mut visible = HashSet::default();
-        for &(target, frame) in targets {
-            let color = if focused == Some(target) {
+        for &BorderTarget {
+            window: target,
+            frame,
+            follows_parent,
+        } in targets
+        {
+            let is_focused = focused == Some(target);
+            let color = if is_focused {
                 settings.active_color
             } else {
                 settings.inactive_color
@@ -43,7 +55,8 @@ impl WindowBorders {
                 continue;
             }
             visible.insert(target);
-            let style = BorderStyle::new(frame, settings.width, color);
+            let style =
+                BorderStyle::new(frame, settings.width, color, is_focused && follows_parent);
             let result = match self.borders.entry(target) {
                 Entry::Vacant(entry) => Border::new(target, style).map(|border| {
                     entry.insert(border);
@@ -64,10 +77,11 @@ struct BorderStyle {
     frame: CGRect,
     width: f64,
     color: u32,
+    focused_dialog: bool,
 }
 
 impl BorderStyle {
-    fn new(frame: CGRect, width: f64, color: u32) -> Self {
+    fn new(frame: CGRect, width: f64, color: u32, focused_dialog: bool) -> Self {
         Self {
             frame: CGRect::new(
                 CGPoint::new(frame.origin.x - width, frame.origin.y - width),
@@ -75,6 +89,7 @@ impl BorderStyle {
             ),
             width,
             color,
+            focused_dialog,
         }
     }
 
@@ -96,6 +111,7 @@ struct Border {
     style: BorderStyle,
     inner_radius: f64,
     space: Option<SpaceId>,
+    level: Option<(i32, i32)>,
 }
 
 impl Border {
@@ -134,6 +150,7 @@ impl Border {
             style,
             inner_radius,
             space: None,
+            level: None,
         };
         border.order_above(target)?;
         Ok(border)
@@ -155,8 +172,17 @@ impl Border {
             }
         }
         if let Some(level) = window_server::window_level(target.as_u32()) {
-            self.window.set_level(level as i32)?;
-            self.window.set_sublevel(window_server::window_sub_level(target.as_u32()))?;
+            let level = level as i32;
+            // The app can raise its editor and focused dialog together between border updates.
+            let sublevel = window_server::window_sub_level(target.as_u32())
+                .saturating_add(i32::from(self.style.focused_dialog));
+            if self.level != Some((level, sublevel)) {
+                if self.level.map(|(previous, _)| previous) != Some(level) {
+                    self.window.set_level(level)?;
+                }
+                self.window.set_sublevel(sublevel)?;
+                self.level = Some((level, sublevel));
+            }
         }
         self.window.order_above(Some(target.as_u32()))
     }
@@ -184,8 +210,9 @@ impl Border {
             with_disabled_actions(|| style.paint(&self.layer, self.inner_radius));
             self.surface.flush();
         }
+        let focused_dialog_changed = self.style.focused_dialog != style.focused_dialog;
         self.style = style;
-        if reorder {
+        if reorder || focused_dialog_changed {
             self.order_above(target)?;
         }
         Ok(())

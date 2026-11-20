@@ -1,7 +1,6 @@
 // Modified by kdnk for wm on 2026-11-19. Original attribution is preserved in LICENSE.
-use objc2_core_foundation::CGRect;
-
-use super::{BTreeMap, Reactor, SpaceId, WindowServerId};
+use super::{BTreeMap, Reactor, WindowServerId};
+use crate::actor::window_borders::BorderWindow;
 
 impl Reactor {
     pub(super) fn publish_window_borders(&self) {
@@ -16,7 +15,7 @@ impl Reactor {
         tx.set_windows(settings, windows);
     }
 
-    fn border_windows(&self) -> BTreeMap<WindowServerId, (SpaceId, CGRect)> {
+    fn border_windows(&self) -> BTreeMap<WindowServerId, BorderWindow> {
         let store = &self.state.windows;
         let workspaces = self.layout_manager.layout_engine.workspaces();
         store
@@ -43,7 +42,11 @@ impl Reactor {
                 {
                     return None;
                 }
-                Some((id, (space, self.space_state.screen_by_space(space)?.frame)))
+                Some((id, BorderWindow {
+                    space,
+                    screen: self.space_state.screen_by_space(space)?.frame,
+                    follows_parent: window.follows_unmanaged_parent(),
+                }))
             })
             .collect()
     }
@@ -51,7 +54,7 @@ impl Reactor {
 
 #[cfg(test)]
 mod tests {
-    use objc2_core_foundation::{CGPoint, CGSize};
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 
     use super::*;
     use crate::actor::app::WindowId;

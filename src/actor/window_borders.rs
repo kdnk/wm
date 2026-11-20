@@ -9,11 +9,18 @@ use crate::model::hidden_window_placement::HiddenWindowPlacement;
 use crate::sys::geometry::CGRectExt;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowIterator, WindowServerId};
-use crate::ui::window_borders::WindowBorders;
+use crate::ui::window_borders::{BorderTarget, WindowBorders};
+
+#[derive(Clone, Copy, PartialEq)]
+pub(super) struct BorderWindow {
+    pub(super) space: SpaceId,
+    pub(super) screen: CGRect,
+    pub(super) follows_parent: bool,
+}
 
 #[derive(Default, Clone)]
 struct Scene {
-    windows: BTreeMap<WindowServerId, (SpaceId, CGRect)>,
+    windows: BTreeMap<WindowServerId, BorderWindow>,
     focused: Option<WindowServerId>,
     settings: WindowBorderSettings,
     order_revision: u64,
@@ -33,7 +40,7 @@ impl Publisher {
     pub(super) fn set_windows(
         &self,
         settings: WindowBorderSettings,
-        windows: BTreeMap<WindowServerId, (SpaceId, CGRect)>,
+        windows: BTreeMap<WindowServerId, BorderWindow>,
     ) {
         self.0.send_if_modified(|scene| {
             if scene.settings == settings && scene.windows == windows {
@@ -92,11 +99,15 @@ impl Observer {
                 while let Some(window) = query.advance() {
                     let id = WindowServerId::new(window.window_id());
                     let frame = window.bounds();
-                    if let Some((_, screen)) = scene.windows.get(&id)
+                    if let Some(target) = scene.windows.get(&id)
                         && window.alpha() > 0.0
-                        && border_on_screen(*screen, frame)
+                        && border_on_screen(target.screen, frame)
                     {
-                        targets.push((id, frame));
+                        targets.push(BorderTarget {
+                            window: id,
+                            frame,
+                            follows_parent: target.follows_parent,
+                        });
                     }
                 }
             }
@@ -133,7 +144,11 @@ mod tests {
                 enabled: true,
                 ..Default::default()
             },
-            BTreeMap::from([(id, (SpaceId::new(1), CGRect::ZERO))]),
+            BTreeMap::from([(id, BorderWindow {
+                space: SpaceId::new(1),
+                screen: CGRect::ZERO,
+                follows_parent: false,
+            })]),
         );
         assert_eq!(observer.0.borrow_and_update().focused, Some(id));
         publisher.window_changed(WindowServerId(8), true);
@@ -148,7 +163,11 @@ mod tests {
                 enabled: true,
                 ..Default::default()
             },
-            BTreeMap::from([(id, (SpaceId::new(2), CGRect::ZERO))]),
+            BTreeMap::from([(id, BorderWindow {
+                space: SpaceId::new(2),
+                screen: CGRect::ZERO,
+                follows_parent: false,
+            })]),
         );
         assert_eq!(observer.0.borrow_and_update().order_revision, 3);
         publisher.set_focus(None);
