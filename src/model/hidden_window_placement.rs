@@ -81,6 +81,17 @@ impl ScrollingDisplayBounds {
         );
         frame
     }
+
+    pub(crate) fn dialog_x(self, owner: CGRect, width: f64, offset_x: f64) -> f64 {
+        let reveal = HiddenWindowPlacement::REVEAL_PX;
+        if !self.left && owner.max().x <= self.screen.origin.x + reveal {
+            self.screen.origin.x - width + reveal
+        } else if !self.right && owner.origin.x >= self.screen.max().x - reveal {
+            self.screen.max().x - reveal
+        } else {
+            owner.origin.x + offset_x
+        }
+    }
 }
 
 /// Pure geometry used to place inactive-workspace windows just offscreen.

@@ -391,6 +391,10 @@ impl PresentedWindow {
 }
 
 fn stage_windows(windows: &mut [PresentedWindow], sample: Sample<'_>, frames: &mut FrameBatch) {
+    let bounds = match sample {
+        Sample::Viewport { bound, .. } => bound,
+        Sample::Transition { .. } => None,
+    };
     let first_dialog = windows.partition_point(|w| w.parent_offset.is_none());
     let (owners, dialogs) = windows.split_at_mut(first_dialog);
     for group in owners.chunk_by_mut(|a, b| {
@@ -410,7 +414,9 @@ fn stage_windows(windows: &mut [PresentedWindow], sample: Sample<'_>, frames: &m
         let Some(owner) = owners.iter().find(|w| w.wid == parent) else {
             continue;
         };
-        let x = owner.frame.origin.x + offset;
+        let x = bounds.map_or(owner.frame.origin.x + offset, |bounds| {
+            bounds.dialog_x(owner.frame, dialog.frame.size.width, offset)
+        });
         if x != dialog.frame.origin.x {
             dialog.frame.origin.x = x;
             frames.extend(
@@ -1462,12 +1468,14 @@ impl AnimationManager {
                 let (_, target) = layout.iter().find(|(wid, _)| *wid == owner)?;
                 let owner = reactor.state.windows.window(owner)?.frame_monotonic;
                 let target = target.round();
-                let target_x = bounds.map_or(target, |bounds| bounds.apply(target)).origin.x;
-                if target_x == owner.origin.x {
+                let target = bounds.map_or(target, |bounds| bounds.apply(target));
+                if target.origin.x == owner.origin.x {
                     return None;
                 }
                 let mut frame = reactor.state.windows.window(dialog)?.frame_monotonic;
-                frame.origin.x = target_x + parent.offset_x;
+                frame.origin.x = bounds.map_or(target.origin.x + parent.offset_x, |bounds| {
+                    bounds.dialog_x(target, frame.size.width, parent.offset_x)
+                });
                 Some((dialog, frame))
             })
             .collect();
