@@ -68,14 +68,15 @@ impl Config {
         key: &str,
         combinations: &std::collections::BTreeMap<String, String>,
     ) -> String {
-        if let Some(plus_pos) = key.find(" + ") {
-            let potential_combo = &key[..plus_pos];
-            if let Some(combo_value) = combinations.get(potential_combo) {
-                let rest = &key[plus_pos + 3..];
-                return format!("{} + {}", combo_value, rest);
-            }
-        }
-        key.to_string()
+        let exact = key.split_once(" + ");
+        let trimmed = key.split_once('+').map(|(name, rest)| (name.trim(), rest));
+        [exact, trimmed]
+            .into_iter()
+            .flatten()
+            .find_map(|(name, rest)| {
+                combinations.get(name).map(|value| format!("{value} + {rest}"))
+            })
+            .unwrap_or_else(|| key.to_string())
     }
 
     /// A binding key as the runtime reads it, after modifier combinations expand.

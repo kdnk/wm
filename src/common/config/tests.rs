@@ -449,6 +449,38 @@ fn test_modifier_combinations_in_config() {
 }
 
 #[test]
+fn modifier_combination_spacing_preserves_shortcut_identity() {
+    let config = r#"
+        [settings]
+        [modifier_combinations]
+        combo = "Alt + Shift"
+        "移動" = "Alt + Shift"
+        "combo+nav" = "Alt + Shift"
+        [keys]
+    "#;
+    let expected =
+        Config::parse(&format!("{config}\n\"Alt + Shift + H\" = \"next_window\"")).unwrap();
+    for shortcut in [
+        "combo + H",
+        "combo+H",
+        "combo +H",
+        "combo+ H",
+        "combo  +  H",
+        "移動+H",
+        "combo+nav + H",
+    ] {
+        let text = format!("{config}\n\"{shortcut}\" = \"next_window\"");
+        let parsed = Config::parse(&text).expect(shortcut);
+        assert_eq!(parsed.keys, expected.keys, "{shortcut}");
+        let duplicate = format!("{text}\n\"Alt + Shift + H\" = \"prev_window\"");
+        let error = Config::parse(&duplicate)
+            .err()
+            .unwrap_or_else(|| panic!("accepted duplicate shortcut {shortcut}"));
+        assert!(error.to_string().contains("conflicts"), "{error}");
+    }
+}
+
+#[test]
 fn mouse_settings_defaults_and_variants_parse() {
     let defaults: DragDropSettings = toml::from_str("").unwrap();
     assert_eq!(defaults, DragDropSettings::default());
