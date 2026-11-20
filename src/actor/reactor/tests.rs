@@ -775,6 +775,32 @@ fn forwarded_space_snapshot_respects_toggled_space_activation_policy() {
 }
 
 #[test]
+fn display_query_accepts_uuid_in_any_ascii_case() {
+    let mut reactor = test_reactor();
+    let space = SpaceId::new(11);
+    let uuid = "A1B2C3D4-E5F6-7890-ABCD-EF1234567890";
+    reactor.handle_event(space_state_event_from_screens(vec![ScreenInfo {
+        is_builtin: false,
+        backing_scale: 1.,
+        id: crate::sys::screen::ScreenId::new(0),
+        frame: CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.)),
+        space: Some(space),
+        display_uuid: uuid.into(),
+        name: None,
+    }]));
+
+    assert_eq!(reactor.query_space_for_display(uuid), Some(space));
+    assert_eq!(
+        reactor.query_space_for_display(&uuid.to_ascii_lowercase()),
+        Some(space)
+    );
+    assert_eq!(
+        reactor.query_space_for_display("A1B2C3D4-E5F6-7890-ABCD-EF1234567891"),
+        None
+    );
+}
+
+#[test]
 fn gesture_routes_exclude_disabled_displays_and_clear_when_all_are_disabled() {
     let mut reactor = test_reactor();
     let left = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));

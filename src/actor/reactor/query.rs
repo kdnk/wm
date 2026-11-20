@@ -289,7 +289,7 @@ impl Reactor {
         self.space_state
             .screens
             .iter()
-            .find(|screen| screen.display_uuid == display_uuid)
+            .find(|screen| screen.display_uuid.eq_ignore_ascii_case(display_uuid))
             .and_then(|screen| screen.space)
     }
 
