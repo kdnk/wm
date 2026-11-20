@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-20. Original attribution is preserved in LICENSE.
 use super::*;
 use crate::model::virtual_workspace::WorkspaceTransferReason;
 
@@ -63,6 +64,8 @@ impl LayoutEngine {
         }
 
         let shared = self.workspaces.settings.mode == WorkspaceMode::Global;
+        let stayed_single_display = expected_display_count == 1
+            && self.workspaces.effective_mode() == WorkspaceMode::PerDisplay;
         for space in saved {
             if remaps.iter().any(|(old, _)| *old == space) || exists(&space) {
                 continue;
@@ -75,7 +78,9 @@ impl LayoutEngine {
             let live_display = display.as_ref().and_then(|display| {
                 current_spaces.iter().find(|(_, current, _)| current == display)
             });
-            if shared {
+            let closed_local_desktop = stayed_single_display
+                && (live_display.is_some() || (display.is_none() && !current_spaces.is_empty()));
+            if shared && !closed_local_desktop {
                 // A connected display with no current Space may yet show a renumbered successor.
                 let connected = display.as_ref().is_some_and(|d| inventory.contains_key(d));
                 let fallback = current_spaces.first().filter(|_| !connected);

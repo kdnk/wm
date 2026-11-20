@@ -2946,6 +2946,7 @@ impl Reactor {
                         false,
                         Some(&activated),
                         &[],
+                        &[],
                     ));
                 }
                 return Ok(outcome);
@@ -4186,26 +4187,35 @@ impl Reactor {
             self.activation_cfg(),
             &space_state,
         );
-        // Compare all native Spaces, including inactive ones. A current-Space
-        // switch alone does not invalidate ownership.
-        let invalidated_spaces: Vec<_> = self
-            .space_state
-            .display_space_ids
-            .iter()
-            .filter(|_| space_state.display_set_changed || space_state.should_force_refresh_layout)
-            .flat_map(|(display, spaces)| {
-                spaces
-                    .iter()
-                    .filter(|space| {
-                        !space_state
-                            .display_space_ids
-                            .get(display)
-                            .is_some_and(|current| current.contains(space))
-                    })
-                    .copied()
-            })
-            .filter(|space| !space_state.space_remaps.iter().any(|(previous, _)| previous == space))
-            .collect();
+        let unchanged_sole_display = match (
+            self.space_state.screens.as_slice(),
+            space_state.screens.as_slice(),
+        ) {
+            ([previous], [current]) if previous.display_uuid == current.display_uuid => {
+                current.display_uuid_opt()
+            }
+            _ => None,
+        };
+        let mut invalidated_spaces = Vec::new();
+        let mut closed_local_desktops = Vec::new();
+        if space_state.display_set_changed || space_state.should_force_refresh_layout {
+            for (display, spaces) in &self.space_state.display_space_ids {
+                let current = space_state.display_space_ids.get(display);
+                for &space in spaces {
+                    if current.is_some_and(|ids| ids.contains(&space))
+                        || space_state.space_remaps.iter().any(|(old, _)| *old == space)
+                    {
+                        continue;
+                    }
+                    invalidated_spaces.push(space);
+                    if unchanged_sole_display == Some(display.as_str())
+                        && !space_state.display_space_ids.values().any(|ids| ids.contains(&space))
+                    {
+                        closed_local_desktops.push(space);
+                    }
+                }
+            }
+        }
         if !space_state.membership_complete && !invalidated_spaces.is_empty() {
             // Retry exhaustion is not evidence of ownership. SpacesActor owns paced
             // resampling; retain the logical model until membership is observable.
@@ -4399,6 +4409,7 @@ impl Reactor {
                 invalidates_pending_targets,
                 None,
                 &invalidated_spaces,
+                &closed_local_desktops,
             ));
         }
         // Transfers already fitted their frames; refit only workspaces whose native
@@ -4473,6 +4484,7 @@ impl Reactor {
         preserve_membership: bool,
         pins_only: Option<&HashSet<crate::model::VirtualWorkspaceId>>,
         invalidated_spaces: &[SpaceId],
+        closed_local_desktops: &[SpaceId],
     ) -> EventOutcome {
         use crate::model::virtual_workspace::WorkspaceTransferReason;
         let mut outcome = EventOutcome::no_change();
@@ -4501,9 +4513,6 @@ impl Reactor {
                         old.frame != screen.frame || (old.space.is_none() && screen.space.is_some())
                     })
             });
-        // Plan only from the accepted topology. Switching away from a desktop
-        // still in the native inventory is dormancy; losing it is departure,
-        // even when its display stays connected and borrows another desktop.
         let placements: Vec<_> = {
             let engine = &self.layout_manager.layout_engine;
             // Resolve each configured display once, rather than scanning all pins
@@ -4516,6 +4525,9 @@ impl Reactor {
                 .filter(|(_, id)| pins_only.is_none_or(|ids| ids.contains(id)))
                 .filter_map(|(index, id)| {
                     let workspace = &engine.workspaces()[id];
+                    if closed_local_desktops.contains(&workspace.space) {
+                        return None;
+                    }
                     let owner = engine.display_uuid_for_space(workspace.space);
                     let home = workspace
                         .home_space
@@ -4660,6 +4672,9 @@ impl Reactor {
                 .filter_map(|(window, assignment)| {
                     let record = self.state.windows.record(window)?;
                     let target = engine.workspaces().workspaces.get(assignment)?.space;
+                    if closed_local_desktops.contains(&target) {
+                        return None;
+                    }
                     if record
                         .pending_transfer()
                         .is_some_and(|operation| operation.requested_space == target)

@@ -10811,6 +10811,7 @@ fn shared_move_workspace_to_display_moves_a_rule_bound_workspace_and_suspends_th
             false,
             None,
             &[],
+            &[],
         );
         reactor.apply_event_outcome(outcome);
         let workspace = &reactor.layout_manager.layout_engine.workspaces()[pinned];
