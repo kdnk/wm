@@ -2446,6 +2446,52 @@ fn unrelated_native_resize_does_not_steal_a_cross_display_drag() {
 }
 
 #[test]
+fn native_drag_retains_its_source_tile_during_display_membership_changes() {
+    let external = SpaceId::new(1);
+    let built_in = SpaceId::new(2);
+    let external_screen = CGRect::new(CGPoint::ZERO, CGSize::new(2560., 1440.));
+    let built_in_screen = CGRect::new(CGPoint::new(416., 1480.), CGSize::new(1800., 1129.));
+    let window = WindowId::new(1, 1);
+    let server = WindowServerId::new(121);
+    let frame = CGRect::new(CGPoint::new(416., 1480.), CGSize::new(640., 1129.));
+    let held = CGRect::new(CGPoint::new(frame.min().x, 1424.), frame.size);
+
+    let mut reactor = test_reactor();
+    let screens = || vec![external_screen, built_in_screen];
+    let spaces = || vec![Some(external), Some(built_in)];
+    let snapshot = |space| {
+        space_state_event_with(screens(), spaces(), |state| {
+            state.active_window_spaces.insert(server, space);
+            state.membership_complete = true;
+        })
+    };
+    reactor.handle_event(space_state_event(screens(), spaces()));
+    reactor.add_test_app(window.pid);
+    let workspace = reactor.test_workspace(built_in, 0);
+    let _ = reactor.test_workspace_ids(external);
+    reactor.add_test_window(window, server, Some(built_in), frame);
+    assert!(reactor.assign_test_window_to_workspace(built_in, window, workspace));
+    reactor.send_layout_event(LayoutEvent::WindowAdded(built_in, window));
+
+    reactor.handle_event(Event::WindowFrameChanged(
+        window,
+        held,
+        None,
+        Requested(false),
+        Some(MouseState::Down),
+    ));
+    window_server::set_window_spaces_override(server, Some(vec![external.get()]));
+    reactor.handle_event(snapshot(external));
+    assert_eq!(
+        reactor.assigned_space_for_window_id(window),
+        Some(built_in),
+        "the source tile must stay in place while the button is held"
+    );
+
+    window_server::set_window_spaces_override(server, None);
+}
+
+#[test]
 fn native_cross_display_drop_removes_the_source_tile() {
     for already_arrived in [false, true] {
         let (mut reactor, wid, wsid, left, right, frame, right_screen) =
