@@ -15,7 +15,7 @@ use crate::ui::window_borders::{BorderTarget, WindowBorders};
 pub(super) struct BorderWindow {
     pub(super) space: SpaceId,
     pub(super) screen: CGRect,
-    pub(super) follows_parent: bool,
+    pub(super) dialog_parent: Option<WindowServerId>,
 }
 
 #[derive(Default, Clone)]
@@ -72,7 +72,7 @@ impl Publisher {
     pub(super) fn window_changed(&self, id: WindowServerId, reorder: bool) {
         self.0.send_if_modified(|scene| {
             if !scene.windows.contains_key(&id) {
-                return false;
+                return scene.windows.values().any(|window| window.dialog_parent.is_some());
             }
             if reorder {
                 scene.order_revision = scene.order_revision.wrapping_add(1);
@@ -101,16 +101,21 @@ impl Observer {
                     let frame = window.bounds();
                     if let Some(target) = scene.windows.get(&id)
                         && window.alpha() > 0.0
-                        && border_on_screen(target.screen, frame)
                     {
+                        let visible = border_on_screen(target.screen, frame);
+                        if !visible && target.dialog_parent.is_none() {
+                            continue;
+                        }
                         targets.push(BorderTarget {
                             window: id,
                             frame,
-                            follows_parent: target.follows_parent,
+                            dialog_parent: target.dialog_parent,
+                            visible,
                         });
                     }
                 }
             }
+            targets.sort_by_key(|target| target.dialog_parent.is_none());
             renderer.sync(
                 &targets,
                 scene.focused,
@@ -147,7 +152,7 @@ mod tests {
             BTreeMap::from([(id, BorderWindow {
                 space: SpaceId::new(1),
                 screen: CGRect::ZERO,
-                follows_parent: false,
+                dialog_parent: None,
             })]),
         );
         assert_eq!(observer.0.borrow_and_update().focused, Some(id));
@@ -166,7 +171,7 @@ mod tests {
             BTreeMap::from([(id, BorderWindow {
                 space: SpaceId::new(2),
                 screen: CGRect::ZERO,
-                follows_parent: false,
+                dialog_parent: None,
             })]),
         );
         assert_eq!(observer.0.borrow_and_update().order_revision, 3);
@@ -180,5 +185,25 @@ mod tests {
         let frame = |x| CGRect::new(CGPoint::new(x, 50.0), CGSize::new(300.0, 200.0));
         assert!(!border_on_screen(screen, frame(1439.0)));
         assert!(border_on_screen(screen, frame(1420.0)));
+    }
+
+    #[test]
+    fn a_dialog_border_checks_occlusion_when_an_untracked_window_changes() {
+        let (publisher, mut observer) = channel();
+        publisher.set_windows(
+            WindowBorderSettings {
+                enabled: true,
+                ..Default::default()
+            },
+            BTreeMap::from([(WindowServerId(7), BorderWindow {
+                space: SpaceId::new(1),
+                screen: CGRect::ZERO,
+                dialog_parent: Some(WindowServerId(8)),
+            })]),
+        );
+        let order_revision = observer.0.borrow_and_update().order_revision;
+        publisher.window_changed(WindowServerId(9), true);
+        assert!(observer.0.has_changed().unwrap());
+        assert_eq!(observer.0.borrow_and_update().order_revision, order_revision);
     }
 }

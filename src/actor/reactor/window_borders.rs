@@ -42,10 +42,14 @@ impl Reactor {
                 {
                     return None;
                 }
+                let dialog_parent = self
+                    .dialog_parents
+                    .get(&wid)
+                    .and_then(|parent| store.window(parent.window)?.info.sys_id);
                 Some((id, BorderWindow {
                     space,
                     screen: self.space_state.screen_by_space(space)?.frame,
-                    follows_parent: window.follows_unmanaged_parent(),
+                    dialog_parent,
                 }))
             })
             .collect()

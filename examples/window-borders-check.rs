@@ -174,6 +174,8 @@ fn fixture_panels(mtm: MainThreadMarker) -> Result<(), Box<dyn std::error::Error
         .collect();
     let first = panel(mtm, left(), &NSColor::whiteColor());
     let second = panel(mtm, right(), &NSColor::whiteColor());
+    let cover = panel(mtm, overlap(), &NSColor::whiteColor());
+    cover.orderOut(None);
     let app = NSApplication::sharedApplication(mtm);
     pump_appkit(&app);
     println!(
@@ -181,7 +183,8 @@ fn fixture_panels(mtm: MainThreadMarker) -> Result<(), Box<dyn std::error::Error
         serde_json::to_string(&[
             backdrop.windowNumber(),
             first.windowNumber(),
-            second.windowNumber()
+            second.windowNumber(),
+            cover.windowNumber()
         ])?
     );
     for command in std::io::stdin().lock().lines() {
@@ -190,6 +193,8 @@ fn fixture_panels(mtm: MainThreadMarker) -> Result<(), Box<dyn std::error::Error
                 second.setFrame_display(cocoa_frame(overlap()), true);
                 second.orderFrontRegardless();
             }
+            "cover" => cover.orderFrontRegardless(),
+            "uncover" => cover.orderOut(None),
             "separate" => second.setFrame_display(cocoa_frame(right()), true),
             "resize" => first.setFrame_display(cocoa_frame(resized()), true),
             "elevate" => {
@@ -221,8 +226,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .stdout(Stdio::piped())
         .spawn()?;
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
-    let ids: [u32; 3] = serde_json::from_str(&lines.next().ok_or("missing fixture window IDs")??)?;
-    let [backdrop_id, first_id, second_id] = ids.map(WindowServerId);
+    let ids: [u32; 4] = serde_json::from_str(&lines.next().ok_or("missing fixture window IDs")??)?;
+    let [backdrop_id, first_id, second_id, cover_id] = ids.map(WindowServerId);
     let mut command = |step: &str| -> Result<(), Box<dyn std::error::Error>> {
         writeln!(child.stdin.as_mut().unwrap(), "{step}")?;
         assert_eq!(lines.next().transpose()?.as_deref(), Some("ready"));
@@ -236,7 +241,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let target = |window, frame| BorderTarget {
         window,
         frame,
-        follows_parent: false,
+        dialog_parent: None,
+        visible: true,
     };
     let mut targets = [target(first_id, left()), target(second_id, right())];
     let mut settings = WindowBorderSettings {
@@ -288,18 +294,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (270, BLACK),
     ]);
 
-    targets[0].follows_parent = true;
+    targets[0].dialog_parent = Some(second_id);
+    borders.sync(&targets, Some(second_id), &settings, false);
+    check_screen("a dialog outline stays visible while focus returns", &[
+        (169, ACTIVE),
+        (183, INACTIVE),
+        (195, WHITE),
+    ])?;
     borders.sync(&targets, Some(first_id), &settings, false);
     check_screen("a focused dialog keeps its outline above the editor", &[
         (183, ACTIVE),
         (195, WHITE),
     ])?;
+    command("cover")?;
+    let wait_for_front = |id: WindowServerId| -> Result<(), Box<dyn std::error::Error>> {
+        let start = Instant::now();
+        while number_at(195.) != id.0 as isize {
+            if start.elapsed() >= Duration::from_secs(2) {
+                return Err(format!("fixture window {} did not reach the foreground", id.0).into());
+            }
+            pump_appkit(&app);
+        }
+        Ok(())
+    };
+    wait_for_front(cover_id)?;
+    borders.sync(&targets, Some(first_id), &settings, true);
+    check_screen("an unrelated foreground window covers the dialog outline", &[
+        (127, ACTIVE),
+        (183, WHITE),
+    ])?;
+    command("uncover")?;
+    wait_for_front(second_id)?;
+    borders.sync(&targets, Some(first_id), &settings, true);
+    check_screen("uncovering the dialog restores its outline", &[(183, ACTIVE)])?;
+    targets[0].visible = false;
     borders.sync(&targets, Some(second_id), &settings, false);
-    check_screen(
-        "an inactive dialog restores target-relative outline ordering",
-        &[(169, ACTIVE), (183, WHITE)],
-    )?;
-    targets[0].follows_parent = false;
+    check_screen("the parked dialog outline is hidden", &[
+        (127, BLACK),
+        (183, WHITE),
+    ])?;
+    targets[0].visible = true;
+    borders.sync(&targets, Some(first_id), &settings, false);
+    check_screen("the parked dialog outline returns", &[
+        (127, ACTIVE),
+        (183, ACTIVE),
+    ])?;
+    targets[0].dialog_parent = None;
 
     command("separate")?;
     targets[1].frame = observed_frame(&mut events, second_id, KnownCGSEvent::WindowMoved, right())?;

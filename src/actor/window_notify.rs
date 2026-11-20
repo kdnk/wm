@@ -323,7 +323,9 @@ impl Dispatcher {
                 let Some(window_id) = evt.window_id else {
                     return;
                 };
-                events_tx.send(Event::WindowClosed(WindowServerId::new(window_id)));
+                let wsid = WindowServerId::new(window_id);
+                borders.window_changed(wsid, false);
+                events_tx.send(Event::WindowClosed(wsid));
             }
             CGSEventType::Known(KnownCGSEvent::SpaceDestroyed) => {
                 if let Some(space_id) = evt.space_id {
@@ -379,6 +381,7 @@ impl Dispatcher {
                 focus_wake.notify();
                 if let Some(window_id) = evt.window_id {
                     let wsid = WindowServerId::new(window_id);
+                    borders.window_changed(wsid, false);
                     events_tx.send(
                         if matches!(event, CGSEventType::Known(KnownCGSEvent::WindowUnhidden)) {
                             Event::WindowServerUnhidden(wsid)

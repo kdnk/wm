@@ -10,14 +10,16 @@ use objc2_quartz_core::CALayer;
 use crate::common::collections::hash_map::Entry;
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::WindowBorderSettings;
+use crate::sys::geometry::CGRectExt;
 use crate::sys::screen::SpaceId;
 use crate::sys::skylight::SLSWindowTags;
-use crate::sys::window_server::{self, WindowIterator, WindowServerId};
+use crate::sys::window_server::{self, OnScreenWindow, WindowIterator, WindowServerId};
 
 pub struct BorderTarget {
     pub window: WindowServerId,
     pub frame: CGRect,
-    pub follows_parent: bool,
+    pub dialog_parent: Option<WindowServerId>,
+    pub visible: bool,
 }
 
 #[derive(Default)]
@@ -38,13 +40,29 @@ impl WindowBorders {
             return;
         }
 
-        let mut visible = HashSet::default();
+        let stack = if targets.iter().any(|target| target.visible && target.dialog_parent.is_some())
+        {
+            window_server::on_screen_windows_front_to_back()
+        } else {
+            Vec::new()
+        };
+        let mut retained = HashSet::default();
         for &BorderTarget {
             window: target,
             frame,
-            follows_parent,
+            dialog_parent,
+            visible,
         } in targets
         {
+            if !visible {
+                if dialog_parent.is_some()
+                    && let Some(border) = self.borders.get_mut(&target)
+                    && border.hide().is_ok()
+                {
+                    retained.insert(target);
+                }
+                continue;
+            }
             let is_focused = focused == Some(target);
             let color = if is_focused {
                 settings.active_color
@@ -54,9 +72,10 @@ impl WindowBorders {
             if color >> 24 == 0 || frame.size.width <= 0.0 || frame.size.height <= 0.0 {
                 continue;
             }
-            visible.insert(target);
-            let style =
-                BorderStyle::new(frame, settings.width, color, is_focused && follows_parent);
+            let mut style = BorderStyle::new(frame, settings.width, color);
+            style.raised = dialog_parent.is_some_and(|parent| {
+                self.can_raise_dialog_border(&stack, target, parent, frame, style.frame)
+            });
             let result = match self.borders.entry(target) {
                 Entry::Vacant(entry) => Border::new(target, style).map(|border| {
                     entry.insert(border);
@@ -64,11 +83,33 @@ impl WindowBorders {
                 Entry::Occupied(mut entry) => entry.get_mut().update(target, style, reorder),
             };
             if let Err(error) = result {
-                visible.remove(&target);
                 tracing::debug!(?target, %error, "could not display window border");
+            } else {
+                retained.insert(target);
             }
         }
-        self.borders.retain(|target, _| visible.contains(target));
+        self.borders.retain(|target, _| retained.contains(target));
+    }
+
+    fn can_raise_dialog_border(
+        &self,
+        stack: &[OnScreenWindow],
+        target: WindowServerId,
+        parent: WindowServerId,
+        inner: CGRect,
+        outer: CGRect,
+    ) -> bool {
+        let Some(index) = stack.iter().position(|window| window.id == target) else {
+            return false;
+        };
+        let layer = stack[index].layer;
+        !stack[..index].iter().any(|window| {
+            window.id != parent
+                && window.layer == layer
+                && window.frame.intersection(&outer).area()
+                    > window.frame.intersection(&inner).area()
+                && !self.borders.values().any(|border| border.window.id() == window.id.0)
+        })
     }
 }
 
@@ -77,11 +118,11 @@ struct BorderStyle {
     frame: CGRect,
     width: f64,
     color: u32,
-    focused_dialog: bool,
+    raised: bool,
 }
 
 impl BorderStyle {
-    fn new(frame: CGRect, width: f64, color: u32, focused_dialog: bool) -> Self {
+    fn new(frame: CGRect, width: f64, color: u32) -> Self {
         Self {
             frame: CGRect::new(
                 CGPoint::new(frame.origin.x - width, frame.origin.y - width),
@@ -89,7 +130,7 @@ impl BorderStyle {
             ),
             width,
             color,
-            focused_dialog,
+            raised: false,
         }
     }
 
@@ -112,6 +153,7 @@ struct Border {
     inner_radius: f64,
     space: Option<SpaceId>,
     level: Option<(i32, i32)>,
+    shown: bool,
 }
 
 impl Border {
@@ -151,6 +193,7 @@ impl Border {
             inner_radius,
             space: None,
             level: None,
+            shown: true,
         };
         border.order_above(target)?;
         Ok(border)
@@ -173,9 +216,9 @@ impl Border {
         }
         if let Some(level) = window_server::window_level(target.as_u32()) {
             let level = level as i32;
-            // The app can raise its editor and focused dialog together between border updates.
+            // Keep the outline above an editor that WindowServer can reorder with its dialog.
             let sublevel = window_server::window_sub_level(target.as_u32())
-                .saturating_add(i32::from(self.style.focused_dialog));
+                .saturating_add(i32::from(self.style.raised));
             if self.level != Some((level, sublevel)) {
                 if self.level.map(|(previous, _)| previous) != Some(level) {
                     self.window.set_level(level)?;
@@ -187,13 +230,21 @@ impl Border {
         self.window.order_above(Some(target.as_u32()))
     }
 
+    fn hide(&mut self) -> Result<(), CgsWindowError> {
+        if self.shown {
+            self.window.set_alpha(0.0)?;
+            self.shown = false;
+        }
+        Ok(())
+    }
+
     fn update(
         &mut self,
         target: WindowServerId,
         style: BorderStyle,
         reorder: bool,
     ) -> Result<(), CgsWindowError> {
-        if style.frame != self.style.frame {
+        if !self.shown || style.frame != self.style.frame {
             let tx = WindowTransaction::new()?;
             if style.frame.size == self.style.frame.size {
                 tx.move_window(&self.window, style.frame.origin);
@@ -204,15 +255,19 @@ impl Border {
                 with_disabled_actions(|| self.layer.setBounds(bounds));
                 self.surface.flush();
             }
+            if !self.shown {
+                tx.set_alpha(&self.window, 1.0);
+            }
             tx.commit();
+            self.shown = true;
         }
         if style.color != self.style.color || style.width != self.style.width {
             with_disabled_actions(|| style.paint(&self.layer, self.inner_radius));
             self.surface.flush();
         }
-        let focused_dialog_changed = self.style.focused_dialog != style.focused_dialog;
+        let raised_changed = self.style.raised != style.raised;
         self.style = style;
-        if reorder || focused_dialog_changed {
+        if reorder || raised_changed {
             self.order_above(target)?;
         }
         Ok(())

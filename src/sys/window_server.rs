@@ -16,8 +16,9 @@ use objc2_core_foundation::{
     CGSize, Type, kCFBooleanTrue,
 };
 use objc2_core_graphics::{
-    CGError, CGWindowID, CGWindowListCopyWindowInfo, CGWindowListOption, kCGNullWindowID,
-    kCGWindowLayer, kCGWindowName, kCGWindowOwnerName, kCGWindowOwnerPID,
+    CGError, CGRectMakeWithDictionaryRepresentation, CGWindowID, CGWindowListCopyWindowInfo,
+    CGWindowListOption, kCGNullWindowID, kCGWindowAlpha, kCGWindowBounds, kCGWindowLayer,
+    kCGWindowName, kCGWindowNumber, kCGWindowOwnerName, kCGWindowOwnerPID,
 };
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -614,6 +615,35 @@ fn get_visible_windows_raw<T: Type>() -> CFRetained<CFArray<T>> {
         CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements,
         kCGNullWindowID,
     )
+}
+
+pub(crate) struct OnScreenWindow {
+    pub id: WindowServerId,
+    pub frame: CGRect,
+    pub layer: i32,
+}
+
+pub(crate) fn on_screen_windows_front_to_back() -> Vec<OnScreenWindow> {
+    get_visible_windows_raw::<CFDictionary<CFString, CFType>>()
+        .iter()
+        .filter_map(|window| {
+            let alpha = window.get(unsafe { kCGWindowAlpha })?.downcast::<CFNumber>().ok()?;
+            if alpha.as_f64()? <= 0.0 {
+                return None;
+            }
+            let id = u32::try_from(get_num(&window, unsafe { kCGWindowNumber })?).ok()?;
+            let bounds = window.get(unsafe { kCGWindowBounds })?.downcast::<CFDictionary>().ok()?;
+            let mut frame = CGRect::ZERO;
+            if !unsafe { CGRectMakeWithDictionaryRepresentation(Some(&bounds), &mut frame) } {
+                return None;
+            }
+            Some(OnScreenWindow {
+                id: WindowServerId::new(id),
+                frame,
+                layer: i32::try_from(get_num(&window, unsafe { kCGWindowLayer })?).ok()?,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
