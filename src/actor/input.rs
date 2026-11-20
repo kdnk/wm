@@ -1117,16 +1117,16 @@ impl Input {
                 } else {
                     crate::actor::drag::MouseButton::Right
                 };
+                let point = CGEvent::location(Some(event));
                 let captured = self.state.borrow().captured_button == Some(button);
                 if captured {
-                    self.events_tx.send(Event::DragMotion(crate::actor::drag::DragMotion {
-                        point: CGEvent::location(Some(event)),
-                    }));
+                    self.events_tx
+                        .send(Event::DragMotion(crate::actor::drag::DragMotion { point }));
                     self.state.borrow_mut().captured_button = None;
                 }
                 // Native AX moves/resizes acquire drag state even with drag/drop disabled.
                 // Always deliver releases so that state cannot keep layout writes blocked.
-                self.events_tx.send(Event::MouseUp(button));
+                self.events_tx.send(Event::MouseReleased { button, point });
                 !captured
             }
             _ => true,
@@ -3146,7 +3146,8 @@ mod tests {
                 assert!(input.on_event(event_type, &event, None));
                 assert!(matches!(
                     events_rx.try_recv().unwrap().1,
-                    Event::MouseUp(released) if released == button
+                    Event::MouseReleased { button: released, point }
+                        if released == button && point == CGPoint::new(20.0, 30.0)
                 ));
             }
         }
@@ -3170,7 +3171,7 @@ mod tests {
         );
         assert!(matches!(
             events.try_recv().unwrap().1,
-            Event::MouseUp(MouseButton::Left)
+            Event::MouseReleased { button: MouseButton::Left, point: released } if released == point
         ));
         assert!(events.try_recv().is_err());
     }
@@ -3195,10 +3196,10 @@ mod tests {
             input.state.borrow().captured_button,
             Some(crate::actor::drag::MouseButton::Left)
         );
-        assert!(matches!(
-            events_rx.try_recv().unwrap().1,
-            Event::MouseUp(crate::actor::drag::MouseButton::Right)
-        ));
+        assert!(matches!(events_rx.try_recv().unwrap().1, Event::MouseReleased {
+            button: crate::actor::drag::MouseButton::Right,
+            ..
+        }));
     }
 
     #[test]
@@ -3244,7 +3245,7 @@ mod tests {
                     Event::DragMotionPending(publisher) => {
                         positions.push(Some(publisher.take_latest().unwrap().point.x));
                     }
-                    Event::MouseUp(_) | Event::DragCancel => positions.push(None),
+                    Event::MouseReleased { .. } | Event::DragCancel => positions.push(None),
                     _ => {}
                 }
             }

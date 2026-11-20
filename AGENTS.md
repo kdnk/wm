@@ -15,6 +15,7 @@
 - For border flicker, record the affected native window and compare its composited border pixels with WindowServer stacking order during the same interaction.
 - After building the `menu-bar-window-list-check` example, use `python3 tests/menu-motion-live-test.py --output NEW_DIRECTORY` to record isolated menu motion without controlling the daemon.
 - Live motion tests must verify that synthetic drags commit a layout change, target fixture windows by PID and title, and restore runtime settings, workspace, and cursor position on failure.
+- For native title-bar drags across stacked displays, verify that the tile stays on the source while the button is held. Drop just past the shared edge with the window center still on the source display. Test both directions and a drag that crosses the edge and returns before release.
 - Before temporarily replacing a running daemon for live tests, save its layout. After restarting the original daemon, wait for its original window inventory before loading the saved layout, then verify restored window order and sizes with fresh queries.
 - During layout restoration, wait until all original windows are present; allow additional windows and compare the original windows' relative order and sizes.
 - `launchctl bootout` can return before launchd removes the job. Before bootstrapping a replacement plist with the same label, wait until `launchctl print gui/$(id -u)/git.kdnk.wm` reports that the service is absent.

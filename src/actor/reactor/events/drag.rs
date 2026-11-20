@@ -77,7 +77,7 @@ pub fn handle_mouse_up(
     let mut needs_layout = commit.source.tiled;
 
     if let Some(target) = commit.target
-        && commit.source.current_space == Some(target.intent.space)
+        && payload.final_space == Some(target.intent.space)
         && state.windows.contains_window(window)
         && state.windows.contains_window(target.intent.window)
     {
@@ -98,14 +98,23 @@ pub fn handle_mouse_up(
         drag.release_preview();
     }
 
-    let moved_during_transfer = commit.source.origin_frame != commit.source.last_frame
-        && state
-            .windows
-            .record(window)
-            .is_some_and(|record| record.pending_transfer().is_some());
-    if commit.source.origin_space != payload.final_space || moved_during_transfer {
+    let transfer_pending = state
+        .windows
+        .record(window)
+        .is_some_and(|record| record.pending_transfer().is_some());
+    let source = state
+        .windows
+        .workspace_for_window(window)
+        .and_then(|workspace| layout.layout_engine.workspaces().workspace_space(workspace))
+        .or(commit.source.origin_space);
+    let native_on_other_display = payload.final_space.is_some_and(|space| {
+        state.windows.native_space(window).is_some_and(|native| native != space)
+    });
+    let needs_placement = commit.source.origin_frame != commit.source.last_frame
+        && (source != payload.final_space || transfer_pending || native_on_other_display);
+    if commit.source.origin_space != payload.final_space || needs_placement {
         let Some(space) = payload.final_space.filter(|_| state.windows.is_admitted(window)) else {
-            if commit.source.origin_space.is_some() {
+            if source.is_some() {
                 outcome = outcome.with_layout_event(LayoutEvent::WindowRemoved(window));
             }
             return Ok(outcome.with_arrange_passes(1));
@@ -117,19 +126,14 @@ pub fn handle_mouse_up(
         if engine.workspaces().active_workspace(space).is_none() {
             return Ok(outcome.with_arrange_passes(1));
         }
-        let source = state
-            .windows
-            .workspace_for_window(window)
-            .and_then(|workspace| engine.workspaces().workspace_space(workspace))
-            .or(commit.source.origin_space);
-        if let Some(source) = source {
+        if let Some(source) = source.filter(|&source| source != space) {
             if !engine
                 .move_window_to_space(&mut state.windows, source, space, screen.frame.size, window)
                 .changed
             {
                 return Ok(outcome.with_arrange_passes(1));
             }
-        } else {
+        } else if source.is_none() {
             let _ =
                 engine.handle_event(&mut state.windows, LayoutEvent::WindowAdded(space, window));
             if engine
