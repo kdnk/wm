@@ -1,7 +1,7 @@
 # Modified by kdnk for wm on 2026-11-15. Original attribution is preserved in LICENSE.
 [package]
 name = "wm"
-version = "0.16.9"
+version = "0.16.10"
 edition = "2024"
 rust-version = "1.95"
 build = "build.rs"
