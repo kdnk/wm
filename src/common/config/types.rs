@@ -1251,10 +1251,10 @@ impl Settings {
             ));
         }
 
-        if self.gestures.swipe_vertical_tolerance < 0.0 {
+        let tolerance = self.gestures.swipe_vertical_tolerance;
+        if !tolerance.is_finite() || tolerance < 0.0 {
             issues.push(format!(
-                "gestures.swipe_vertical_tolerance must be non-negative, got {}",
-                self.gestures.swipe_vertical_tolerance
+                "gestures.swipe_vertical_tolerance must be non-negative and finite, got {tolerance}"
             ));
         }
 
@@ -1329,10 +1329,10 @@ impl ScrollingLayoutSettings {
             );
         }
 
-        if self.gestures.vertical_tolerance < 0.0 {
+        let tolerance = self.gestures.vertical_tolerance;
+        if !tolerance.is_finite() || tolerance < 0.0 {
             issues.push(format!(
-                "layout.scrolling.gestures.vertical_tolerance must be non-negative, got {}",
-                self.gestures.vertical_tolerance
+                "layout.scrolling.gestures.vertical_tolerance must be non-negative and finite, got {tolerance}"
             ));
         }
 

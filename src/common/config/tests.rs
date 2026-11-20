@@ -53,6 +53,25 @@ fn workspace_swipe_axis_defaults_to_horizontal_and_round_trips() {
 }
 
 #[test]
+fn config_rejects_invalid_gesture_tolerances() {
+    for (section, field) in [
+        ("settings.gestures", "swipe_vertical_tolerance"),
+        ("settings.layout.scrolling.gestures", "vertical_tolerance"),
+    ] {
+        for value in ["nan", "inf", "-inf", "-1.0"] {
+            let text = format!("[{section}]\n{field} = {value}\n[keys]");
+            let error =
+                Config::parse(&text).err().unwrap_or_else(|| panic!("{field} accepted {value}"));
+            assert!(error.to_string().contains(field), "{error}");
+        }
+        for value in ["0.0", "0.4", "40.0"] {
+            let text = format!("[{section}]\n{field} = {value}\n[keys]");
+            Config::parse(&text).expect(&text);
+        }
+    }
+}
+
+#[test]
 fn config_read_rejects_semantically_invalid_files() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
