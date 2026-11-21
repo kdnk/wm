@@ -5668,6 +5668,9 @@ impl Reactor {
     }
 
     fn warp_mouse_for_focus(&mut self, wid: WindowId) {
+        if self.is_in_drag() {
+            return;
+        }
         let Some(pointer) = self.focus_pointer(wid) else {
             return;
         };

@@ -13114,11 +13114,12 @@ fn external_application_activation_warps_to_destination() {
 fn same_application_native_focus_warps_to_destination() {
     for mode in [LayoutMode::Scrolling] {
         for ax_first in [false, true] {
-            for (enabled, restored, pointer_on_target) in [
-                (true, false, false),
-                (false, false, false),
-                (true, true, false),
-                (true, false, true),
+            for (enabled, restored, pointer_on_target, dragging) in [
+                (true, false, false, false),
+                (false, false, false, false),
+                (true, true, false, false),
+                (true, false, true, false),
+                (true, false, false, true),
             ] {
                 let (mut apps, mut reactor) = test_context();
                 let space = SpaceId::new(1);
@@ -13146,6 +13147,18 @@ fn same_application_native_focus_warps_to_destination() {
                 }
                 let (input_tx, mut input_rx) = actor::channel();
                 reactor.communication_manager.input_tx = Some(input_tx);
+                if dragging {
+                    let mut frame = reactor.state.windows.window(source).unwrap().frame_monotonic;
+                    frame.origin.y += 40.;
+                    reactor.handle_event(Event::WindowFrameChanged(
+                        source,
+                        frame,
+                        None,
+                        Requested(false),
+                        Some(MouseState::Down),
+                    ));
+                    assert!(reactor.is_in_drag());
+                }
                 let ax_event = Event::ApplicationMainWindowChanged(1, Some(target), Quiet::No);
                 if ax_first {
                     reactor.handle_event(ax_event);
@@ -13161,7 +13174,7 @@ fn same_application_native_focus_warps_to_destination() {
                         _ => None,
                     })
                     .collect();
-                let expected = if enabled && !restored && !pointer_on_target {
+                let expected = if enabled && !restored && !pointer_on_target && !dragging {
                     let frame = reactor.state.windows.window(target).unwrap().frame_monotonic;
                     assert!(
                         screen.contains(frame.mid()),
@@ -13173,7 +13186,7 @@ fn same_application_native_focus_warps_to_destination() {
                 };
                 assert_eq!(
                     warps, expected,
-                    "mode={mode:?}, ax_first={ax_first}, enabled={enabled}, restored={restored}, pointer_on_target={pointer_on_target}"
+                    "mode={mode:?}, ax_first={ax_first}, enabled={enabled}, restored={restored}, pointer_on_target={pointer_on_target}, dragging={dragging}"
                 );
                 reactor.handle_event(Event::WindowServerFocusChanged(target, space));
                 assert!(
