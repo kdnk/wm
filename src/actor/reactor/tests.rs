@@ -2447,7 +2447,7 @@ fn unrelated_native_resize_does_not_steal_a_cross_display_drag() {
 
 #[test]
 fn native_drag_across_stacked_displays_commits_only_on_release() {
-    use crate::actor::drag::MouseButton;
+    use crate::actor::drag::{DragMotion, MouseButton, PreviewAnchor};
 
     let external = SpaceId::new(1);
     let built_in = SpaceId::new(2);
@@ -2455,18 +2455,36 @@ fn native_drag_across_stacked_displays_commits_only_on_release() {
     let built_in_screen = CGRect::new(CGPoint::new(416., 1480.), CGSize::new(1800., 1129.));
     let window = WindowId::new(1, 1);
     let server = WindowServerId::new(121);
-    let frame = CGRect::new(CGPoint::new(416., 1480.), CGSize::new(640., 1129.));
-    let held = CGRect::new(CGPoint::new(frame.min().x, 1424.), frame.size);
-    let external_release = CGPoint::new(736., 1435.);
-    let built_in_release = CGPoint::new(736., 1527.);
-    assert!(built_in_screen.contains(held.mid()));
-    assert!(external_screen.contains(external_release));
+    let external_edge = CGPoint::new(736., 1435.);
+    let built_in_edge = CGPoint::new(736., 1485.);
+    let built_in_return = CGPoint::new(736., 1527.);
+    let to_external = (built_in, built_in_screen, external, external_screen);
+    let to_built_in = (external, external_screen, built_in, built_in_screen);
 
-    for (observed_at_release, release, expected) in [
-        (external, external_release, external),
-        (built_in, external_release, external),
-        (external, built_in_release, built_in),
+    for (
+        (source, source_screen, destination, destination_screen),
+        edge,
+        release,
+        observed,
+        expected,
+    ) in [
+        (to_external, external_edge, external_edge, external, external),
+        (to_external, external_edge, external_edge, built_in, external),
+        (to_external, external_edge, built_in_return, external, built_in),
+        (to_built_in, built_in_edge, built_in_edge, external, built_in),
     ] {
+        let frame = CGRect::new(
+            CGPoint::new(416., source_screen.min().y),
+            CGSize::new(640., source_screen.size.height),
+        );
+        let held_y = if source == built_in {
+            external_edge.y - 11.0
+        } else {
+            60.0
+        };
+        let held = CGRect::new(CGPoint::new(frame.min().x, held_y), frame.size);
+        assert!(source_screen.contains(held.mid()));
+        assert!(destination_screen.contains(edge));
         let mut reactor = test_reactor();
         let screens = || vec![external_screen, built_in_screen];
         let spaces = || vec![Some(external), Some(built_in)];
@@ -2478,11 +2496,11 @@ fn native_drag_across_stacked_displays_commits_only_on_release() {
         };
         reactor.handle_event(space_state_event(screens(), spaces()));
         reactor.add_test_app(window.pid);
-        let workspace = reactor.test_workspace(built_in, 0);
-        let _ = reactor.test_workspace_ids(external);
-        reactor.add_test_window(window, server, Some(built_in), frame);
-        assert!(reactor.assign_test_window_to_workspace(built_in, window, workspace));
-        reactor.send_layout_event(LayoutEvent::WindowAdded(built_in, window));
+        let workspace = reactor.test_workspace(source, 0);
+        let _ = reactor.test_workspace_ids(destination);
+        reactor.add_test_window(window, server, Some(source), frame);
+        assert!(reactor.assign_test_window_to_workspace(source, window, workspace));
+        reactor.send_layout_event(LayoutEvent::WindowAdded(source, window));
 
         reactor.handle_event(Event::WindowFrameChanged(
             window,
@@ -2491,13 +2509,32 @@ fn native_drag_across_stacked_displays_commits_only_on_release() {
             Requested(false),
             Some(MouseState::Down),
         ));
-        window_server::set_window_spaces_override(server, Some(vec![observed_at_release.get()]));
-        reactor.handle_event(snapshot(observed_at_release));
+        window_server::set_window_spaces_override(server, Some(vec![observed.get()]));
+        reactor.handle_event(snapshot(observed));
+        assert!(!has_window_in_layout(
+            &mut reactor,
+            destination,
+            destination_screen,
+            window
+        ));
+        reactor.handle_event(Event::DragMotion(DragMotion { point: edge }));
+        let preview = reactor
+            .drag_manager
+            .actor
+            .preview_target()
+            .expect("the destination must show an insertion preview before release");
+        assert!(matches!(preview.anchor, PreviewAnchor::Display(space) if space == destination));
+        let preview = preview.preview_area;
+        assert!(destination_screen.contains(preview.mid()));
         assert_eq!(
             reactor.assigned_space_for_window_id(window),
-            Some(built_in),
+            Some(source),
             "the source tile must stay in place while the button is held"
         );
+        if expected == source {
+            reactor.handle_event(Event::DragMotion(DragMotion { point: release }));
+            assert_eq!(reactor.drag_manager.actor.transfer_preview_space(), None);
+        }
 
         window_server::set_window_under_cursor_override(Some(None));
         reactor.handle_event(Event::MouseReleased {
@@ -2505,7 +2542,7 @@ fn native_drag_across_stacked_displays_commits_only_on_release() {
             point: release,
         });
         window_server::set_window_under_cursor_override(None);
-        reactor.handle_event(snapshot(observed_at_release));
+        reactor.handle_event(snapshot(observed));
         assert_eq!(
             reactor.assigned_space_for_window_id(window),
             Some(expected),
@@ -2514,6 +2551,16 @@ fn native_drag_across_stacked_displays_commits_only_on_release() {
         window_server::set_window_spaces_override(server, Some(vec![expected.get()]));
         reactor.handle_event(snapshot(expected));
         window_server::set_window_spaces_override(server, None);
+        if expected == destination {
+            let landed = test_layout(&mut reactor, destination, destination_screen)
+                .into_iter()
+                .find_map(|(id, frame)| (id == window).then_some(frame))
+                .expect("the destination must contain the moved tile");
+            assert!(
+                preview.same_as(landed),
+                "preview {preview:?} differs from drop {landed:?}"
+            );
+        }
 
         for (space, screen) in [(built_in, built_in_screen), (external, external_screen)] {
             assert_eq!(
@@ -2592,6 +2639,8 @@ fn modifier_cross_display_drop_follows_the_pointer_across_the_edge() {
     let pointer = CGPoint::new(shared_right().min().x + 1., anchor.y);
     reactor.handle_event(Event::DragMotion(DragMotion { point: pointer }));
     assert!(frame.mid().x + pointer.x - anchor.x < shared_right().min().x);
+    let preview = reactor.drag_manager.actor.preview_target().unwrap().preview_area;
+    assert!(shared_right().contains(preview.mid()));
     apps.requests();
     reactor.handle_event(Event::MouseUp(MouseButton::Left));
     window_server::set_window_under_cursor_override(None);
@@ -2600,6 +2649,10 @@ fn modifier_cross_display_drop_follows_the_pointer_across_the_edge() {
         .into_iter()
         .find_map(|(window, frame)| (window == wid).then_some(frame))
         .expect("the right display must contain the dropped tile");
+    assert!(
+        preview.same_as(target),
+        "preview {preview:?} differs from drop {target:?}"
+    );
     assert!(apps.requests().iter().any(|request| matches!(
         request, Request::SetWindowFrames(frames, ..) if frames.iter().any(|&(window, frame)| window == wid && frame.same_as(target))
     )));

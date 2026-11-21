@@ -2460,6 +2460,8 @@ impl Reactor {
                 } else {
                     Vec::new()
                 };
+                #[cfg(not(test))]
+                let was_dragging = self.is_in_drag();
                 let mut outcome = window_workflow::handle_window_frame_changed(
                     &mut self.state,
                     &mut self.layout_manager,
@@ -2479,6 +2481,17 @@ impl Reactor {
                         screens,
                     },
                 )?;
+                #[cfg(not(test))]
+                if !was_dragging
+                    && self.drag_manager.preview_enabled
+                    && self.drag_manager.actor.kind()
+                        == Some(crate::actor::drag::DragKind::NativeMove)
+                    && let Ok(point) = window_server::current_cursor_location()
+                    && self.update_drag_transfer_preview(point, false)
+                {
+                    self.drag_manager.actor.motion(crate::actor::drag::DragMotion { point });
+                    self.drag_manager.sync_preview();
+                }
                 // Frame acknowledgements and no-op geometry changes can return
                 // early from the reducer. Mouse release still has to terminate
                 // an existing drag session in those cases.
@@ -2537,6 +2550,7 @@ impl Reactor {
                 if self.drag_manager.actor.modifier_pointer() == Some(motion.point) {
                     return Ok(EventOutcome::no_change());
                 }
+                let transfer_changed = self.update_drag_transfer_preview(motion.point, false);
                 let mut intent_changed = self.drag_manager.actor.motion(motion);
                 if self.drag_manager.actor.kind()
                     == Some(crate::actor::drag::DragKind::ModifierMove)
@@ -2556,7 +2570,7 @@ impl Reactor {
                         intent_changed |= self.drag_manager.actor.motion(motion);
                     }
                 }
-                if intent_changed {
+                if transfer_changed || intent_changed {
                     self.resolve_drag_preview();
                 }
                 let Some((window, new_frame)) = self.drag_manager.actor.interactive_update() else {
@@ -5195,6 +5209,49 @@ impl Reactor {
         self.drag_manager.sync_preview();
     }
 
+    fn update_drag_transfer_preview(&mut self, point: CGPoint, refresh: bool) -> bool {
+        use crate::actor::drag::{DragKind, TransferPreview};
+
+        let Some(source) = self.drag_manager.actor.source() else {
+            return false;
+        };
+        let previous = self.drag_manager.actor.transfer_preview_space();
+        let destination = if source.tiled && self.drag_manager.preview_enabled {
+            match self.drag_manager.actor.kind() {
+                Some(DragKind::NativeMove) => self.native_drop_space_at(point),
+                Some(DragKind::ModifierMove) => self.screen_for_point(point).and_then(|s| s.space),
+                _ => None,
+            }
+            .filter(|&space| {
+                Some(space)
+                    != self.assigned_space_for_window_id(source.window).or(source.origin_space)
+            })
+        } else {
+            None
+        };
+        if destination == previous && (!refresh || destination.is_none()) {
+            return false;
+        }
+        if destination != previous {
+            self.drag_manager.release_preview();
+        }
+        let preview = destination.map(|space| TransferPreview {
+            space,
+            frame: self.space_state.screen_by_space(space).and_then(|screen| {
+                self.layout_manager.layout_engine.transfer_preview_frame(
+                    &self.state.windows,
+                    source.window,
+                    space,
+                    screen.frame,
+                    screen.display_uuid_opt(),
+                    self.config.settings.ui.stack_line.reserve(),
+                )
+            }),
+        });
+        self.drag_manager.actor.set_transfer_preview(preview);
+        true
+    }
+
     fn refresh_active_drag_scene(&mut self) {
         let Some(source) = self.drag_manager.actor.source() else {
             return;
@@ -5209,6 +5266,9 @@ impl Reactor {
             )
         {
             return;
+        }
+        if let Some(point) = self.drag_manager.actor.pointer() {
+            self.update_drag_transfer_preview(point, true);
         }
         let Some(space) = source.current_space else { return };
         let scene = self.drag_scene(source.window, space);

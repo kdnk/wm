@@ -109,6 +109,10 @@ impl DragManager {
             preview.show(target)
         } else {
             crate::ui::drag_preview::DragPreview::new(target).and_then(|mut preview| {
+                if let crate::actor::drag::PreviewAnchor::Display(space) = target.anchor {
+                    crate::sys::window_server::move_window_to_space(preview.window_id(), space)
+                        .map_err(cgs::compositor::CgsWindowError::Property)?;
+                }
                 preview.show(target)?;
                 self.preview = Some(preview);
                 Ok(())

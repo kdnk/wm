@@ -409,6 +409,35 @@ impl LayoutEngine {
         })
     }
 
+    pub(crate) fn transfer_preview_frame(
+        &self,
+        windows: &WindowStore,
+        window: WindowId,
+        space: SpaceId,
+        screen: CGRect,
+        display_uuid: Option<&str>,
+        stack_line: crate::common::config::StackLineReserve,
+    ) -> Option<CGRect> {
+        let (workspace, layout) = self.workspaces.active_layout_for_space(space)?;
+        let mut system = self.workspaces[workspace].layout_system.preview_clone()?;
+        let gaps = self.layout_settings.gaps.effective_for_display(display_uuid);
+        let mut preview_constraints;
+        let constraints = if self.layout_settings.scrolling.preserve_window_sizes {
+            preview_constraints = self.window_layout_constraints.clone();
+            preview_constraints
+                .insert(window, self.preserved_scrolling_constraints(windows, window)?);
+            &preview_constraints
+        } else {
+            &self.window_layout_constraints
+        };
+        system.add_window_after_selection(layout, window);
+        system.prepare_layout(layout, screen, constraints, &gaps);
+        system
+            .calculate_layout(layout, screen, 0.0, constraints, &gaps, stack_line)
+            .into_iter()
+            .find_map(|(candidate, frame)| (candidate == window).then_some(frame))
+    }
+
     pub(crate) fn source_move_neighbors(&self, space: SpaceId, source: WindowId) -> [bool; 4] {
         let Some((workspace, layout)) = self.workspaces.active_layout_for_space(space) else {
             return [false; 4];
@@ -1479,8 +1508,19 @@ impl LayoutEngine {
     }
 
     fn preserve_scrolling_window_width(&mut self, window_store: &WindowStore, wid: WindowId) {
-        if let Some(window) = window_store.window(wid) {
-            let constraints = self.window_layout_constraints.entry(wid).or_insert_with(|| {
+        if let Some(constraints) = self.preserved_scrolling_constraints(window_store, wid) {
+            self.window_layout_constraints.insert(wid, constraints);
+        }
+    }
+
+    fn preserved_scrolling_constraints(
+        &self,
+        windows: &WindowStore,
+        wid: WindowId,
+    ) -> Option<WindowLayoutConstraints> {
+        let window = windows.window(wid)?;
+        let mut constraints =
+            self.window_layout_constraints.get(&wid).copied().unwrap_or_else(|| {
                 WindowLayoutConstraints {
                     is_resizable: window.info.is_resizable,
                     locked_height: window.frame_monotonic.size.height,
@@ -1492,8 +1532,8 @@ impl LayoutEngine {
                 }
                 .normalized()
             });
-            constraints.locked_width = window.frame_monotonic.size.width;
-        }
+        constraints.locked_width = window.frame_monotonic.size.width;
+        Some(constraints)
     }
 
     fn remove_window_from_all_tiling_trees(&mut self, wid: WindowId) {

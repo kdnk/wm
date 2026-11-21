@@ -1,3 +1,4 @@
+// Modified by kdnk for wm on 2026-11-21. Original attribution is preserved in LICENSE.
 use objc2_core_foundation::{CGPoint, CGRect};
 
 use crate::actor::app::WindowId;
@@ -49,6 +50,35 @@ pub struct DropIntent {
 pub struct DropTarget {
     pub intent: DropIntent,
     pub preview_area: CGRect,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PreviewTarget {
+    pub anchor: PreviewAnchor,
+    pub preview_area: CGRect,
+    pub stacked: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum PreviewAnchor {
+    Window(WindowId),
+    Display(SpaceId),
+}
+
+impl From<DropTarget> for PreviewTarget {
+    fn from(target: DropTarget) -> Self {
+        Self {
+            anchor: PreviewAnchor::Window(target.intent.window),
+            preview_area: target.preview_area,
+            stacked: target.intent.action == WindowDropAction::Stack,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TransferPreview {
+    pub space: SpaceId,
+    pub frame: Option<CGRect>,
 }
 
 #[derive(Debug, Clone, Copy)]

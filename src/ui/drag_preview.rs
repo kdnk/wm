@@ -16,9 +16,9 @@ use objc2_quartz_core::{
     kCAAnimationLinear,
 };
 
-use crate::actor::drag::{DropTarget, preview_frame};
-use crate::layout_engine::WindowDropAction;
+use crate::actor::drag::{PreviewAnchor, PreviewTarget, preview_frame};
 use crate::sys::geometry::SameAs;
+use crate::sys::window_server::WindowServerId;
 use crate::ui::motion::{RectSample, RectSpring};
 
 static FILL: LazyLock<Retained<CGColor>> =
@@ -206,7 +206,8 @@ pub struct DragPreview {
 unsafe impl Send for DragPreview {}
 
 impl DragPreview {
-    pub fn new(target: DropTarget) -> Result<Self, CgsWindowError> {
+    pub fn new(target: impl Into<PreviewTarget>) -> Result<Self, CgsWindowError> {
+        let target = target.into();
         let appearance = PreviewAppearance::current();
         let frame = preview_frame(target);
         let style = Self::style(target);
@@ -272,22 +273,28 @@ impl DragPreview {
         })
     }
 
-    pub fn show(&mut self, target: DropTarget) -> Result<(), CgsWindowError> {
+    pub fn window_id(&self) -> WindowServerId { WindowServerId::new(self.window.id()) }
+
+    pub fn show(&mut self, target: impl Into<PreviewTarget>) -> Result<(), CgsWindowError> {
         self.show_with_appearance(target, PreviewAppearance::current())
     }
 
     fn show_with_appearance(
         &mut self,
-        target: DropTarget,
+        target: impl Into<PreviewTarget>,
         appearance: PreviewAppearance,
     ) -> Result<(), CgsWindowError> {
+        let target = target.into();
         let frame = preview_frame(target);
         let style = Self::style(target);
-        let relative_window = target.intent.window.idx.get();
+        let relative_window = match target.anchor {
+            PreviewAnchor::Window(window) => Some(window.idx.get()),
+            PreviewAnchor::Display(_) => None,
+        };
         let tracking = self.visibility == Visibility::Tracking;
         let frame_changed = !self.frame.same_as(frame);
         let style_changed = self.style != style;
-        let ordering_changed = !tracking || self.relative_window != Some(relative_window);
+        let ordering_changed = !tracking || self.relative_window != relative_window;
         let appearance_changed = self.appearance != appearance;
         let settle_motion = appearance.reduce_motion && !self.appearance.reduce_motion;
         if !frame_changed && !style_changed && !ordering_changed && !appearance_changed {
@@ -340,8 +347,8 @@ impl DragPreview {
             self.frame = frame;
         }
         if ordering_changed {
-            self.window.order_above(Some(relative_window))?;
-            self.relative_window = Some(relative_window);
+            self.window.order_above(relative_window)?;
+            self.relative_window = relative_window;
         }
         if style_changed || settle_motion {
             fade(
@@ -417,8 +424,8 @@ impl DragPreview {
         prepared
     }
 
-    fn style(target: DropTarget) -> PreviewStyle {
-        if target.intent.action == WindowDropAction::Stack {
+    fn style(target: PreviewTarget) -> PreviewStyle {
+        if target.stacked {
             PreviewStyle::Stack
         } else {
             PreviewStyle::Tile

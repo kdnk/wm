@@ -12,7 +12,8 @@ mod preview {
     use std::path::Path;
     use std::time::Duration;
 
-    use crate::actor::drag::{DropIntent, DropZone};
+    use crate::actor::drag::{DropIntent, DropTarget, DropZone};
+    use crate::layout_engine::WindowDropAction;
     use crate::sys::screen::SpaceId;
 
     struct Recording(std::process::Child);
@@ -37,6 +38,9 @@ mod preview {
         };
         let mut preview = DragPreview::new(target)?;
         preview.show_with_appearance(target, appearance)?;
+        assert!(crate::sys::window_server::window_is_ordered_in(
+            preview.window_id()
+        ));
         let recorder = movie
             .map(|path| {
                 std::process::Command::new("/usr/sbin/screencapture")

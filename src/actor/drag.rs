@@ -14,7 +14,7 @@ use crate::common::config::{DragDropSettings, MouseAction, MouseDropAction};
 use crate::layout_engine::{Direction, WindowDropAction};
 pub use crate::model::drag::{
     DragCancel, DragCommit, DragKind, DragScene, DragSceneTarget, DragSource, DropIntent,
-    DropTarget, DropZone,
+    DropTarget, DropZone, PreviewAnchor, PreviewTarget, TransferPreview,
 };
 use crate::sys::geometry::SameAs;
 use crate::sys::screen::SpaceId;
@@ -69,6 +69,7 @@ pub struct Session {
     pub anchor_point: CGPoint,
     pub scene: DragScene,
     target: TargetState,
+    transfer_preview: Option<TransferPreview>,
     unavailable: Vec<(WindowId, DropZone, WindowDropAction)>,
     pub kind: DragKind,
 }
@@ -113,6 +114,7 @@ impl Session {
             anchor_point: pointer,
             scene,
             target: TargetState::None,
+            transfer_preview: None,
             unavailable: Vec::new(),
             kind,
         }
@@ -179,11 +181,18 @@ impl DragActor {
 
     pub fn target(&self) -> Option<DropTarget> { self.session()?.target.validated() }
 
-    pub fn preview_target(&self) -> Option<DropTarget> {
+    pub fn preview_target(&self) -> Option<PreviewTarget> {
         let session = self.session()?;
+        if let Some(transfer) = session.transfer_preview {
+            return Some(PreviewTarget {
+                anchor: PreviewAnchor::Display(transfer.space),
+                preview_area: transfer.frame?,
+                stacked: false,
+            });
+        }
         if let Some(target) = session.target.validated() {
             return (session.source.tiled || target.intent.action == WindowDropAction::Stack)
-                .then_some(target);
+                .then(|| target.into());
         }
         if !session.source.tiled
             || !matches!(session.target, TargetState::None)
@@ -191,16 +200,25 @@ impl DragActor {
         {
             return None;
         }
-        Some(DropTarget {
-            intent: DropIntent {
-                window: session.source.window,
-                space: session.source.current_space?,
-                frame: session.source.origin_frame,
-                zone: DropZone::Center,
-                action: WindowDropAction::Swap,
-            },
+        session.source.current_space?;
+        Some(PreviewTarget {
+            anchor: PreviewAnchor::Window(session.source.window),
             preview_area: session.source.origin_frame,
+            stacked: false,
         })
+    }
+
+    pub fn pointer(&self) -> Option<CGPoint> { Some(self.session()?.pointer) }
+
+    pub fn transfer_preview_space(&self) -> Option<SpaceId> {
+        Some(self.session()?.transfer_preview?.space)
+    }
+
+    pub fn set_transfer_preview(&mut self, preview: Option<TransferPreview>) {
+        if let State::Dragging(session) = &mut self.state {
+            session.transfer_preview = preview;
+            session.invalidate_drop();
+        }
     }
 
     pub fn intent(&self) -> Option<DropIntent> { self.session()?.target.intent() }
@@ -235,6 +253,7 @@ impl DragActor {
         if session.source.tiled
             && matches!(session.kind, DragKind::NativeMove | DragKind::ModifierMove)
             && session.source.origin_space == session.source.current_space
+            && session.transfer_preview.is_none()
         {
             let next = hit_test_available(
                 &session.scene,
@@ -398,6 +417,9 @@ impl DragActor {
             session.source.current_space = current_space;
             session.invalidate_drop();
         }
+        if session.kind == DragKind::NativeResize {
+            session.transfer_preview = None;
+        }
         true
     }
 
@@ -452,6 +474,7 @@ impl DragActor {
         let next = if session.kind == DragKind::NativeResize
             || !session.source.tiled
             || session.source.origin_space != session.source.current_space
+            || session.transfer_preview.is_some()
         {
             None
         } else {
@@ -772,8 +795,8 @@ fn distance_to_rect_squared(frame: CGRect, point: CGPoint) -> f64 {
     dx * dx + dy * dy
 }
 
-pub fn preview_frame(target: DropTarget) -> CGRect {
-    let mut frame = target.preview_area;
+pub fn preview_frame(target: impl Into<PreviewTarget>) -> CGRect {
+    let mut frame = target.into().preview_area;
     frame.origin.x += 4.0;
     frame.origin.y += 4.0;
     frame.size.width = (frame.size.width - 8.0).max(0.0);
