@@ -194,9 +194,41 @@ fn menu_column_icon_click_warps_to_revealed_window_and_repeated_click_still_warp
 }
 
 #[test]
-fn menu_focus_transition_ignores_passing_windows_until_motion_finishes() {
-    let (_apps, mut reactor, _space) = active_menu_windows(LayoutMode::Scrolling, true);
+fn explicit_focus_transition_ignores_passing_windows_until_motion_finishes() {
     let target = WindowId::new(1, 1);
+    for mouse_follows_focus in [true, false] {
+        for (request, destination) in [
+            (Event::MenuBarFocusWindow(target), target),
+            (
+                Event::Command(Command::Reactor(ReactorCommand::FocusWindow {
+                    window_id: target.into(),
+                    window_server_id: None,
+                })),
+                target,
+            ),
+            (
+                Event::Command(Command::Layout(layout::LayoutCommand::MoveFocus(
+                    Direction::Left,
+                ))),
+                WindowId::new(1, 3),
+            ),
+        ] {
+            assert_explicit_focus_preserved_during_motion(
+                request,
+                destination,
+                mouse_follows_focus,
+            );
+        }
+    }
+}
+
+fn assert_explicit_focus_preserved_during_motion(
+    request: Event,
+    target: WindowId,
+    mouse_follows_focus: bool,
+) {
+    let (_apps, mut reactor, _space) = active_menu_windows(LayoutMode::Scrolling, true);
+    reactor.config.settings.mouse_follows_focus = mouse_follows_focus;
     let passing = WindowId::new(1, 2);
     let (animation_tx, animation_rx) = super::animation::AnimationSender::channel();
     reactor.animation_tx = Some(animation_tx);
@@ -205,7 +237,8 @@ fn menu_focus_transition_ignores_passing_windows_until_motion_finishes() {
     let (raise_tx, mut raise_rx) = crate::actor::channel();
     reactor.communication_manager.raise_manager_tx = raise_tx;
 
-    reactor.handle_event(Event::MenuBarFocusWindow(target));
+    let request_name = format!("{request:?}");
+    reactor.handle_event(request);
     assert_eq!(
         reactor.layout_manager.layout_engine.focused_window(),
         Some(target)
@@ -217,13 +250,13 @@ fn menu_focus_transition_ignores_passing_windows_until_motion_finishes() {
             super::animation::Message::Camera(camera) => Some(camera),
             _ => None,
         })
-        .expect("menu focus must animate the viewport");
+        .expect("explicit focus must animate the viewport");
     while raise_rx.try_recv().is_ok() {}
     reactor.handle_loop_event(Event::MouseMoved(reactor.test_window_server_id(passing)));
     assert_eq!(
         reactor.layout_manager.layout_engine.focused_window(),
         Some(target),
-        "motion over a passing window must not replace the menu destination"
+        "motion must not replace the destination ({request_name}, mouse_follows_focus={mouse_follows_focus})"
     );
     assert!(
         raise_rx.try_recv().is_err(),
