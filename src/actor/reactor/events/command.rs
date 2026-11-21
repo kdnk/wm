@@ -130,6 +130,11 @@ pub fn handle_command_layout(
         })
         .collect();
     let response_changed = response.changed;
+    let explicit_focus_target = if is_focus_command && response_changed {
+        response.focus_window
+    } else {
+        None
+    };
     let selection_changed = is_selection_command && response_changed;
     let arrange_space_scope = is_workspace_switch.then_some(workspace_space).flatten();
     // Geometry commands must reconcile frames even when their layout-system
@@ -144,6 +149,7 @@ pub fn handle_command_layout(
     }
     .with_layout_response(response, workspace_space)
     .with_arrange_space_scope(arrange_space_scope);
+    outcome.explicit_focus_target = explicit_focus_target;
     for (window, frame) in placement_writes {
         if let Some(assignment) = state.windows.workspace_for_window(window) {
             let target = layout.layout_engine.workspaces()[assignment].space;
@@ -432,7 +438,7 @@ pub fn handle_command_reactor_focus_window(
             return Ok(outcome);
         }
         outcome = outcome.with_layout_event(LayoutEvent::WindowFocused(space, window_id));
-
+        outcome.explicit_focus_target = Some(window_id);
         outcome = outcome.with_raise_request(focus_window_raise_request(apps, window_id));
     } else if let Some(wsid) = window_server_id {
         outcome.make_key_windows.push((window_id.pid, wsid));

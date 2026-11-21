@@ -3621,6 +3621,12 @@ impl Reactor {
 
         #[cfg(test)]
         self.event_outcome_phase_trace.push("raising");
+        if let Some(window) = outcome.explicit_focus_target
+            && self.layout_manager.layout_engine.focused_window() == Some(window)
+            && let Some(space) = self.assigned_space_for_window_id(window)
+        {
+            self.hold_hover_for_presentation(space);
+        }
         if !self.mouse_raise_token.is_cancelled() && self.transient_blocks_mouse_focus() {
             self.mouse_raise_token.cancel();
             let _ = self

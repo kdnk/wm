@@ -74,6 +74,7 @@ pub(crate) struct EventOutcome {
     pub(crate) raise_requests: Vec<raise_manager::Event>,
     pub(crate) make_key_windows: Vec<(pid_t, WindowServerId)>,
     pub(crate) mouse_warps: Vec<CGPoint>,
+    pub(crate) explicit_focus_target: Option<WindowId>,
     pub(crate) post_arrange_mouse_warp: Option<WindowId>,
     /// A workspace switch landed on this other display; carry the cursor there.
     pub(crate) display_switch_warp: Option<SpaceId>,
@@ -137,6 +138,7 @@ impl EventOutcome {
         self.raise_requests.append(&mut other.raise_requests);
         self.make_key_windows.append(&mut other.make_key_windows);
         self.mouse_warps.append(&mut other.mouse_warps);
+        self.explicit_focus_target = other.explicit_focus_target.or(self.explicit_focus_target);
         self.drop_haptic |= other.drop_haptic;
         self.finish_drop_preview |= other.finish_drop_preview;
         self.post_arrange_mouse_warp =
