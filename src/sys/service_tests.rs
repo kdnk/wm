@@ -1,4 +1,6 @@
 // Modified by kdnk for wm on 2026-11-18. Original attribution is preserved in LICENSE.
+use std::collections::VecDeque;
+
 use super::*;
 
 struct FixtureControl {
@@ -7,6 +9,7 @@ struct FixtureControl {
     checkpoint_data: &'static str,
     state_error: bool,
     bootstrapped: bool,
+    launchctl_exits: VecDeque<i32>,
     calls: Vec<String>,
 }
 
@@ -18,6 +21,7 @@ impl Default for FixtureControl {
             checkpoint_data: "Layout saved",
             state_error: false,
             bootstrapped: true,
+            launchctl_exits: VecDeque::new(),
             calls: Vec::new(),
         }
     }
@@ -47,13 +51,76 @@ impl ServiceControl for FixtureControl {
 
     fn launchctl(&mut self, args: &[&str], _suppress_output: bool) -> io::Result<i32> {
         self.calls.push(args.join(" "));
-        Ok(i32::from(args[0] == "print" && !self.bootstrapped))
+        Ok(self.launchctl_exits.pop_front().unwrap_or_else(|| {
+            if args[0] == "print" && !self.bootstrapped {
+                LAUNCHCTL_SERVICE_NOT_FOUND
+            } else {
+                0
+            }
+        }))
     }
 
     fn start(&mut self) -> io::Result<()> {
         self.calls.push("start".into());
         Ok(())
     }
+}
+
+#[test]
+fn start_waits_for_registration_before_kickstart() {
+    let missing = LAUNCHCTL_SERVICE_NOT_FOUND;
+    let mut control = FixtureControl {
+        launchctl_exits: [missing, 0, 0, missing, 0, 0].into(),
+        ..Default::default()
+    };
+    start_service(&mut control, "fixture", "domain", "fixture.plist", false).unwrap();
+    assert_eq!(control.calls, [
+        "print fixture",
+        "enable fixture",
+        "bootstrap domain fixture.plist",
+        "print fixture",
+        "print fixture",
+        "kickstart fixture"
+    ]);
+}
+
+#[test]
+fn start_reports_bootstrap_failure_without_attempting_kickstart() {
+    let mut control = FixtureControl {
+        launchctl_exits: [LAUNCHCTL_SERVICE_NOT_FOUND, 0, 5].into(),
+        ..Default::default()
+    };
+    let error =
+        start_service(&mut control, "fixture", "domain", "fixture.plist", false).unwrap_err();
+    assert!(error.to_string().contains("bootstrap failed (exit 5)"));
+    assert_eq!(control.calls, [
+        "print fixture",
+        "enable fixture",
+        "bootstrap domain fixture.plist"
+    ]);
+}
+
+#[test]
+fn start_waits_for_old_job_to_disappear_before_replacing_it() {
+    let missing = LAUNCHCTL_SERVICE_NOT_FOUND;
+    let mut control = FixtureControl {
+        launchctl_exits: [0, 5, 0, 0, missing, 0, missing, 0, 0].into(),
+        ..Default::default()
+    };
+    start_service(&mut control, "fixture", "domain", "fixture.plist", true).unwrap();
+    assert_eq!(control.calls, [
+        "print fixture",
+        "kickstart fixture",
+        "state",
+        "checkpoint",
+        "bootout domain fixture.plist",
+        "print fixture",
+        "print fixture",
+        "bootstrap domain fixture.plist",
+        "print fixture",
+        "print fixture",
+        "kickstart fixture"
+    ]);
 }
 
 #[test]

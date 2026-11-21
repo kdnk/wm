@@ -7,7 +7,7 @@ use std::io::{self, Write};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clap::Subcommand;
 use nix::unistd::getuid;
@@ -17,6 +17,7 @@ use crate::ipc::WmMachClient;
 
 const LAUNCHCTL_PATH: &str = "/bin/launchctl";
 const WM_PLIST: &str = wm_protocol::DEFAULT_SERVICE_NAME;
+const LAUNCHCTL_SERVICE_NOT_FOUND: i32 = 113;
 
 trait ServiceControl {
     fn running_pid(&mut self) -> io::Result<Option<u32>>;
@@ -270,14 +271,6 @@ fn run_launchctl(args: &[&str], suppress_output: bool) -> io::Result<i32> {
     }
 }
 
-fn spawn_launchctl(args: &[&str]) -> io::Result<()> {
-    let mut cmd = Command::new(LAUNCHCTL_PATH);
-    cmd.args(args);
-    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    let _child = cmd.spawn()?;
-    Ok(())
-}
-
 fn service_is_running() -> io::Result<bool> {
     let uid = getuid();
     let service_target = format!("gui/{}/{}", uid, WM_PLIST);
@@ -363,51 +356,94 @@ pub fn service_start() -> io::Result<()> {
         false
     };
 
-    let is_bootstrapped = run_launchctl(&["print", &service_target], true).unwrap_or(1);
-    if is_bootstrapped != 0 {
-        let _ = run_launchctl(&["enable", &service_target], true);
+    let plist_path = plist_path.to_str().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "non-UTF8 service plist path")
+    })?;
+    start_service(
+        &mut NativeServiceControl,
+        &service_target,
+        &domain_target,
+        plist_path,
+        plist_changed,
+    )
+}
 
-        let _ = spawn_launchctl(&["bootstrap", &domain_target, plist_path.to_str().unwrap()]);
-        let _ = std::thread::sleep(std::time::Duration::from_millis(150));
-        let code = run_launchctl(&["kickstart", &service_target], false)?;
-        if code == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("kickstart after bootstrap failed (exit {})", code),
-            ))
+fn start_service(
+    control: &mut impl ServiceControl,
+    service_target: &str,
+    domain_target: &str,
+    plist_path: &str,
+    plist_changed: bool,
+) -> io::Result<()> {
+    let kickstart = ["kickstart", service_target];
+    if registration(control, service_target)? == Registration::Present {
+        let code = control.launchctl(&kickstart, false)?;
+        if code == 0 || !plist_changed {
+            return check_exit("kickstart", code);
         }
+        checkpoint_running_service(control)?;
+        check_exit(
+            "bootout",
+            control.launchctl(&["bootout", domain_target, plist_path], false)?,
+        )?;
+        wait_for_registration(control, service_target, Registration::Absent)?;
     } else {
-        let code = run_launchctl(&["kickstart", &service_target], false)?;
-        if code == 0 {
-            return Ok(());
-        }
-
-        if plist_changed {
-            checkpoint_running_service(&mut NativeServiceControl)?;
-            let _ = run_launchctl(&["bootout", &domain_target, plist_path.to_str().unwrap()], true);
-            let _ = spawn_launchctl(&["bootstrap", &domain_target, plist_path.to_str().unwrap()]);
-            let _ = std::thread::sleep(std::time::Duration::from_millis(150));
-            let code2 = run_launchctl(&["kickstart", &service_target], false)?;
-            if code2 == 0 {
-                Ok(())
-            } else {
-                Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!(
-                        "kickstart failed (exit {}), reload+kickstart failed (exit {})",
-                        code, code2
-                    ),
-                ))
-            }
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("kickstart failed (exit {})", code),
-            ))
-        }
+        check_exit("enable", control.launchctl(&["enable", service_target], false)?)?;
     }
+    check_exit(
+        "bootstrap",
+        control.launchctl(&["bootstrap", domain_target, plist_path], false)?,
+    )?;
+    wait_for_registration(control, service_target, Registration::Present)?;
+    check_exit("kickstart", control.launchctl(&kickstart, false)?)
+}
+
+fn check_exit(command: &str, code: i32) -> io::Result<()> {
+    if code == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "launchctl {command} failed (exit {code})"
+        )))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Registration {
+    Present,
+    Absent,
+}
+
+fn registration(control: &mut impl ServiceControl, target: &str) -> io::Result<Registration> {
+    match control.launchctl(&["print", target], true)? {
+        0 => Ok(Registration::Present),
+        LAUNCHCTL_SERVICE_NOT_FOUND => Ok(Registration::Absent),
+        code => Err(io::Error::other(format!(
+            "launchctl print {target} failed (exit {code})"
+        ))),
+    }
+}
+
+fn wait_for_registration(
+    control: &mut impl ServiceControl,
+    target: &str,
+    expected: Registration,
+) -> io::Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while registration(control, target)? != expected {
+        if Instant::now() >= deadline {
+            let operation = match expected {
+                Registration::Present => "register",
+                Registration::Absent => "remove",
+            };
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("timed out waiting for launchd to {operation} {target}"),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Ok(())
 }
 
 pub fn service_restart() -> io::Result<()> {
