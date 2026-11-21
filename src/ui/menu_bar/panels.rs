@@ -410,6 +410,7 @@ impl DisplayPanels {
                 intervals,
                 viewport_width(display, settings, StripPresentation::Combined),
                 viewport_width(display, settings, StripPresentation::WorkspaceOverview),
+                viewport_width(display, settings, StripPresentation::WindowPicker),
             );
             if let Some((presentation, frame)) = choice {
                 entry.panel.project(
@@ -458,17 +459,17 @@ fn choose_placement(
     intervals: [Option<NSRect>; 2],
     combined_width: f64,
     overview_width: f64,
+    picker_width: f64,
 ) -> Option<(StripPresentation, NSRect)> {
-    [
+    let presentations = [
         (StripPresentation::Combined, combined_width),
         (StripPresentation::WorkspaceOverview, overview_width),
-    ]
-    .into_iter()
-    .find_map(|(presentation, width)| {
-        intervals
-            .into_iter()
-            .flatten()
-            .find_map(|interval| fit_right(interval, width).map(|frame| (presentation, frame)))
+        (StripPresentation::WindowPicker, picker_width),
+    ];
+    intervals.into_iter().flatten().find_map(|interval| {
+        presentations.into_iter().find_map(|(presentation, width)| {
+            fit_right(interval, width).map(|frame| (presentation, frame))
+        })
     })
 }
 
@@ -569,37 +570,46 @@ fn fit_right(interval: NSRect, width: f64) -> Option<NSRect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::menu_bar::window_list::WINDOW_PICKER_VIEWPORT_WIDTH as PICKER_WIDTH;
+
     #[test]
-    fn menu_bar_single_strip_prefers_full_right_then_full_left_before_compacting() {
+    fn menu_bar_single_strip_keeps_the_right_anchor_when_it_compacts() {
         let right = NSRect::new(NSPoint::new(1600.0, -64.0), NSSize::new(400.0, 64.0));
         let left = NSRect::new(NSPoint::new(1108.0, -64.0), NSSize::new(484.0, 64.0));
         let (presentation, frame) =
-            choose_placement([Some(right), Some(left)], 300.0, 100.0).unwrap();
+            choose_placement([Some(right), Some(left)], 300.0, 100.0, PICKER_WIDTH).unwrap();
         assert!(presentation == StripPresentation::Combined);
         assert_eq!(frame.origin, NSPoint::new(1700.0, -45.0));
         assert_eq!(frame.size, NSSize::new(300.0, 26.0));
         let (presentation, frame) =
-            choose_placement([Some(right), Some(left)], 484.0, 100.0).unwrap();
-        assert!(presentation == StripPresentation::Combined);
-        assert_eq!(frame.origin.x, 1108.0);
-        assert_eq!(frame.origin.x + frame.size.width, 1592.0);
+            choose_placement([Some(right), Some(left)], 484.0, 100.0, PICKER_WIDTH).unwrap();
+        assert!(presentation == StripPresentation::WorkspaceOverview);
+        assert_eq!(frame.origin.x + frame.size.width, 2000.0);
+        let (presentation, frame) =
+            choose_placement([Some(right), Some(left)], 484.0, 401.0, PICKER_WIDTH).unwrap();
+        assert!(presentation == StripPresentation::WindowPicker);
+        assert_eq!(frame.size.width, PICKER_WIDTH);
+        assert_eq!(frame.origin.x + frame.size.width, 2000.0);
     }
 
     #[test]
-    fn menu_bar_single_strip_compacts_right_then_left_and_hides_without_a_fit() {
-        let right = NSRect::new(NSPoint::new(1600.0, -64.0), NSSize::new(100.0, 64.0));
+    fn menu_bar_single_strip_uses_left_only_when_no_right_control_fits() {
+        let right = NSRect::new(NSPoint::new(1600.0, -64.0), NSSize::new(20.0, 64.0));
         let left = NSRect::new(NSPoint::new(1108.0, -64.0), NSSize::new(200.0, 64.0));
         let (presentation, frame) =
-            choose_placement([Some(right), Some(left)], 300.0, 100.0).unwrap();
-        assert!(presentation == StripPresentation::WorkspaceOverview);
-        assert_eq!(frame.origin.x, 1600.0);
+            choose_placement([Some(right), Some(left)], 200.0, 101.0, PICKER_WIDTH).unwrap();
+        assert!(presentation == StripPresentation::Combined);
+        assert_eq!(frame.origin.x, 1108.0);
         let (presentation, frame) =
-            choose_placement([Some(right), Some(left)], 300.0, 101.0).unwrap();
+            choose_placement([Some(right), Some(left)], 300.0, 101.0, PICKER_WIDTH).unwrap();
         assert!(presentation == StripPresentation::WorkspaceOverview);
         assert_eq!(frame.origin.x, 1207.0);
-        assert!(choose_placement([Some(right), Some(left)], 300.0, 201.0).is_none());
-        assert!(choose_placement([None, None], 100.0, 50.0).is_none());
-        assert!(choose_placement([Some(right), None], f64::NAN, 101.0).is_none());
+        let (presentation, frame) =
+            choose_placement([Some(right), Some(left)], 300.0, 201.0, PICKER_WIDTH).unwrap();
+        assert!(presentation == StripPresentation::WindowPicker);
+        assert_eq!(frame.origin.x + frame.size.width, 1308.0);
+        assert!(choose_placement([None, None], 100.0, 50.0, PICKER_WIDTH).is_none());
+        assert!(choose_placement([Some(right), None], f64::NAN, 101.0, PICKER_WIDTH).is_none());
     }
 
     #[test]
@@ -613,12 +623,14 @@ mod tests {
             layer: 25,
         }];
         let interval = free_menu_interval(screen, domain, &windows, 99).unwrap();
-        let (_, frame) = choose_placement([None, Some(interval)], 300.0, 100.0).unwrap();
+        let (_, frame) =
+            choose_placement([None, Some(interval)], 300.0, 100.0, PICKER_WIDTH).unwrap();
         assert_eq!(frame.origin.x + frame.size.width, 1592.0);
         assert!(frame.origin.x >= 1108.0);
         windows[0].frame.origin.x = 1500.0;
         let interval = free_menu_interval(screen, domain, &windows, 99).unwrap();
-        let (_, frame) = choose_placement([None, Some(interval)], 300.0, 100.0).unwrap();
+        let (_, frame) =
+            choose_placement([None, Some(interval)], 300.0, 100.0, PICKER_WIDTH).unwrap();
         assert_eq!(frame.origin.x + frame.size.width, 1492.0);
         windows[0].frame.origin.x = 1100.0;
         assert!(free_menu_interval(screen, domain, &windows, 99).is_none());
@@ -903,6 +915,7 @@ mod tests {
             ],
             300.0,
             100.0,
+            PICKER_WIDTH,
         )
         .unwrap();
         assert!(presentation == StripPresentation::Combined);

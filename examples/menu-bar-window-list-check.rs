@@ -665,6 +665,55 @@ mod window_list {
         )
     }
 
+    fn choose_popup_item(button: &objc2_app_kit::NSButton, item_index: usize) -> Vec<String> {
+        use objc2_app_kit::{NSMenu, NSMenuDidBeginTrackingNotification};
+        use objc2_foundation::{NSNotification, NSNotificationCenter, NSOperationQueue};
+
+        let titles = Rc::new(RefCell::new(None));
+        let observer = block2::RcBlock::new({
+            let titles = titles.clone();
+            move |notification: std::ptr::NonNull<NSNotification>| {
+                let menu = unsafe { notification.as_ref() }
+                    .object()
+                    .unwrap()
+                    .downcast::<NSMenu>()
+                    .unwrap();
+                let titles = titles.clone();
+                let select = block2::RcBlock::new(move |_: std::ptr::NonNull<NSTimer>| {
+                    let items = menu.itemArray();
+                    *titles.borrow_mut() =
+                        Some(items.iter().map(|item| item.title().to_string()).collect());
+                    if item_index < items.count() {
+                        menu.performActionForItemAtIndex(item_index as isize);
+                    }
+                    menu.cancelTracking();
+                });
+                let timer =
+                    unsafe { NSTimer::timerWithTimeInterval_repeats_block(0.02, false, &select) };
+                unsafe {
+                    NSRunLoop::mainRunLoop().addTimer_forMode(
+                        &timer,
+                        &NSString::from_str("NSEventTrackingRunLoopMode"),
+                    );
+                }
+            }
+        });
+        let center = NSNotificationCenter::defaultCenter();
+        let token = unsafe {
+            center.addObserverForName_object_queue_usingBlock(
+                Some(NSMenuDidBeginTrackingNotification),
+                None,
+                Some(&NSOperationQueue::mainQueue()),
+                &observer,
+            )
+        };
+        unsafe {
+            button.performClick(None);
+            center.removeObserver((*token).as_ref());
+        }
+        titles.take().expect("clicking the button must open a native window menu")
+    }
+
     fn verify_focus_artwork(
         view: &mut WindowListView,
         parent: &NSStatusBarButton,
@@ -1662,14 +1711,52 @@ mod window_list {
             action_rx.try_recv().unwrap(),
             MenuAction::SwitchToWorkspace(11)
         ));
-        let active_workspace = overview.iter().find(|workspace| workspace.active).unwrap();
-        let popup = view.window_menu(active_workspace.windows.iter(), &handler);
-        for (index, window) in active_workspace.windows.iter().enumerate() {
-            popup.ns_menu().performActionForItemAtIndex(index as isize);
+        let mut picker_workspaces = overview[..2].to_vec();
+        for kind in [
+            StripPresentation::WorkspaceOverview,
+            StripPresentation::WindowPicker,
+        ] {
+            let active_index = usize::from(kind == StripPresentation::WorkspaceOverview);
+            for (index, workspace) in picker_workspaces.iter_mut().enumerate() {
+                workspace.active = index == active_index;
+            }
+            view.update(&picker_workspaces, true, kind, &parent, &handler);
+            view.position_after(0.0, CAPSULE_HEIGHT);
+            let active_workspace = &picker_workspaces[active_index];
+            let button = if kind == StripPresentation::WindowPicker {
+                assert_eq!(view.width(), WINDOW_PICKER_VIEWPORT_WIDTH);
+                assert_eq!(view.buttons.len(), 1);
+                &view.buttons[0]
+            } else {
+                &view.buttons[active_index]
+            };
+            let window_index = active_workspace.windows.len() - 1;
+            assert_eq!(
+                choose_popup_item(button.button.ns_button(), window_index),
+                active_workspace.windows.iter().map(window_label).collect::<Vec<_>>()
+            );
             assert!(
-                matches!(action_rx.try_recv().unwrap(), MenuAction::FocusWindow(id) if id == window.id)
+                matches!(action_rx.try_recv().unwrap(), MenuAction::FocusWindow(id) if id == active_workspace.windows[window_index].id)
             );
         }
+        picker_workspaces[0].windows.clear();
+        for kind in [
+            StripPresentation::WorkspaceOverview,
+            StripPresentation::WindowPicker,
+        ] {
+            view.update(&picker_workspaces, true, kind, &parent, &handler);
+            view.position_after(0.0, CAPSULE_HEIGHT);
+            if kind == StripPresentation::WindowPicker {
+                assert_eq!(view.width(), WINDOW_PICKER_VIEWPORT_WIDTH);
+            }
+            assert_eq!(choose_popup_item(view.buttons[0].button.ns_button(), 0), [
+                "No windows"
+            ]);
+            assert!(action_rx.try_recv().is_err());
+        }
+        println!(
+            "PASS: workspace overview and fixed-width picker open native menus for the active workspace"
+        );
         let mut draggable = active(&windows[..2]);
         for (index, window) in draggable[0].windows.iter_mut().enumerate() {
             window.layout_position = Some(crate::actor::menu_bar::MenuLayoutPosition {

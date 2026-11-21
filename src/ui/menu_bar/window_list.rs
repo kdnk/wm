@@ -38,6 +38,7 @@ const LIST_GAP: f64 = 6.0;
 const WORKSPACE_GAP: f64 = 8.0;
 const WORKSPACE_PADDING: f64 = 8.0;
 pub(super) const CAPSULE_HEIGHT: f64 = 26.0;
+pub(super) const WINDOW_PICKER_VIEWPORT_WIDTH: f64 = LIST_GAP + CAPSULE_HEIGHT;
 const CONTROL_INSET: f64 = 2.0;
 const WORKSPACE_TRANSITION: &str = "transition";
 const MAX_VISIBLE_GROUPS: usize = 12;
@@ -212,6 +213,13 @@ pub(super) fn viewport_width(
     if !settings.show_window_list {
         return 0.0;
     }
+    if presentation == StripPresentation::WindowPicker {
+        return if display.workspaces.iter().any(|workspace| workspace.is_active) {
+            WINDOW_PICKER_VIEWPORT_WIDTH
+        } else {
+            0.0
+        };
+    }
     let catalog = workspace_catalog(display);
     catalog
         .iter()
@@ -242,6 +250,16 @@ pub(super) fn viewport_width(
 pub(super) enum StripPresentation {
     Combined,
     WorkspaceOverview,
+    WindowPicker,
+}
+
+impl StripPresentation {
+    fn horizontal_padding(self, workspace: &WorkspaceWindows) -> f64 {
+        match self {
+            Self::Combined | Self::WorkspaceOverview => workspace.horizontal_padding(),
+            Self::WindowPicker => 0.0,
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -849,7 +867,10 @@ impl WindowListView {
             .collect();
         self.icons.retain(|key, _| live.contains(key));
         let ui = Ui::new(self.mtm);
-        for workspace in workspaces {
+        for workspace in workspaces
+            .iter()
+            .filter(|workspace| presentation != StripPresentation::WindowPicker || workspace.active)
+        {
             let start = self.buttons.len();
             let space = handler.space.unwrap_or(crate::sys::screen::SpaceId::new(0));
             let matched = previous.iter().position(|capsule| {
@@ -875,15 +896,19 @@ impl WindowListView {
                 self.capsules.push(WorkspaceCapsule::new(self.mtm, start, workspace, handler));
             }
             let mut capsule = self.capsules.pop().unwrap();
-            if workspace.windows.is_empty() {
-                self.add_preview(workspace, &capsule.content, handler, &ui);
-            } else if workspace.active && presentation != StripPresentation::WorkspaceOverview {
-                self.add_active(workspace, grouped, &capsule.content, handler, &ui);
-            } else {
-                self.add_preview(workspace, &capsule.content, handler, &ui);
+            match presentation {
+                StripPresentation::WindowPicker => {
+                    self.add_window_picker(workspace, &capsule.content, handler, &ui);
+                }
+                StripPresentation::Combined
+                    if workspace.active && !workspace.windows.is_empty() =>
+                {
+                    self.add_active(workspace, grouped, &capsule.content, handler, &ui);
+                }
+                _ => self.add_preview(workspace, &capsule.content, handler, &ui),
             }
             capsule.end = self.buttons.len();
-            capsule.width = workspace.horizontal_padding() * 2.0
+            capsule.width = presentation.horizontal_padding(workspace) * 2.0
                 + self.buttons[start..]
                     .iter()
                     .map(|item| item.width + item.gap_before)
@@ -1068,7 +1093,6 @@ impl WindowListView {
         ui: &Ui,
     ) {
         let index = workspace.index;
-        let scoped = handler.clone();
         let groups = window_groups(&workspace.windows, true);
         let empty = workspace.windows.is_empty();
         let extra = groups.len().saturating_sub(MAX_STACK_ICONS);
@@ -1079,9 +1103,16 @@ impl WindowListView {
         } else {
             format!("+{extra}")
         };
-        let button = Button::new(ui, &title).borderless().on_click(move || {
-            scoped.emit(MenuAction::SwitchToWorkspace(index));
-        });
+        let opens_windows =
+            workspace.active && self.presentation == StripPresentation::WorkspaceOverview;
+        let button = if opens_windows {
+            popup_button(ui, &title, self.window_menu(workspace.windows.iter(), handler))
+        } else {
+            let scoped = handler.clone();
+            Button::new(ui, &title).borderless().on_click(move || {
+                scoped.emit(MenuAction::SwitchToWorkspace(index));
+            })
+        };
         let native = button.ns_button();
         native.setButtonType(NSButtonType::MomentaryChange);
         let selection = ControlSelection::WorkspaceSelection(workspace.active);
@@ -1125,12 +1156,46 @@ impl WindowListView {
         };
         native.setToolTip(Some(&NSString::from_str(&label)));
         native.setAccessibilityLabel(Some(&NSString::from_str(&label)));
-        native.setAccessibilityHelp(Some(&NSString::from_str("Switch to this workspace")));
+        let help = if opens_windows {
+            "Choose a window"
+        } else {
+            "Switch to this workspace"
+        };
+        native.setAccessibilityHelp(Some(&NSString::from_str(help)));
         parent.addSubview(native);
         self.buttons.push(WindowButton {
             button,
             selection,
             width,
+            gap_before: 0.0,
+        });
+    }
+
+    fn add_window_picker(
+        &mut self,
+        workspace: &WorkspaceWindows,
+        parent: &NSView,
+        handler: &Rc<MenuActionHandler>,
+        ui: &Ui,
+    ) {
+        let button = popup_button(ui, "wm", self.window_menu(workspace.windows.iter(), handler));
+        let native = button.ns_button();
+        native.setBezelStyle(NSBezelStyle::AccessoryBar);
+        native.setButtonType(NSButtonType::MomentaryChange);
+        native.setFont(Some(&empty_workspace_font()));
+        if let Some(image) = cgs::image::Symbol::named("rectangle.on.rectangle") {
+            native.setImage(Some(&image));
+            native.setImagePosition(NSCellImagePosition::ImageOnly);
+            native.setImageScaling(NSImageScaling::ScaleProportionallyDown);
+        }
+        let label = NSString::from_str(&format!("Show windows in {}", workspace.name));
+        native.setToolTip(Some(&label));
+        native.setAccessibilityLabel(Some(&label));
+        parent.addSubview(native);
+        self.buttons.push(WindowButton {
+            button,
+            selection: ControlSelection::WorkspaceSelection(true),
+            width: CAPSULE_HEIGHT,
             gap_before: 0.0,
         });
     }
@@ -1213,6 +1278,11 @@ impl WindowListView {
             item.ns_menu_item().setImage(self.icon(window).as_deref());
             menu.add(item);
         }
+        if menu.ns_menu().numberOfItems() == 0 {
+            let empty = MenuItem::new(&ui, "No windows");
+            empty.set_enabled(false);
+            menu.add(empty);
+        }
         menu
     }
 
@@ -1253,7 +1323,7 @@ impl WindowListView {
                 from: if from.size.width > 0.0 { from } else { to },
                 to,
             });
-            let mut button_x = capsule.workspace.horizontal_padding();
+            let mut button_x = self.presentation.horizontal_padding(&capsule.workspace);
             for item in &self.buttons[capsule.start..capsule.end] {
                 button_x += item.gap_before;
                 item.button.ns_button().setFrame(NSRect::new(
