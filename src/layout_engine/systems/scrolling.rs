@@ -938,6 +938,21 @@ impl LayoutState {
         Some((self.active_column, row))
     }
 
+    fn select_available_column(
+        &mut self,
+        preferred: Option<ColumnId>,
+        inactive: &HashSet<WindowId>,
+    ) -> Option<ColumnId> {
+        let preferred = preferred.and_then(|id| self.columns.iter().position(|c| c.id == id));
+        let index = preferred
+            .into_iter()
+            .chain(self.active_column..self.columns.len())
+            .chain((0..self.active_column).rev())
+            .find(|&index| self.columns[index].windows.iter().any(|w| !inactive.contains(w)))?;
+        self.active_column = index;
+        Some(self.columns[index].id)
+    }
+
     fn locate(&self, wid: WindowId) -> Option<(usize, usize)> {
         self.columns.iter().enumerate().find_map(|(col, column)| {
             column.windows.iter().position(|&w| w == wid).map(|row| (col, row))
@@ -1346,10 +1361,17 @@ impl ScrollingLayoutSystem {
         };
         let was_fullscreen =
             state.fullscreen.remove(&wid) | state.fullscreen_within_gaps.remove(&wid);
-        state.mutate(settings, inactive, |state| {
+        let selected_column = state.mutate(settings, inactive, |state| {
             state.detach(wid, inactive);
+            if active_removed {
+                state.select_available_column(restore.as_ref().map(|b| b.column), inactive)
+            } else {
+                None
+            }
         });
-        let restored = restore.is_some_and(|bookmark| state.restore(bookmark));
+        let restored = restore
+            .filter(|bookmark| Some(bookmark.column) == selected_column)
+            .is_some_and(|bookmark| state.restore(bookmark));
         let restored_fullscreen = was_fullscreen && state.restore_fullscreen_view();
         if active_removed && !restored && !restored_fullscreen {
             state.reveal(settings);
@@ -1767,21 +1789,25 @@ impl LayoutSystem for ScrollingLayoutSystem {
             return false;
         }
         for state in self.layouts.values_mut().filter(|state| state.locate(window).is_some()) {
-            state.mutate(&self.settings, &self.inactive, |state| {
-                if state.selected(&self.inactive).is_none()
-                    && let Some((col, row)) =
-                        state.columns.iter().enumerate().find_map(|(col, column)| {
-                            column
-                                .windows
-                                .iter()
-                                .position(|w| !self.inactive.contains(w))
-                                .map(|row| (col, row))
-                        })
-                {
-                    state.active_column = col;
-                    state.columns[col].active_window = row;
+            let fallback = state.mutate(&self.settings, &self.inactive, |state| {
+                if state.selected(&self.inactive).is_some() {
+                    return None;
                 }
+                state.select_available_column(
+                    state.transient_restore.as_ref().map(|bookmark| bookmark.column),
+                    &self.inactive,
+                )
             });
+            if let Some(column) = fallback {
+                let restored = state
+                    .transient_restore
+                    .take()
+                    .filter(|bookmark| bookmark.column == column)
+                    .is_some_and(|bookmark| state.restore(bookmark));
+                if !restored {
+                    state.reveal(&self.settings);
+                }
+            }
         }
         true
     }
@@ -2771,6 +2797,18 @@ pub(crate) mod tests {
             wid(2)
         ]]);
         assert!(!f.system.window_participates(wid(2)));
+    }
+
+    #[test]
+    fn removing_selected_column_reveals_the_previous_available_column() {
+        let mut f = Fixture::new(4);
+        f.system.update_width_settings((1.0, 0.1, 1.0));
+        f.select(4);
+        f.system.set_window_participation(wid(3), false);
+        f.system.remove_window(wid(4));
+
+        assert_eq!(f.selected(), Some(wid(2)));
+        assert_eq!(f.frame(2).origin.x, f.screen.origin.x);
     }
 
     #[test]

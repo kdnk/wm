@@ -1026,15 +1026,18 @@ fn write_interactive_frame(
     mut frame: CGRect,
     set_size: bool,
     source: FrameSource,
-    mut before_resize: impl FnMut(),
+    mut before_write: impl FnMut(),
 ) {
     if source == FrameSource::DialogPosition {
         // AX sets both coordinates. The app may have moved the dialog vertically.
         let Ok(current) = elem.frame() else { return };
         *hint = current;
         let target = source.target(frame, current);
-        if target.origin.x != current.origin.x && elem.set_position(target.origin).is_ok() {
-            hint.origin = target.origin;
+        if target.origin.x != current.origin.x {
+            before_write();
+            if elem.set_position(target.origin).is_ok() {
+                hint.origin = target.origin;
+            }
         }
         return;
     }
@@ -1042,10 +1045,8 @@ fn write_interactive_frame(
     if let Some(bounds) = bounds {
         if set_size {
             if let Ok(accepted) =
-                reconcile_frame(elem, *hint, frame, FrameMode::Full, Some(bounds), |writes| {
-                    if writes.size {
-                        before_resize();
-                    }
+                reconcile_frame(elem, *hint, frame, FrameMode::Full, Some(bounds), |_| {
+                    before_write();
                 })
             {
                 *hint = accepted;
@@ -1054,8 +1055,8 @@ fn write_interactive_frame(
         }
         frame = bounds.apply(CGRect::new(frame.origin, hint.size));
     }
+    before_write();
     if set_size || (source != FrameSource::Drag && !hint.size.same_as(frame.size)) {
-        before_resize();
         let both = FrameWrites { position: true, size: true };
         let _ = write_frame(elem, *hint, frame, both, bounds);
         *hint = frame;
@@ -1081,13 +1082,17 @@ impl BatchEui {
         }
     }
 
-    /// Returns true exactly once, when a deferred lease must be acquired.
-    fn take_deferred(&mut self) -> bool {
-        let deferred = *self == Self::Deferred;
-        if deferred {
-            *self = Self::Held;
+    fn hold_if_requested(&mut self, enhanced_ui: &mut EnhancedUi, app: &AXUIElement) {
+        if *self == Self::Deferred {
+            self.require(enhanced_ui, app);
         }
-        deferred
+    }
+
+    fn require(&mut self, enhanced_ui: &mut EnhancedUi, app: &AXUIElement) {
+        if *self != Self::Held {
+            *self = Self::Held;
+            enhanced_ui.acquire(app);
+        }
     }
 }
 
@@ -1313,7 +1318,7 @@ impl State {
         if !should_terminate && !pending_frames.is_empty() {
             let mut state = this.borrow_mut();
             for (wid, frame) in pending_frames {
-                if let Err(err) = state.apply_interactive_frame(wid, frame) {
+                if let Err(err) = state.apply_interactive_frame(wid, frame, &mut eui) {
                     warn!(?wid, ?err, "Failed to apply animation frame");
                 }
             }
@@ -1328,17 +1333,11 @@ impl State {
         should_terminate
     }
 
-    fn hold_batch_eui(&mut self, eui: &mut BatchEui) {
-        if eui.take_deferred() {
-            let app = self.app.clone();
-            self.enhanced_ui.acquire(&app);
-        }
-    }
-
     fn apply_interactive_frame(
         &mut self,
         wid: WindowId,
         pending: PendingFrame,
+        eui: &mut BatchEui,
     ) -> Result<(), AxError> {
         if !pending.authority.is_current() {
             return Ok(());
@@ -1361,18 +1360,6 @@ impl State {
         window.frame_source = source;
         // Release reapplies this frame, including position-only viewport writes.
         window.last_animation_frame = Some((frame, authority.clone(), source));
-        let mut suppress_native_animation = || {
-            if !window.animation_eui_held {
-                enhanced_ui.acquire(app);
-                window.animation_eui_held = true;
-            }
-        };
-        if window.is_animating
-            && source.from_viewport()
-            && frame.origin.x != window.last_known_frame.origin.x
-        {
-            suppress_native_animation();
-        }
         write_interactive_frame(
             &AuthorizedFrameTarget {
                 target: &window.elem,
@@ -1382,7 +1369,13 @@ impl State {
             frame,
             set_size,
             source,
-            suppress_native_animation,
+            || {
+                eui.require(enhanced_ui, app);
+                if window.is_animating && !window.animation_eui_held {
+                    enhanced_ui.retain();
+                    window.animation_eui_held = true;
+                }
+            },
         );
         Ok(())
     }
@@ -1604,7 +1597,7 @@ impl State {
                             desired,
                             mode,
                             authority.1,
-                            |_| self.hold_batch_eui(eui),
+                            |_| eui.hold_if_requested(&mut self.enhanced_ui, &self.app),
                         )
                     });
                     let frame = match self.handle_ax_result(wid, result)? {
@@ -1672,7 +1665,7 @@ impl State {
                         .get(&wid)
                         .is_some_and(|frame| !authority.is_older_than(&frame.authority))
                     && let Some(frame) = pending_frames.remove(&wid)
-                    && let Err(err) = self.apply_interactive_frame(wid, frame)
+                    && let Err(err) = self.apply_interactive_frame(wid, frame, eui)
                 {
                     warn!(?wid, ?err, "Failed to flush animation frame on end");
                 }
@@ -1745,15 +1738,7 @@ impl State {
                             target,
                             mode,
                             authority.1,
-                            |_| {
-                                if source == FrameSource::DialogPosition {
-                                    return;
-                                }
-                                if *eui == BatchEui::NotRequested {
-                                    *eui = BatchEui::Deferred;
-                                }
-                                self.hold_batch_eui(eui);
-                            },
+                            |_| eui.require(&mut self.enhanced_ui, &self.app),
                         )
                     });
                     frame = match self.handle_ax_result(wid, result)? {
@@ -2440,6 +2425,7 @@ impl State {
         });
         debug_assert!(old.is_none(), "Duplicate window id {wid:?}");
         self.elem_to_wid.insert(elem, wid);
+        self.enhanced_ui.invalidate_support_cache();
         if hidden_by_app {
             self.send_event(Event::WindowMinimized(wid));
         }
@@ -2504,6 +2490,7 @@ impl State {
 
         self.elem_to_wid.remove(&old_elem);
         self.elem_to_wid.insert(elem.clone(), wid);
+        self.enhanced_ui.invalidate_support_cache();
         if let Some(window) = self.windows.get_mut(&wid) {
             window.elem = elem;
             window.last_known_frame = info.frame;
@@ -3089,11 +3076,11 @@ mod frame_tests {
             stale,
             true,
             FrameSource::DialogPosition,
-            || panic!("unexpected resize"),
+            || dialog.calls.borrow_mut().push("eui"),
         );
         assert_eq!(dialog.frame.get(), rect(350., 30., 820., 630.));
         assert_eq!(accepted, dialog.frame.get());
-        assert_eq!(dialog.calls.borrow().as_slice(), ["frame", "position"]);
+        assert_eq!(dialog.calls.borrow().as_slice(), ["frame", "eui", "position"]);
         let release_frame = rect(345., 70., 840., 660.);
         assert_eq!(
             FrameSource::DialogPosition.target(stale, release_frame),
@@ -3115,7 +3102,7 @@ mod frame_tests {
             rect(350., 50., 500., 400.),
             false,
             FrameSource::DialogPosition,
-            || panic!("unexpected resize"),
+            || panic!("a missing native frame prevents position writes"),
         );
         assert_eq!(dialog.calls.borrow().as_slice(), ["frame"]);
         assert_eq!(hint, previous);
@@ -3180,7 +3167,7 @@ mod frame_tests {
     }
 
     #[test]
-    fn interactive_resize_suppression_matches_native_size_writes() {
+    fn interactive_suppression_precedes_native_frame_writes() {
         let initial = rect(100., 100., 800., 600.);
         let screen = rect(0., 0., 1440., 900.);
         for (bounded, set_size, hint, frame, expected_resize) in [
@@ -3232,17 +3219,10 @@ mod frame_tests {
                 expected_resize,
                 "bounded={bounded}, set_size={set_size}"
             );
-            assert_eq!(
-                calls.contains(&"eui"),
-                expected_resize,
-                "bounded={bounded}, set_size={set_size}"
-            );
-            if let Some(size) = calls.iter().position(|call| *call == "size") {
-                assert!(
-                    calls[..size].contains(&"eui"),
-                    "suppression must precede native resize"
-                );
-            }
+            let first_write = calls.iter().position(|call| matches!(*call, "position" | "size"));
+            let suppression = calls.iter().position(|call| *call == "eui");
+            assert_eq!(suppression.is_some(), first_write.is_some());
+            assert!(first_write.is_none_or(|index| suppression.unwrap() < index));
         }
     }
 

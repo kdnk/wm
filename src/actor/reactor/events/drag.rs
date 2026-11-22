@@ -1,6 +1,7 @@
 // Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use tracing::trace;
 
+use crate::actor::drag::DragKind;
 use crate::actor::reactor::events::EventOutcome;
 use crate::actor::reactor::managers::{DragManager, LayoutManager};
 use crate::actor::reactor::{LayoutEvent, Reactor};
@@ -65,15 +66,36 @@ pub fn handle_mouse_up(
     reactor: &mut Reactor,
     payload: MouseUpPayload,
 ) -> anyhow::Result<EventOutcome> {
-    let state = &mut reactor.state;
-    let layout = &mut reactor.layout_manager;
-    let drag = &mut reactor.drag_manager;
     let mut outcome = EventOutcome::layout_changed(false);
-    let Some(commit) = drag.actor.finish(payload.button) else {
+    let Some(commit) = reactor.drag_manager.actor.finish(payload.button) else {
         return Ok(outcome);
     };
     let window = commit.source.window;
-    drag.externally_controlled_window = None;
+    reactor.drag_manager.externally_controlled_window = None;
+    if commit.kind == DragKind::NativeResize {
+        reactor.drag_manager.release_preview();
+        let engine = &mut reactor.layout_manager.layout_engine;
+        let windows = &mut reactor.state.windows;
+        if let Some(workspace) = windows.workspace_for_window(window)
+            && engine.is_window_floating(window)
+        {
+            windows.clear_floating_display_geometry(window);
+            engine.store_floating_position(workspace, window, commit.source.last_frame);
+        }
+        if let Some(owner) = reactor.assigned_space_for_window_id(window)
+            && let Some(native) = reactor.current_reported_space_for_window_id(window)
+            && native != owner
+        {
+            let source = reactor.space_state.screen_by_space(native).map(|screen| screen.frame);
+            outcome.absorb(reactor.request_window_transfer(window, owner, source));
+            reactor.request_space_snapshot();
+        }
+        return Ok(outcome.with_arrange_passes(u8::from(commit.source.tiled)));
+    }
+
+    let state = &mut reactor.state;
+    let layout = &mut reactor.layout_manager;
+    let drag = &mut reactor.drag_manager;
     let mut needs_layout = commit.source.tiled;
 
     if let Some(target) = commit.target

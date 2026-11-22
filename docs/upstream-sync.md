@@ -1,6 +1,19 @@
 # Rift upstream integration
 
-The latest reviewed Rift revision is [7d0e5e3](https://github.com/acsandmann/rift/commit/7d0e5e3b5d0b00f9bd22270e4df431b3424f992e), published on 2026-11-20.
+The latest reviewed Rift revision is [f13c251](https://github.com/acsandmann/rift/commit/f13c2513ed96c081e727b6b7d1294b3bdc368f93), published on 2026-11-22.
+
+## November 22 integration
+
+| Upstream change | wm disposition |
+| --- | --- |
+| [663c8ef](https://github.com/acsandmann/rift/commit/663c8effbe3c2eb225962374c3f2c30b8b80a9a5) | Keep a resized window on its assigned workspace when its frame crosses a display boundary. Defer the admission rewrite and its rule-reload changes. wm's window IDs use WindowServer IDs, and existing workspace catalogs retain their display ownership. |
+| [f168b6c](https://github.com/acsandmann/rift/commit/f168b6c6d5745b49fae3c5440abb1870c53d2aab), [bafcc44](https://github.com/acsandmann/rift/commit/bafcc444c6bff5d18f08024062dd77da4cb3687e) | Reveal a surviving column when the selected column loses its last available window. Prefer the saved column when available and skip suspended columns. wm already cancels window frame writes before applying the invalidation to the layout. |
+| [17a3c02](https://github.com/acsandmann/rift/commit/17a3c02163a4684003ecb86741f23ac6783ee443) | Keep wm's synchronized size and position animation. A regression test samples adjacent columns while they shrink and grow. Rift's fix targets the separate up-front resize in its animation path. |
+| [46edf9a](https://github.com/acsandmann/rift/commit/46edf9a3870966c93d3596cb858cfb770b109d9b) | Retry Enhanced UI suppression on later frame batches after a transient AX error. Recheck support when an app exposes a new AX window. Suppress Enhanced UI for position writes and parked-window recovery. Defer the independent multitouch dependency bump. |
+| [9a81408](https://github.com/acsandmann/rift/commit/9a81408a0e9c384d5ed317966acd19a7325f34d9) | Start newly visible Overview labels at their target positions. Fit each display's own catalog, including visible empty workspaces. Defer the new hotkeys and toolbar setting. wm has its own Overview controls and uses vendored cgs for exact capture. |
+| [f13c251](https://github.com/acsandmann/rift/commit/f13c2513ed96c081e727b6b7d1294b3bdc368f93) | wm versions independently. |
+
+`scripts/verify-local.sh` and `scripts/verify-dot-port.sh` passed on macOS with 995 library tests. The native menu bar and drag preview fixtures emitted their PASS summaries. Live verification with the candidate daemon remains open.
 
 ## November 21 integration
 

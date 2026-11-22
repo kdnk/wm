@@ -233,6 +233,64 @@ fn geometry_commands_request_arrangement_without_camera_movement() {
 }
 
 #[test]
+fn scrolling_width_commands_keep_adjacent_windows_together_during_resize() {
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+    let space = SpaceId::new(1);
+    let left = WindowId::new(1, 1);
+    let right = WindowId::new(2, 1);
+    for (selected, amount, expected_width) in [(left, -0.1, 400.), (right, 0.1, 600.)] {
+        let (mut apps, mut reactor) = test_context();
+        let layout = &mut reactor.config.settings.layout;
+        layout.gaps = Default::default();
+        layout.scrolling.animate = Some(true);
+        layout.scrolling.column_width_ratio = 0.5;
+        layout.scrolling.preserve_window_sizes = false;
+        reactor.layout_manager.layout_engine.set_layout_settings(layout);
+        reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+        apps.make_app_and_settle(&mut reactor, 1, make_windows(1));
+        apps.make_app_and_settle(&mut reactor, 2, make_windows(1));
+        reactor.send_layout_event(LayoutEvent::WindowFocused(space, selected));
+        reactor.update_layout_or_warn(false, false, Some(space));
+        apps.simulate_until_quiet(&mut reactor);
+
+        let original = apps.windows[&selected].frame;
+        assert_eq!(original.size.width, 500.);
+        assert_eq!(
+            apps.windows[&left].frame.max().x,
+            apps.windows[&right].frame.min().x
+        );
+        crate::sys::window_server::set_cursor_location_override(Some(original.mid()));
+        let (sender, receiver) = super::animation::AnimationSender::channel();
+        reactor.animation_tx = Some(sender);
+        reactor.handle_test_layout_command(LayoutCommand::ResizeWindowBy { amount });
+        crate::sys::window_server::set_cursor_location_override(None);
+
+        let mut presenter = super::animation::AnimationManager::new();
+        for message in receiver.commands.try_iter() {
+            presenter.handle_message(message);
+        }
+        let start = Instant::now();
+        for elapsed in [0, 35, 83, 2000] {
+            presenter.tick_at(start + Duration::from_millis(elapsed));
+            apps.simulate_events();
+            let left = apps.windows[&left].frame;
+            let right = apps.windows[&right].frame;
+            assert!(
+                (left.max().x - right.min().x).abs() <= 1.,
+                "{elapsed}ms: {left:?}, {right:?}"
+            );
+            if elapsed == 35 {
+                let frame = apps.windows[&selected].frame;
+                let width = frame.size.width;
+                assert!(width > 500_f64.min(expected_width) && width < 500_f64.max(expected_width));
+                assert!(frame.min().x >= screen.min().x && frame.max().x <= screen.max().x);
+            }
+        }
+        assert_eq!(apps.windows[&selected].frame.size.width, expected_width);
+    }
+}
+
+#[test]
 fn no_op_layout_command_does_not_schedule_arrange() {
     let mut reactor = test_reactor();
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
@@ -2569,6 +2627,85 @@ fn native_drag_across_stacked_displays_commits_only_on_release() {
                 "the dropped window must appear only in the release layout"
             );
         }
+    }
+}
+
+#[test]
+fn resizing_across_a_display_boundary_keeps_the_window_on_its_workspace() {
+    use crate::actor::drag::MouseButton;
+
+    for (floating, native_crossed) in [(false, false), (false, true), (true, false), (true, true)] {
+        let (mut reactor, window, server, source, other, _, other_screen) =
+            reactor_with_window_on_space1_two_displays();
+        let source_screen = CGRect::new(CGPoint::ZERO, other_screen.size);
+        let snapshot = |space| {
+            space_state_event_with(
+                vec![source_screen, other_screen],
+                vec![Some(source), Some(other)],
+                |state| {
+                    state.active_window_spaces.insert(server, space);
+                    state.membership_complete = true;
+                },
+            )
+        };
+        reactor.send_layout_event(LayoutEvent::WindowAdded(source, window));
+        let workspace = reactor.state.windows.workspace_for_window(window).unwrap();
+        if floating {
+            reactor.send_layout_event(LayoutEvent::WindowObserved(source, ResolvedWindow {
+                info: reactor.state.windows.window(window).unwrap().layout_info(window),
+                effects: crate::model::AppRuleEffects {
+                    source_workspace: Some(workspace),
+                    workspace_id: workspace,
+                    floating: true,
+                    position: None,
+                    size: None,
+                    was_rule_floating: false,
+                    focus: false,
+                },
+            }));
+        }
+        let mut resized = reactor.state.windows.window(window).unwrap().frame_monotonic;
+        resized.size.width = 2. * (other_screen.mid().x - resized.origin.x);
+        reactor.handle_event(Event::WindowFrameChanged(
+            window,
+            resized,
+            None,
+            Requested(false),
+            Some(MouseState::Down),
+        ));
+        let native_space = if native_crossed { other } else { source };
+        window_server::set_window_spaces_override(server, Some(vec![native_space.get()]));
+        reactor.handle_event(snapshot(native_space));
+        window_server::set_window_under_cursor_override(Some(None));
+        reactor.handle_event(Event::MouseReleased {
+            button: MouseButton::Left,
+            point: other_screen.mid(),
+        });
+        window_server::set_window_under_cursor_override(None);
+        let workspace_at_release = reactor.state.windows.workspace_for_window(window);
+        reactor.handle_event(snapshot(native_space));
+        let workspace_after_snapshot = reactor.state.windows.workspace_for_window(window);
+        window_server::set_window_spaces_override(server, Some(vec![source.get()]));
+        reactor.handle_event(snapshot(source));
+        window_server::set_window_spaces_override(server, None);
+
+        assert_eq!(workspace_at_release, Some(workspace));
+        assert_eq!(workspace_after_snapshot, Some(workspace));
+        if floating {
+            let saved_frame = reactor
+                .layout_manager
+                .layout_engine
+                .get_floating_position(workspace, window)
+                .unwrap();
+            if native_crossed {
+                assert!(source_screen.contains(saved_frame.mid()));
+            } else {
+                assert!(saved_frame.same_as(resized));
+            }
+        } else {
+            assert!(has_window_in_layout(&mut reactor, source, source_screen, window));
+        }
+        assert!(!has_window_in_layout(&mut reactor, other, other_screen, window));
     }
 }
 
@@ -7451,6 +7588,55 @@ fn window_server_destroy_after_ax_invalidation_removes_logical_window() {
 
     assert!(!reactor.state.windows.contains_window(wid));
     assert_eq!(reactor.test_workspace_for_window(space, wid), None);
+}
+
+#[test]
+fn closing_ax_invalidated_scrolling_window_reveals_previous_column() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+    let space = SpaceId::new(1);
+    let previous = WindowId::new(2, 1);
+    let closing = WindowId::new(3, 1);
+    let layout = &mut reactor.config.settings.layout;
+    layout.gaps = Default::default();
+    layout.scrolling.column_width_ratio = 1.0;
+    layout.scrolling.max_column_width_ratio = 1.0;
+    layout.scrolling.preserve_window_sizes = false;
+    reactor.layout_manager.layout_engine.set_layout_settings(layout);
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    for pid in 1..=3 {
+        let window = WindowId::new(pid, 1);
+        make_active_app(&mut apps, &mut reactor, pid, make_windows(1), Some(window));
+        reactor.send_layout_event(LayoutEvent::WindowFocused(space, window));
+        reactor.update_layout_or_warn(false, false, Some(space));
+        apps.simulate_until_quiet(&mut reactor);
+    }
+    let visible_frame = apps.windows[&closing].frame;
+    assert!(screen.contains(visible_frame.mid()));
+    assert!(apps.windows[&previous].frame.mid().x < screen.origin.x);
+
+    let (sender, receiver) = super::animation::AnimationSender::channel();
+    reactor.animation_tx = Some(sender);
+    reactor.update_layout_or_warn(false, false, Some(space));
+    let wsid = reactor.test_window_server_id(closing);
+    let mut presenter = super::animation::AnimationManager::new();
+    for event in [
+        Event::WindowInvalidated(closing, super::WindowInvalidationSource::InvalidUiElement),
+        Event::WindowClosed(wsid),
+    ] {
+        reactor.handle_event(event);
+        for message in receiver.commands.try_iter() {
+            presenter.handle_message(message);
+        }
+        presenter.tick_at(Instant::now() + Duration::from_secs(2));
+        apps.simulate_events();
+        assert_eq!(apps.windows[&previous].frame, visible_frame);
+    }
+    assert!(reactor.state.windows.record(closing).is_none());
+    assert_eq!(
+        reactor.layout_manager.layout_engine.selected_window(space),
+        Some(previous)
+    );
 }
 
 #[test]
