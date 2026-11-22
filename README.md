@@ -121,13 +121,7 @@ Install Rust 1.95.0, stable, and nightly with rustfmt, then run:
 bash scripts/verify-local.sh
 ```
 
-After changing imported Rift features, also run:
-
-```sh
-bash scripts/verify-dot-port.sh
-```
-
-See the [import and verification notes](docs/dot-port.md) and [configuration reference](https://acsandmann.github.io/rift-docs/reference/configuration/).
+See the [verification guide](docs/verification.md) to choose integration and desktop checks for your change. See the [configuration reference](https://acsandmann.github.io/rift-docs/reference/configuration/) for available settings.
 
 ## License
 

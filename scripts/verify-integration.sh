@@ -6,7 +6,7 @@ root=$(cd "$(dirname "$0")/.." && pwd -P)
 cd "$root"
 
 if (( $# > 1 )); then
-    echo "usage: scripts/verify-dot-port.sh [CONFIG.toml]" >&2
+    echo "usage: scripts/verify-integration.sh [CONFIG.toml]" >&2
     exit 2
 fi
 

@@ -45,13 +45,7 @@ Update root `[package].version` in `Cargo.toml` and the matching `wm` entry in `
 
 Review with `but diff` and `but status -fv`. Verify that the manifest and lockfile agree and only intended files changed. When committing is authorized, use an English Conventional Commit message with a body explaining why and what changed. Select only the release files with `but`.
 
-Run `bash scripts/verify-local.sh` locally against the exact candidate before publication. GitHub Actions does not run tests or formatting checks. Run `bash scripts/verify-dot-port.sh` when imported Rift features changed. For changes to release automation, signing setup, or installation, run the corresponding fixture test:
-
-```sh
-python3 tests/release-workflow-test.py
-python3 tests/release-signing-setup-test.py
-python3 tests/install-release-test.py
-```
+Run `bash scripts/verify-local.sh` locally against the exact candidate before publication. GitHub Actions does not run tests or formatting checks. Use the [verification guide](../../../docs/verification.md#local-checks) to choose integration and targeted release fixture checks for the change.
 
 Keep fixture tests isolated from the user's installation, service, signing material, keychains, and certificate trust. Live desktop tests require a matching daemon and macOS permissions. Report checks that could not run.
 

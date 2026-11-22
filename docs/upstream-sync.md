@@ -74,14 +74,9 @@ wm retains its scrolling-only layout API, native window motion, menu bar, comman
 
 The historical baseline in `scripts/check-fork-notices.py` and the archived import comparison remain fixed. They identify the original import and continue to check attribution across later source changes.
 
-## Verification commands
+## Historical verification results
 
-Run the complete integration check on macOS with a desktop session:
-
-```sh
-bash scripts/verify-dot-port.sh
-cargo test --locked -p wm-client
-```
+These records use the script names from the original runs. For current commands, see the [verification guide](verification.md#local-checks).
 
 The final November 17 run passed the complete `verify-dot-port.sh` check, including all 912 library tests, three cgs exact-capture tests, the identity test, 14 client tests, and 11 protocol tests. Configuration validation, native menu-bar and drag-preview fixtures, the binary build, CLI namespace checks, and the isolated LaunchAgent fixture also passed. Native fixtures emitted their expected PASS summaries. Nightly `cargo fmt --all --check` passed.
 
@@ -94,3 +89,40 @@ The November 13 integration run passed all 822 library tests, cgs exact-capture 
 Before the November 13 fixes, regression tests reproduced rapid-focus cancellation, slow-focus cancellation, and missing fallback focus after AX-first window removal. Those cases passed after integration.
 
 Desktop overview rendering and native focus timing remain unverified. The integration does not install binaries or replace the running daemon. A matching daemon is required to check overview entry, pan, zoom, drag, repeated selection, and cross-display exit on the desktop. Do not treat passing geometry and unit tests as evidence of rendered animation quality.
+
+## Original import from dot
+
+This fork includes the Rift changes previously built from patches in [kdnk/dot](https://github.com/kdnk/dot/tree/f502e0bdaac397f7ede56e2b4b384c018d8a4126/tools/rift). The changes are integrated into the source and require no patch step during a normal Cargo build.
+
+The patches used Rift 0.8.1 at `b5cf5c7f7b9ffe7364377808df1ab1a4ecd24637`. The original port retained the fork's newer upstream changes through `6101a78`. Later integrations are recorded above. Upstream already preserves the current animation frame when replacing an animation. The port also preserves its velocity.
+
+### Imported behavior
+
+| Area | Change |
+| --- | --- |
+| Focus | Cursor warps follow external activation. Hover focus uses current WindowServer coordinates during Screen Zoom. |
+| Menu bar | Native window lists, grouped application icons, workspace capsules, overflow, and measured placement around application menus and the notch. |
+| Window lifecycle | Regression coverage for closed windows and duplicate space snapshots. Suspended windows retain their logical layout slots. |
+| Settings windows | Explicit management rules can admit attached standard windows and positively identified nonmodal dialogs. |
+| Configuration | The `config-check` example validates the complete configuration with the native parser. |
+| Scrolling layout | Stacked-row resizing, selection of participating neighboring columns, and bounded weighted size allocation. |
+| Motion | Continuous native position and size animation with bounded geometry writes and velocity preserved through target changes. |
+| Distribution | LaunchAgent XML escaping preserves installation paths and environment values. The fork uses the `git.kdnk.wm` identity. |
+
+The composited resize presentation imported from dot has been removed. Size changes use the native animation path from `macos-window-motion.patch`, including intermediate native sizes and velocity-preserving target changes. The exact-capture extension remains in the vendored [cgs sources](../cgs/README.fork.md) for source provenance. The root Cargo dependency uses the relative `cgs/` path. dispatchr remains fixed by `Cargo.lock` at `5b4054c472d1108ab6ac690db6ae6eb5b0f94e62`.
+
+Personal app rules and keyboard shortcuts live in dot under `config/wm`. The unified command builds as `target/debug/wm`; it starts the daemon or runs client subcommands. Service installation registers the current native executable. Configuration, state, IPC, and environment variables use the wm namespace.
+
+`wm close-window` replaces dot's Swift close helper. It presses the native close button and optionally restores focus to a tiled neighbor after confirmed removal. The command also works without the wm daemon. `wm execute window close` retains its Command-W behavior.
+
+`scripts/install-release.py` installs signed GitHub Actions releases in `~/.local/bin` and verifies the executable against the pinned release certificate. It replaces dot's build/sign/install entrypoint without local compilation, re-signing, certificate-trust changes, or service operations. Dot's four Rift bin commands are removed. Legacy patch sources and verifier fixtures remain in dot as historical material. See the [release installation instructions](../README.md#install-a-release).
+
+### Reproduce the original import
+
+To reproduce the original import comparison from local checkouts with nightly rustfmt on PATH, run:
+
+```sh
+python3 scripts/check-dot-port.py /path/to/dot /path/to/acsandmann/cgs
+```
+
+The comparison reconstructs the recorded source revisions and compares them with the archived import commit `61eb68b`, before the rename to wm. It applies the ordered patches and recorded upstream integration adjustments, formats the reconstructed Rust files, and compares the result. Use this comparison to verify the import's provenance. For current behavior, follow the [verification guide](verification.md). Pass `--rustfmt` to select the nightly formatter explicitly.
