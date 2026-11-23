@@ -2144,7 +2144,7 @@ dependencies = [
 
 [[package]]
 name = "wm"
-version = "0.17.4"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "bitflags 2.11.0",
