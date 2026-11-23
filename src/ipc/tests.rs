@@ -7,8 +7,8 @@ use serde_json::{Value, json};
 use super::*;
 use crate::actor::app::WindowId;
 use crate::actor::reactor::testing::{
-    Apps, make_windows, space_state_event, test_context, test_context_with_workspace_count,
-    test_reactor,
+    Apps, fullscreen_startup_space_state, make_windows, space_state_event, test_context,
+    test_context_with_workspace_count, test_reactor,
 };
 use crate::actor::reactor::{Event, Reactor};
 use crate::common::config::WorkspaceSelector;
@@ -79,6 +79,35 @@ fn saving_before_display_discovery_preserves_the_previous_snapshot() {
         std::fs::read_to_string(snapshot.path()).unwrap(),
         "previous snapshot"
     );
+}
+
+#[test]
+fn service_checkpoint_preserves_the_desktop_while_the_only_display_is_fullscreen() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1200., 800.));
+    let desktop = SpaceId::new(1);
+    let windows = make_windows(2);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, desktop, 1, windows.clone());
+    let before = workspace_snapshot(&reactor, 0);
+
+    reactor.handle_events(vec![fullscreen_startup_space_state(
+        screen,
+        "test-display-0".into(),
+        desktop,
+        SpaceId::new(0x400000001),
+    )]);
+    let snapshot = tempfile::NamedTempFile::new().unwrap();
+    let response = checkpoint_service(&mut reactor, std::process::id(), snapshot.path().into());
+    let response: WmResponse =
+        serde_json::from_slice(response.strip_suffix(&[0]).unwrap()).unwrap();
+    assert_eq!(response, WmResponse::Success { data: json!("Layout saved") });
+
+    let layout =
+        LayoutEngine::deserialize_from_str(&std::fs::read_to_string(snapshot.path()).unwrap())
+            .unwrap();
+    let mut restarted = Reactor::new_for_test(layout);
+    Apps::new().make_app_and_settle_on_screen(&mut restarted, screen, desktop, 1, windows);
+    assert_eq!(workspace_snapshot(&restarted, 0), before);
 }
 
 fn workspace_snapshot(reactor: &Reactor, index: usize) -> Value {
