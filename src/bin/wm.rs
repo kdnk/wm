@@ -109,18 +109,6 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Wm."
     config.settings.animate &= !opt.no_animate;
     config.settings.default_disable |= opt.default_disable;
 
-    if opt.validate {
-        let path = restore_file();
-        match LayoutEngine::validate_file(path.clone()) {
-            Ok(_) => println!("Master file is valid: {}", path.display()),
-            Err(error) => {
-                eprintln!("Could not load master file at {}: {error}", path.display());
-                process::exit(1);
-            }
-        }
-        process::exit(0);
-    }
-
     let startup_commands = config.settings.run_on_start.clone();
 
     let (broadcast_tx, broadcast_rx) = wm::actor::channel();

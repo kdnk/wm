@@ -82,6 +82,9 @@ assignments, and scroll positions before stopping the daemon. If saving fails, t
 daemon stays running. A first start without a saved layout uses the normal initial
 layout. No restore option is required.
 
+Run `wm --validate` to check the saved layout at `~/.wm/layout.ron` without
+starting wm or requiring Accessibility access.
+
 ## Show window borders
 
 To have wm draw rounded borders, enable them in `~/.config/wm/config.toml`.

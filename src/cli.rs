@@ -11,7 +11,7 @@ use wm_protocol::{DEFAULT_SERVICE_NAME, EventKind, WmRequest, WmResponse};
 
 use crate::actor::app::WindowId as InternalWindowId;
 use crate::actor::reactor::{self, DisplaySelector};
-use crate::common::config::{Config, WorkspaceSelector, config_file};
+use crate::common::config::{Config, WorkspaceSelector, config_file, restore_file};
 use crate::ipc::{WmMachClient, WmMachClientError};
 use crate::layout_engine as layout;
 use crate::sys::service::{ServiceCommands, handle_service_command};
@@ -34,7 +34,7 @@ pub struct Cli {
     #[arg(long)]
     pub no_animate: bool,
 
-    /// Check whether the saved layout snapshot can be loaded.
+    /// Check whether the saved layout snapshot can be loaded without starting wm.
     #[arg(long)]
     pub validate: bool,
 
@@ -568,6 +568,15 @@ impl Cli {
         sigpipe::reset();
 
         let request = match command {
+            None if self.validate => {
+                let path = restore_file();
+                if let Err(error) = layout::LayoutEngine::validate_file(path.clone()) {
+                    eprintln!("Could not load master file at {}: {error}", path.display());
+                    process::exit(1);
+                }
+                println!("Master file is valid: {}", path.display());
+                return true;
+            }
             None => return false,
             Some(Commands::CloseWindow) => unreachable!(),
             Some(Commands::Config {
