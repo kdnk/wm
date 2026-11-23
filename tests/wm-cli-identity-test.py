@@ -55,6 +55,24 @@ def check_config_file(binary, environment):
     print("PASS: wm config check validates default and explicit paths without a daemon")
 
 
+def check_config_command_help(binary, environment):
+    command = ["execute", "config", "set"]
+    help_text = command_help(binary, command, environment)
+    example = re.search(r"wm execute config set ([^\n]+)", help_text)
+    assert example, help_text
+    result = run(binary, [*command, *example[1].split()], environment)
+    assert result.returncode == 1 and "not registered" in result.stderr, result
+
+    command = ["execute", "config", "set-animation-easing"]
+    assert "ease_in_out_sine" in command_help(binary, command, environment)
+    invalid = run(binary, [*command, "ease-in-sine"], environment)
+    assert invalid.returncode == 1, invalid
+    assert all(name in invalid.stderr for name in ["ease-in-sine", "ease_in_sine", "linear"]), invalid
+    valid = run(binary, [*command, "ease_in_sine"], environment)
+    assert valid.returncode == 1 and "not registered" in valid.stderr, valid
+    print("PASS: config help shows usable syntax and easing errors list accepted values")
+
+
 def check_client_help(binary, baseline, environment):
     pending = [(name,) for name in ("query", "execute", "subscribe")]
     checked = 0
@@ -68,6 +86,23 @@ def check_client_help(binary, baseline, environment):
                 "Subscribe to Mach IPC events",
                 "Print Mach IPC events until this process exits. Press Ctrl-C to unsubscribe",
             )
+        if arguments in [("execute", "config"), ("execute", "config", "set")]:
+            summary = "Set a configuration value by its dot-separated key"
+            replacement = summary if arguments[-1] == "config" else (
+                summary + "\n\nExample: wm execute config set settings.animate true"
+            )
+            before = before.replace(
+                "Generic set: set an arbitrary config key (dot-separated path) to a JSON value. "
+                "Example: wm execute config set --key settings.animate --value true",
+                replacement,
+            )
+            if arguments[-1] == "set":
+                before = before.replace("Print help\n", "Print help (see a summary with '-h')\n")
+        if arguments == ("execute", "config", "set-animation-easing"):
+            before = before.replace(
+                "Arguments:\n  <VALUE>",
+                "Arguments:\n  <VALUE>  Curve name, such as linear, ease_in_out, or ease_in_out_sine",
+            )
         after = command_help(binary, arguments, environment)
         assert before.split() == after.split(), (arguments, before, after)
         checked += 1
@@ -76,7 +111,7 @@ def check_client_help(binary, baseline, environment):
             for name in re.findall(r"^  ([a-z][a-z0-9-]*)\s", commands[1], re.M):
                 if name != "help":
                     pending.append((*arguments, name))
-    print(f"PASS: {checked} client help pages match the original CLI with Mach cancellation updates")
+    print(f"PASS: {checked} client help pages match the original CLI with the expected updates")
 
 
 def main():
@@ -92,6 +127,7 @@ def main():
     help_text = command_help(binary, [], environment)
     assert "rift" not in help_text.lower(), help_text
     check_config_file(binary, environment)
+    check_config_command_help(binary, environment)
     for command in ["query", "execute", "subscribe", "service", "close-window", "config"]:
         assert re.search(r"^  " + command + r"\s", help_text, re.M), help_text
         command_help(binary, [command], environment)

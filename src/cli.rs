@@ -383,7 +383,10 @@ enum ConfigCommands {
     /// Set the animation frame rate
     SetAnimationFps { value: f64 },
     /// Set the animation easing curve
-    SetAnimationEasing { value: String },
+    SetAnimationEasing {
+        /// Curve name, such as linear, ease_in_out, or ease_in_out_sine
+        value: String,
+    },
 
     /// Update mouse settings
     SetMouseFollowsFocus {
@@ -414,8 +417,9 @@ enum ConfigCommands {
     /// Update workspace settings
     SetWorkspaceNames { names: Vec<String> },
 
-    /// Generic set: set an arbitrary config key (dot-separated path) to a JSON value.
-    /// Example: wm execute config set --key settings.animate --value true
+    /// Set a configuration value by its dot-separated key
+    ///
+    /// Example: wm execute config set settings.animate true
     Set {
         /// Dot-separated key path (e.g. settings.animate or settings.layout.gaps.outer.top)
         key: String,
@@ -1025,32 +1029,8 @@ fn map_config_command(cmd: ConfigCommands) -> Result<CliCommand, String> {
         }
         ConfigCommands::SetAnimationFps { value } => ConfigCommand::SetAnimationFps(value),
         ConfigCommands::SetAnimationEasing { value } => {
-            let easing = match value.as_str() {
-                "ease_in_out" => AnimationEasing::EaseInOut,
-                "linear" => AnimationEasing::Linear,
-                "ease_in_sine" => AnimationEasing::EaseInSine,
-                "ease_out_sine" => AnimationEasing::EaseOutSine,
-                "ease_in_out_sine" => AnimationEasing::EaseInOutSine,
-                "ease_in_quad" => AnimationEasing::EaseInQuad,
-                "ease_out_quad" => AnimationEasing::EaseOutQuad,
-                "ease_in_out_quad" => AnimationEasing::EaseInOutQuad,
-                "ease_in_cubic" => AnimationEasing::EaseInCubic,
-                "ease_out_cubic" => AnimationEasing::EaseOutCubic,
-                "ease_in_out_cubic" => AnimationEasing::EaseInOutCubic,
-                "ease_in_quart" => AnimationEasing::EaseInQuart,
-                "ease_out_quart" => AnimationEasing::EaseOutQuart,
-                "ease_in_out_quart" => AnimationEasing::EaseInOutQuart,
-                "ease_in_quint" => AnimationEasing::EaseInQuint,
-                "ease_out_quint" => AnimationEasing::EaseOutQuint,
-                "ease_in_out_quint" => AnimationEasing::EaseInOutQuint,
-                "ease_in_expo" => AnimationEasing::EaseInExpo,
-                "ease_out_expo" => AnimationEasing::EaseOutExpo,
-                "ease_in_out_expo" => AnimationEasing::EaseInOutExpo,
-                "ease_in_circ" => AnimationEasing::EaseInCirc,
-                "ease_out_circ" => AnimationEasing::EaseOutCirc,
-                "ease_in_out_circ" => AnimationEasing::EaseInOutCirc,
-                _ => return Err(format!("Invalid animation easing: {}", value)),
-            };
+            let easing = serde_json::from_value::<AnimationEasing>(Value::String(value))
+                .map_err(|error| format!("Invalid animation easing: {error}"))?;
             ConfigCommand::SetAnimationEasing(easing)
         }
         ConfigCommands::SetMouseFollowsFocus { value } => {
