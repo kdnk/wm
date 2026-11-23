@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::process;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use objc2::MainThreadMarker;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -582,6 +583,9 @@ impl Cli {
             Some(Commands::Config {
                 command: LocalConfigCommands::Check { path },
             }) => {
+                if let Some(mtm) = MainThreadMarker::new() {
+                    crate::sys::hotkey::refresh_virtual_keymap(mtm);
+                }
                 let path = path.unwrap_or_else(config_file);
                 if let Err(error) = Config::read(&path) {
                     eprintln!("Could not load config file at {}: {error:#}", path.display());
