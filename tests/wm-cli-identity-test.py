@@ -148,7 +148,12 @@ def main():
         result = run(binary, arguments, environment)
         assert result.returncode != 0, "An isolated nonexistent service unexpectedly answered"
         assert "not registered" in result.stderr, result.stderr
-        assert "wm service start" in result.stderr, result.stderr
+        assert environment["WM_BS_NAME"] in result.stderr, result.stderr
+        assert "wm service start" not in result.stderr, result.stderr
+    result = run(binary, ["subscribe", "mach", "windows_chagned"], environment)
+    assert result.returncode == 1, result
+    assert "Invalid event" in result.stderr and "windows_changed" in result.stderr, result.stderr
+    assert "Communication error" not in result.stderr and "Hint:" not in result.stderr, result.stderr
     if args.baseline_client:
         check_client_help(binary, args.baseline_client.resolve(), environment)
     print("PASS: unified wm exposes daemon and client commands and honors isolated WM_BS_NAME")

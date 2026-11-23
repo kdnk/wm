@@ -7,12 +7,12 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use wm_protocol::{EventKind, WmRequest, WmResponse};
+use wm_protocol::{DEFAULT_SERVICE_NAME, EventKind, WmRequest, WmResponse};
 
 use crate::actor::app::WindowId as InternalWindowId;
 use crate::actor::reactor::{self, DisplaySelector};
 use crate::common::config::{Config, WorkspaceSelector, config_file};
-use crate::ipc::WmMachClient;
+use crate::ipc::{WmMachClient, WmMachClientError};
 use crate::layout_engine as layout;
 use crate::sys::service::{ServiceCommands, handle_service_command};
 use crate::sys::window_server::WindowServerId;
@@ -594,37 +594,39 @@ impl Cli {
             Some(Commands::Subscribe {
                 subscribe: SubscribeCommands::Mach { event },
             }) => {
-                if let Err(error) = run_mach_subscription(event) {
-                    eprintln!("Communication error: {error}");
-                    eprintln!("Hint: ensure the wm service is running (try `wm service start`).");
-                    process::exit(1);
-                }
+                let event = parse_event_kind(&event).unwrap_or_else(|error| exit_with_error(error));
+                run_mach_subscription(event);
                 return true;
             }
             Some(Commands::Query { query }) => build_query_request(query),
             Some(Commands::Execute { command }) => build_execute_request(command),
             Some(Commands::Subscribe { subscribe }) => build_subscribe_request(subscribe),
         };
-        let request = match request {
-            Ok(request) => request,
-            Err(error) => {
-                eprintln!("Error: {error}");
-                process::exit(1);
-            }
-        };
-        send_request(request);
+        send_request(request.unwrap_or_else(|error| exit_with_error(error)));
         true
     }
 }
 
-fn send_request(request: WmRequest) {
-    let client = match WmMachClient::connect() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Failed to connect to wm: {}", e);
-            process::exit(1);
+fn exit_with_error(error: impl std::fmt::Display) -> ! {
+    eprintln!("Error: {error}");
+    process::exit(1);
+}
+
+fn exit_on_ipc_error(error: WmMachClientError) -> ! {
+    eprintln!("Communication error: {error}");
+    if matches!(error, WmMachClientError::ServiceUnavailable) {
+        match std::env::var("WM_BS_NAME") {
+            Ok(name) if name != DEFAULT_SERVICE_NAME => eprintln!(
+                "Hint: start wm with WM_BS_NAME={name:?}, or unset WM_BS_NAME to use the default service."
+            ),
+            _ => eprintln!("Hint: start the wm service with `wm service start`."),
         }
-    };
+    }
+    process::exit(1);
+}
+
+fn send_request(request: WmRequest) {
+    let client = WmMachClient::connect().unwrap_or_else(|error| exit_on_ipc_error(error));
 
     // Send request and handle response.
     match client.send_request(&request) {
@@ -650,11 +652,7 @@ fn send_request(request: WmRequest) {
                 process::exit(1);
             }
         },
-        Err(e) => {
-            eprintln!("Communication error: {}", e);
-            eprintln!("Hint: ensure the wm service is running (try `wm service start`).");
-            process::exit(1);
-        }
+        Err(error) => exit_on_ipc_error(error),
     }
 }
 
@@ -1140,34 +1138,33 @@ fn parse_focus_direction(value: &str) -> Result<layout::Direction, String> {
     }
 }
 
-fn write_json<T: Serialize>(value: &T, pretty: bool) -> Result<(), String> {
+fn write_json<T: Serialize>(value: &T, pretty: bool) -> io::Result<()> {
     let stdout = io::stdout();
     let mut handle = stdout.lock();
     let mut writer = io::BufWriter::new(&mut handle);
 
     if pretty {
-        serde_json::to_writer_pretty(&mut writer, value).map_err(|e| e.to_string())?;
+        serde_json::to_writer_pretty(&mut writer, value)?;
     } else {
-        serde_json::to_writer(&mut writer, value).map_err(|e| e.to_string())?;
+        serde_json::to_writer(&mut writer, value)?;
     }
-    writer.write_all(b"\n").map_err(|e| e.to_string())?;
-    writer.flush().map_err(|e| e.to_string())
+    writer.write_all(b"\n")?;
+    writer.flush()
 }
 
-fn run_mach_subscription(event: String) -> Result<(), String> {
+fn run_mach_subscription(event: EventKind) {
     let pretty = std::env::var("WM_CLI_PRETTY").map(|v| v != "0").unwrap_or(false);
-    let client = WmMachClient::connect().map_err(|e| e.to_string())?;
-    let event_kind = parse_event_kind(&event)?;
-    let subscription = client.subscribe(event_kind).map_err(|e| e.to_string())?;
+    let client = WmMachClient::connect().unwrap_or_else(|error| exit_on_ipc_error(error));
+    let subscription = client.subscribe(event).unwrap_or_else(|error| exit_on_ipc_error(error));
 
     loop {
-        let event_payload = subscription.recv_event().map_err(|e| e.to_string())?;
-        // Exit cleanly when output is closed by the consumer.
-        if let Err(e) = write_json(&event_payload, pretty) {
-            if e.contains("Broken pipe") {
-                return Ok(());
+        let event_payload =
+            subscription.recv_event().unwrap_or_else(|error| exit_on_ipc_error(error));
+        if let Err(error) = write_json(&event_payload, pretty) {
+            if error.kind() == io::ErrorKind::BrokenPipe {
+                return;
             }
-            return Err(format!("Failed to write event output: {e}"));
+            exit_with_error(format_args!("Failed to write event output: {error}"));
         }
     }
 }
