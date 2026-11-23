@@ -1,6 +1,7 @@
 // Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 use std::future::Future;
-use std::process;
+use std::path::Path;
+use std::{io, process};
 
 use clap::Parser;
 use objc2::MainThreadMarker;
@@ -53,6 +54,20 @@ fn spawn_supervised<F: Future<Output = ()> + 'static>(
         .unwrap_or_else(|error| panic!("failed to spawn {name} thread: {error}"));
 }
 
+fn read_startup_config(path: &Path, allow_missing: bool) -> anyhow::Result<Config> {
+    match Config::read(path) {
+        Err(error)
+            if allow_missing
+                && error
+                    .downcast_ref::<io::Error>()
+                    .is_some_and(|error| error.kind() == io::ErrorKind::NotFound) =>
+        {
+            Ok(Config::default())
+        }
+        result => result,
+    }
+}
+
 fn main() {
     let mut opt = Cli::parse();
     if opt.run_command() {
@@ -77,6 +92,22 @@ fn main() {
 
     unsafe { SLSWindowManagementBridgeSetDelegate(std::ptr::null_mut()) };
 
+    wm::sys::hotkey::refresh_virtual_keymap(mtm);
+
+    let config_path = opt.config.clone().unwrap_or_else(config_file);
+    let mut config = match read_startup_config(&config_path, opt.config.is_none()) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!(
+                "Could not load config file at {}: {error:#}",
+                config_path.display()
+            );
+            process::exit(1);
+        }
+    };
+    config.settings.animate &= !opt.no_animate;
+    config.settings.default_disable |= opt.default_disable;
+
     ensure_accessibility_permission();
     init_window_sub_level_server_port();
 
@@ -88,26 +119,6 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Wm."
         );
         std::process::exit(1);
     }
-
-    wm::sys::hotkey::refresh_virtual_keymap(mtm);
-
-    let config_path = opt.config.clone().unwrap_or_else(|| config_file());
-    let mut config = if config_path.exists() {
-        match Config::read(&config_path) {
-            Ok(config) => config,
-            Err(error) => {
-                eprintln!(
-                    "Could not load config file at {}: {error:#}",
-                    config_path.display()
-                );
-                process::exit(1);
-            }
-        }
-    } else {
-        Config::default()
-    };
-    config.settings.animate &= !opt.no_animate;
-    config.settings.default_disable |= opt.default_disable;
 
     let startup_commands = config.settings.run_on_start.clone();
 
@@ -359,3 +370,20 @@ fn install_panic_hook() {
 
 #[cfg(not(panic = "unwind"))]
 fn install_panic_hook() {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_uses_defaults_only_for_a_missing_default_config() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        assert!(read_startup_config(&path, true).is_ok());
+        assert!(read_startup_config(&path, false).is_err());
+
+        std::fs::write(&path, "invalid config").unwrap();
+        assert!(read_startup_config(&path, true).is_err());
+        assert!(read_startup_config(&path, false).is_err());
+    }
+}
