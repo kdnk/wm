@@ -5,6 +5,7 @@ use super::*;
 
 struct FixtureControl {
     pid: Option<u32>,
+    checkpoint_busy: usize,
     checkpoint_error: bool,
     checkpoint_data: &'static str,
     state_error: bool,
@@ -17,6 +18,7 @@ impl Default for FixtureControl {
     fn default() -> Self {
         Self {
             pid: Some(42),
+            checkpoint_busy: 0,
             checkpoint_error: false,
             checkpoint_data: "Layout saved",
             state_error: false,
@@ -40,7 +42,13 @@ impl ServiceControl for FixtureControl {
     fn checkpoint(&mut self, pid: u32) -> io::Result<()> {
         assert_eq!(Some(pid), self.pid);
         self.calls.push("checkpoint".into());
-        if self.checkpoint_error {
+        if self.checkpoint_busy > 0 {
+            self.checkpoint_busy -= 1;
+            Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "layout is still waiting for displays",
+            ))
+        } else if self.checkpoint_error {
             Err(io::Error::other("snapshot failed"))
         } else {
             checkpoint_response(WmResponse::Success {
@@ -163,6 +171,23 @@ fn restart_saves_before_terminating_the_running_service() {
     let mut control = FixtureControl::default();
     restart_service(&mut control, "fixture").unwrap();
     assert_eq!(control.calls, ["state", "checkpoint", "kickstart -k fixture"]);
+}
+
+#[test]
+fn restart_retries_a_temporary_checkpoint_failure_before_terminating() {
+    let mut control = FixtureControl {
+        checkpoint_busy: 1,
+        ..Default::default()
+    };
+    restart_service(&mut control, "fixture").unwrap();
+    assert_eq!(
+        control.calls.iter().filter(|call| *call == "checkpoint").count(),
+        2
+    );
+    assert_eq!(
+        control.calls.last().map(String::as_str),
+        Some("kickstart -k fixture")
+    );
 }
 
 #[test]

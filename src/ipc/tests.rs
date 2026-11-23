@@ -53,10 +53,18 @@ fn save_layout_acknowledges_only_a_durable_snapshot() {
     let directory = tempfile::tempdir().unwrap();
     let blocker = directory.path().join("file");
     std::fs::write(&blocker, "previous snapshot").unwrap();
+    let blocked_path = blocker.join("layout.ron");
     assert!(matches!(
-        save(&mut reactor, &blocker.join("layout.ron")),
+        save(&mut reactor, &blocked_path),
         WmResponse::Error { .. }
     ));
+    let response = checkpoint_service(&mut reactor, std::process::id(), blocked_path);
+    let WmResponse::<Value>::Error { error } =
+        serde_json::from_slice(response.strip_suffix(&[0]).unwrap()).unwrap()
+    else {
+        panic!("checkpoint unexpectedly succeeded with a file blocking its parent directory");
+    };
+    assert_ne!(error["retryable"], true);
     assert_eq!(std::fs::read_to_string(&blocker).unwrap(), "previous snapshot");
 
     let snapshot = directory.path().join("layout.ron");
@@ -75,6 +83,13 @@ fn saving_before_display_discovery_preserves_the_previous_snapshot() {
         save(&mut reactor, snapshot.path()),
         WmResponse::Error { .. }
     ));
+    let response = checkpoint_service(&mut reactor, std::process::id(), snapshot.path().into());
+    let WmResponse::<Value>::Error { error } =
+        serde_json::from_slice(response.strip_suffix(&[0]).unwrap()).unwrap()
+    else {
+        panic!("checkpoint unexpectedly succeeded before display discovery");
+    };
+    assert_eq!(error["retryable"], true);
     assert_eq!(
         std::fs::read_to_string(snapshot.path()).unwrap(),
         "previous snapshot"
