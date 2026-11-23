@@ -6,6 +6,7 @@ use super::*;
 struct FixtureControl {
     pid: Option<u32>,
     checkpoint_busy: usize,
+    pid_after_busy: Option<u32>,
     checkpoint_error: bool,
     checkpoint_data: &'static str,
     state_error: bool,
@@ -19,6 +20,7 @@ impl Default for FixtureControl {
         Self {
             pid: Some(42),
             checkpoint_busy: 0,
+            pid_after_busy: None,
             checkpoint_error: false,
             checkpoint_data: "Layout saved",
             state_error: false,
@@ -39,11 +41,14 @@ impl ServiceControl for FixtureControl {
         }
     }
 
-    fn checkpoint(&mut self, pid: u32) -> io::Result<()> {
+    fn checkpoint(&mut self, pid: u32, _timeout: Duration) -> io::Result<()> {
         assert_eq!(Some(pid), self.pid);
         self.calls.push("checkpoint".into());
         if self.checkpoint_busy > 0 {
             self.checkpoint_busy -= 1;
+            if let Some(pid) = self.pid_after_busy.take() {
+                self.pid = Some(pid);
+            }
             Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "layout is still waiting for displays",
@@ -158,11 +163,37 @@ fn only_a_durable_save_acknowledgement_allows_restart() {
         })
         .is_err()
     );
-    assert!(
-        checkpoint_response(WmResponse::Error {
-            error: serde_json::json!({"message": "snapshot failed"}),
+}
+
+#[test]
+fn checkpoint_failures_preserve_the_message_and_only_retry_explicit_temporary_errors() {
+    for (value, expected_kind) in [
+        (serde_json::Value::Null, io::ErrorKind::Other),
+        (serde_json::json!(false), io::ErrorKind::Other),
+        (serde_json::json!("true"), io::ErrorKind::Other),
+        (serde_json::json!(true), io::ErrorKind::WouldBlock),
+    ] {
+        let error = checkpoint_response(WmResponse::Error {
+            error: serde_json::json!({"message": "snapshot failed", "retryable": value}),
         })
-        .is_err()
+        .unwrap_err();
+        assert_eq!(error.kind(), expected_kind);
+        assert_eq!(error.to_string(), "snapshot failed");
+    }
+
+    let legacy = checkpoint_response(WmResponse::Error {
+        error: serde_json::json!({"message": "snapshot failed"}),
+    })
+    .unwrap_err();
+    assert_eq!(legacy.kind(), io::ErrorKind::Other);
+
+    assert_eq!(
+        checkpoint_transport_error(WmMachClientError::ServiceUnavailable).kind(),
+        io::ErrorKind::WouldBlock
+    );
+    assert_ne!(
+        checkpoint_transport_error(WmMachClientError::RequestTimedOut).kind(),
+        io::ErrorKind::WouldBlock
     );
 }
 
@@ -177,17 +208,29 @@ fn restart_saves_before_terminating_the_running_service() {
 fn restart_retries_a_temporary_checkpoint_failure_before_terminating() {
     let mut control = FixtureControl {
         checkpoint_busy: 1,
+        pid_after_busy: Some(43),
         ..Default::default()
     };
     restart_service(&mut control, "fixture").unwrap();
-    assert_eq!(
-        control.calls.iter().filter(|call| *call == "checkpoint").count(),
-        2
-    );
-    assert_eq!(
-        control.calls.last().map(String::as_str),
-        Some("kickstart -k fixture")
-    );
+    assert_eq!(control.calls, [
+        "state",
+        "checkpoint",
+        "state",
+        "checkpoint",
+        "kickstart -k fixture"
+    ]);
+}
+
+#[test]
+fn checkpoint_deadline_expires_if_the_layout_stays_unready() {
+    let mut control = FixtureControl {
+        checkpoint_busy: usize::MAX,
+        ..Default::default()
+    };
+    let error = checkpoint_running_service(&mut control, Duration::from_millis(10)).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    assert!(error.to_string().contains("layout is still waiting for displays"));
+    assert!(error.to_string().contains("wm is still running"));
 }
 
 #[test]
@@ -243,9 +286,12 @@ fn save_or_state_failure_never_stops_or_restarts_the_daemon() {
                 stop_service(&mut control, "fixture", "domain", Path::new("fixture.plist"))
             };
             assert!(result.is_err());
-            assert!(
-                control.calls.iter().all(|call| matches!(call.as_str(), "state" | "checkpoint"))
-            );
+            let expected: &[&str] = if state_error {
+                &["state"]
+            } else {
+                &["state", "checkpoint"]
+            };
+            assert_eq!(control.calls, expected);
         }
     }
 }

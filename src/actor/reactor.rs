@@ -1314,7 +1314,10 @@ impl Reactor {
             || self.space_state.screens.is_empty()
             || (matches!(kind, LayoutSaveKind::Portable) && active_space.is_none())
         {
-            return Err(std::io::Error::other("layout is still waiting for displays"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "layout is still waiting for displays",
+            ));
         }
         self.commit_presentations();
         self.layout_manager.layout_engine.save_current_layout(

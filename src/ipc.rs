@@ -252,6 +252,9 @@ impl IpcRequestHandler {
             ),
             request => match self.reactor.try_borrow_mut() {
                 Ok(mut reactor) => encode_reactor_response(&mut reactor, request),
+                Err(_) if matches!(request, WmRequest::CheckpointService { .. }) => {
+                    retryable_checkpoint_error("Reactor is busy")
+                }
                 Err(_) => encode_error(serde_json::json!({ "message": "Reactor is busy" })),
             },
         };
@@ -428,7 +431,16 @@ fn checkpoint_service(
             "message": format!("IPC reached wm PID {}, but launchd reported PID {pid}", std::process::id())
         }));
     }
-    save_layout_response(reactor.save_layout(master, LayoutSaveKind::Master))
+    match reactor.save_layout(master, LayoutSaveKind::Master) {
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            retryable_checkpoint_error(&format!("Could not save layout: {error}"))
+        }
+        result => save_layout_response(result),
+    }
+}
+
+fn retryable_checkpoint_error(message: &str) -> Vec<u8> {
+    encode_error(serde_json::json!({ "message": message, "retryable": true }))
 }
 
 fn save_layout_response(result: std::io::Result<()>) -> Vec<u8> {

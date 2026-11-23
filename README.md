@@ -79,9 +79,11 @@ wm query windows
 
 wm automatically restores the last saved layout when it starts. `wm service restart`
 and `wm service stop` save the current column widths, window order, workspace
-assignments, and scroll positions before stopping the daemon. If saving fails, the
-daemon stays running. A first start without a saved layout uses the normal initial
-layout. No restore option is required.
+assignments, and scroll positions before stopping the daemon. If wm is still
+discovering its displays or is busy, service commands retry the save for up to
+10 seconds. The daemon stays running if the save cannot be confirmed. A first
+start without a saved layout uses the normal initial layout. No restore option
+is required.
 
 Run `wm --validate` to check the saved layout at `~/.wm/layout.ron` without
 starting wm or requiring Accessibility access.

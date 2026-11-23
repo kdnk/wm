@@ -13,15 +13,17 @@ use clap::Subcommand;
 use nix::unistd::getuid;
 use wm_protocol::{WmRequest, WmResponse};
 
-use crate::ipc::WmMachClient;
+use crate::ipc::{WmMachClient, WmMachClientError};
 
 const LAUNCHCTL_PATH: &str = "/bin/launchctl";
 const WM_PLIST: &str = wm_protocol::DEFAULT_SERVICE_NAME;
 const LAUNCHCTL_SERVICE_NOT_FOUND: i32 = 113;
+const CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(10);
+const CHECKPOINT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 
 trait ServiceControl {
     fn running_pid(&mut self) -> io::Result<Option<u32>>;
-    fn checkpoint(&mut self, pid: u32) -> io::Result<()>;
+    fn checkpoint(&mut self, pid: u32, timeout: Duration) -> io::Result<()>;
     fn start(&mut self) -> io::Result<()>;
     fn launchctl(&mut self, args: &[&str], suppress_output: bool) -> io::Result<i32>;
 }
@@ -59,14 +61,14 @@ impl ServiceControl for NativeServiceControl {
         }
     }
 
-    fn checkpoint(&mut self, pid: u32) -> io::Result<()> {
-        let client = WmMachClient::connect().map_err(io::Error::other)?;
+    fn checkpoint(&mut self, pid: u32, timeout: Duration) -> io::Result<()> {
+        let client = WmMachClient::connect().map_err(checkpoint_transport_error)?;
         let response = client
             .send_typed_request_with_timeout::<String>(
                 &WmRequest::CheckpointService { pid },
-                Duration::from_secs(10),
+                timeout,
             )
-            .map_err(io::Error::other)?;
+            .map_err(checkpoint_transport_error)?;
         checkpoint_response(response)
     }
 
@@ -77,10 +79,27 @@ impl ServiceControl for NativeServiceControl {
     fn start(&mut self) -> io::Result<()> { service_start() }
 }
 
+fn checkpoint_transport_error(error: WmMachClientError) -> io::Error {
+    match error {
+        WmMachClientError::ServiceUnavailable => io::Error::new(io::ErrorKind::WouldBlock, error),
+        _ => io::Error::other(error),
+    }
+}
+
 fn checkpoint_response(response: WmResponse<String>) -> io::Result<()> {
     match response {
         WmResponse::Success { data } if data == "Layout saved" => Ok(()),
-        WmResponse::Error { error } => Err(io::Error::other(error.to_string())),
+        WmResponse::Error { error } => {
+            let kind = match error.get("retryable").and_then(serde_json::Value::as_bool) {
+                Some(true) => io::ErrorKind::WouldBlock,
+                _ => io::ErrorKind::Other,
+            };
+            let message = error
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .map_or_else(|| error.to_string(), str::to_owned);
+            Err(io::Error::new(kind, message))
+        }
         _ => Err(io::Error::other(
             "daemon did not acknowledge a durable layout save",
         )),
@@ -110,14 +129,40 @@ fn listed_service(jobs: &str) -> io::Result<ListedService> {
     Ok(ListedService::Missing)
 }
 
-fn checkpoint_running_service(control: &mut impl ServiceControl) -> io::Result<bool> {
-    if let Some(pid) = control.running_pid()? {
-        control.checkpoint(pid).map_err(|error| {
-            io::Error::other(format!("could not save layout; wm is still running: {error}"))
-        })?;
-        return Ok(true);
+fn checkpoint_running_service(
+    control: &mut impl ServiceControl,
+    timeout: Duration,
+) -> io::Result<bool> {
+    let Some(mut pid) = control.running_pid()? else {
+        return Ok(false);
+    };
+    let deadline = Instant::now() + timeout;
+    let mut remaining = timeout;
+    loop {
+        let error = match control.checkpoint(pid, remaining) {
+            Ok(()) => return Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => error,
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "could not save layout; wm is still running: {error}"
+                )));
+            }
+        };
+        let delay =
+            CHECKPOINT_RETRY_INTERVAL.min(deadline.saturating_duration_since(Instant::now()));
+        std::thread::sleep(delay);
+        let Some(current_pid) = control.running_pid()? else {
+            return Ok(false);
+        };
+        remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("timed out waiting to save layout; wm is still running: {error}"),
+            ));
+        }
+        pid = current_pid;
     }
-    Ok(false)
 }
 
 #[derive(Subcommand)]
@@ -381,7 +426,7 @@ fn start_service(
         if code == 0 || !plist_changed {
             return check_exit("kickstart", code);
         }
-        checkpoint_running_service(control)?;
+        checkpoint_running_service(control, CHECKPOINT_TIMEOUT)?;
         check_exit(
             "bootout",
             control.launchctl(&["bootout", domain_target, plist_path], false)?,
@@ -461,7 +506,7 @@ pub fn service_restart() -> io::Result<()> {
 }
 
 fn restart_service(control: &mut impl ServiceControl, service_target: &str) -> io::Result<()> {
-    if !checkpoint_running_service(control)? {
+    if !checkpoint_running_service(control, CHECKPOINT_TIMEOUT)? {
         return control.start();
     }
     let code = control.launchctl(&["kickstart", "-k", service_target], false)?;
@@ -502,7 +547,7 @@ fn stop_service(
     domain_target: &str,
     plist_path: &Path,
 ) -> io::Result<()> {
-    checkpoint_running_service(control)?;
+    checkpoint_running_service(control, CHECKPOINT_TIMEOUT)?;
 
     let is_bootstrapped = control.launchctl(&["print", service_target], true)?;
 

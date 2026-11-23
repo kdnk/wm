@@ -93,7 +93,8 @@ impl LayoutEngine {
         // Until the topology is known, a live window can sit in a different workspace from its own
         // pending slot, so this state has no one coherent snapshot.
         if self.persistence.awaiting_topology && !self.persistence.pending.is_empty() {
-            return Err(std::io::Error::other(
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
                 "saved layout is still waiting for displays",
             ));
         }
