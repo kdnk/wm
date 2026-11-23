@@ -54,6 +54,9 @@ Edit `~/.config/wm/config.toml` to configure wm. Changes reload automatically wh
 `[settings].hot_reload` is enabled, which is the default. To reload manually, run
 `wm execute config reload`.
 
+Run `wm config check` to check your configuration without starting wm. Pass a
+path, such as `wm config check ./config.toml`, to check another file.
+
 wm uses niri-style scrolling columns. Columns can contain multiple windows. Other
 layout modes, anchored navigation, and floating controls are removed. When updating
 an older configuration, remove their settings and keybindings. Redundant

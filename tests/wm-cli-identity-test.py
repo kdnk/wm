@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 import uuid
 
 
@@ -19,6 +20,39 @@ def command_help(binary, arguments, environment):
     result = run(binary, [*arguments, "--help"], environment)
     assert result.returncode == 0, result
     return result.stdout
+
+
+def check_config_file(binary, environment):
+    template = Path(__file__).resolve().parents[1] / "wm.default.toml"
+    with tempfile.TemporaryDirectory(prefix="wm-config-check-") as directory:
+        home = Path(directory)
+        env = dict(environment, HOME=str(home))
+        config = home / ".config" / "wm" / "config.toml"
+        missing = run(binary, ["config", "check"], env)
+        assert missing.returncode == 1 and str(config) in missing.stderr, missing
+        assert not config.exists(), config
+
+        config.parent.mkdir(parents=True)
+        config.write_bytes(template.read_bytes())
+        result = run(binary, ["config", "check"], env)
+        assert result.returncode == 0 and str(config) in result.stdout, result
+        assert config.read_bytes() == template.read_bytes(), config
+
+        draft = home / "config draft.toml"
+        draft.write_bytes(template.read_bytes())
+        result = run(binary, ["config", "check", str(draft)], env)
+        assert result.returncode == 0 and str(draft) in result.stdout, result
+        for content, diagnostic in [
+            ("[settings\n", "TOML parse error"),
+            ("[settings]\n[virtual_workspaces]\ndefault_workspace_count = 0\n[keys]\n",
+             "default_workspace_count must be at least 1"),
+        ]:
+            draft.write_text(content)
+            result = run(binary, ["config", "check", str(draft)], env)
+            assert result.returncode == 1 and not result.stdout, result
+            assert str(draft) in result.stderr and diagnostic in result.stderr, result
+            assert draft.read_text() == content, draft
+    print("PASS: wm config check validates default and explicit paths without a daemon")
 
 
 def check_client_help(binary, baseline, environment):
@@ -57,7 +91,8 @@ def main():
     assert version.returncode == 0 and version.stdout.startswith("wm "), version
     help_text = command_help(binary, [], environment)
     assert "rift" not in help_text.lower(), help_text
-    for command in ["query", "execute", "subscribe", "service", "close-window"]:
+    check_config_file(binary, environment)
+    for command in ["query", "execute", "subscribe", "service", "close-window", "config"]:
         assert re.search(r"^  " + command + r"\s", help_text, re.M), help_text
         command_help(binary, [command], environment)
     close_help = command_help(binary, ["close-window"], environment)

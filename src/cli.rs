@@ -11,7 +11,7 @@ use wm_protocol::{EventKind, WmRequest, WmResponse};
 
 use crate::actor::app::WindowId as InternalWindowId;
 use crate::actor::reactor::{self, DisplaySelector};
-use crate::common::config::WorkspaceSelector;
+use crate::common::config::{Config, WorkspaceSelector, config_file};
 use crate::ipc::WmMachClient;
 use crate::layout_engine as layout;
 use crate::sys::service::{ServiceCommands, handle_service_command};
@@ -64,6 +64,11 @@ enum CliCommand {
 enum Commands {
     /// Close the focused window, including all its tabs, using its native close button
     CloseWindow,
+    /// Check a configuration file without starting wm
+    Config {
+        #[command(subcommand)]
+        command: LocalConfigCommands,
+    },
     /// Query information from wm
     Query {
         #[command(subcommand)]
@@ -83,6 +88,16 @@ enum Commands {
     Service {
         #[command(subcommand)]
         service: ServiceCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum LocalConfigCommands {
+    /// Check TOML syntax and configuration settings
+    Check {
+        /// Configuration file to check. Defaults to ~/.config/wm/config.toml.
+        #[arg(value_name = "PATH")]
+        path: Option<PathBuf>,
     },
 }
 
@@ -551,6 +566,17 @@ impl Cli {
         let request = match command {
             None => return false,
             Some(Commands::CloseWindow) => unreachable!(),
+            Some(Commands::Config {
+                command: LocalConfigCommands::Check { path },
+            }) => {
+                let path = path.unwrap_or_else(config_file);
+                if let Err(error) = Config::read(&path) {
+                    eprintln!("Could not load config file at {}: {error:#}", path.display());
+                    process::exit(1);
+                }
+                println!("Config file is valid: {}", path.display());
+                return true;
+            }
             Some(Commands::Service { service }) => {
                 match handle_service_command(&service) {
                     Ok(message) => println!("{message}"),
