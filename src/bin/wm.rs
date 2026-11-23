@@ -27,7 +27,7 @@ use wm::common::util::execute_startup_commands;
 use wm::ipc;
 use wm::layout_engine::LayoutEngine;
 use wm::model::tx_store::WindowTxStore;
-use wm::sys::accessibility::ensure_accessibility_permission;
+use wm::sys::accessibility::{ax_is_trusted, ensure_accessibility_permission};
 use wm::sys::executor::Executor;
 use wm::sys::mach::init_window_sub_level_server_port;
 use wm::sys::screen::{CoordinateConverter, displays_have_separate_spaces};
@@ -92,23 +92,28 @@ fn main() {
 
     unsafe { SLSWindowManagementBridgeSetDelegate(std::ptr::null_mut()) };
 
-    wm::sys::hotkey::refresh_virtual_keymap(mtm);
-
     let config_path = opt.config.clone().unwrap_or_else(config_file);
-    let mut config = match read_startup_config(&config_path, opt.config.is_none()) {
-        Ok(config) => config,
-        Err(error) => {
-            eprintln!(
-                "Could not load config file at {}: {error:#}",
-                config_path.display()
-            );
-            process::exit(1);
+    let load_config = || {
+        wm::sys::hotkey::refresh_virtual_keymap(mtm);
+        match read_startup_config(&config_path, opt.config.is_none()) {
+            Ok(config) => config,
+            Err(error) => {
+                eprintln!(
+                    "Could not load config file at {}: {error:#}",
+                    config_path.display()
+                );
+                process::exit(1);
+            }
         }
     };
+    if !ax_is_trusted() {
+        load_config();
+    }
+    ensure_accessibility_permission();
+    let mut config = load_config();
     config.settings.animate &= !opt.no_animate;
     config.settings.default_disable |= opt.default_disable;
 
-    ensure_accessibility_permission();
     init_window_sub_level_server_port();
 
     if !displays_have_separate_spaces() {
