@@ -494,6 +494,11 @@ pub enum WindowInvalidationSource {
     StaleAxElement,
 }
 
+pub(crate) enum LayoutSaveKind {
+    Portable,
+    Master,
+}
+
 pub struct Reactor {
     pub config: Config,
     reduce_motion: bool,
@@ -1299,15 +1304,23 @@ impl Reactor {
         self.handle_loop_event(Event::Command(command));
     }
 
-    pub(crate) fn save_layout(&mut self, path: std::path::PathBuf) -> std::io::Result<()> {
-        if self.refreshes_blocked() || self.active_display_space().is_none() {
+    pub(crate) fn save_layout(
+        &mut self,
+        path: std::path::PathBuf,
+        kind: LayoutSaveKind,
+    ) -> std::io::Result<()> {
+        let active_space = self.active_display_space();
+        if self.refreshes_blocked()
+            || self.space_state.screens.is_empty()
+            || (matches!(kind, LayoutSaveKind::Portable) && active_space.is_none())
+        {
             return Err(std::io::Error::other("layout is still waiting for displays"));
         }
         self.commit_presentations();
         self.layout_manager.layout_engine.save_current_layout(
             path,
             &self.state.windows,
-            self.active_display_space(),
+            active_space,
         )
     }
 
@@ -3008,7 +3021,9 @@ impl Reactor {
                 );
             }
             Event::Command(Command::Reactor(ReactorCommand::SaveAndExit)) => {
-                if let Err(error) = self.save_layout(crate::common::config::restore_file()) {
+                if let Err(error) =
+                    self.save_layout(crate::common::config::restore_file(), LayoutSaveKind::Master)
+                {
                     return Ok(EventOutcome::no_change().with_stdout_line(format!(
                         "Could not save master file; Wm is still running: {error}"
                     )));
@@ -3016,7 +3031,7 @@ impl Reactor {
                 std::process::exit(0);
             }
             Event::Command(Command::Reactor(ReactorCommand::SaveLayout { path })) => {
-                self.save_layout(path.clone())?;
+                self.save_layout(path.clone(), LayoutSaveKind::Portable)?;
                 return Ok(EventOutcome::no_change()
                     .with_stdout_line(format!("Saved layout to {}", path.display())));
             }

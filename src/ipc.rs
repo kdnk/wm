@@ -20,7 +20,7 @@ pub use protocol::{WmCommand, WmRequest, WmResponse};
 pub use wm_client::{ClientError as WmMachClientError, WmMachClient, WmMachSubscription};
 
 use crate::actor::config as config_actor;
-use crate::actor::reactor::{self, Event};
+use crate::actor::reactor::{self, Event, LayoutSaveKind};
 use crate::ipc::subscriptions::{PortLease, SharedServerState};
 use crate::model::window_store::ClaimOwner;
 use crate::sys::mach::{
@@ -428,11 +428,11 @@ fn checkpoint_service(
             "message": format!("IPC reached wm PID {}, but launchd reported PID {pid}", std::process::id())
         }));
     }
-    save_layout_response(reactor, master)
+    save_layout_response(reactor.save_layout(master, LayoutSaveKind::Master))
 }
 
-fn save_layout_response(reactor: &mut reactor::Reactor, path: std::path::PathBuf) -> Vec<u8> {
-    match reactor.save_layout(path) {
+fn save_layout_response(result: std::io::Result<()>) -> Vec<u8> {
+    match result {
         Ok(()) => encode_success("Layout saved"),
         Err(error) => encode_error(serde_json::json!({
             "message": format!("Could not save layout: {error}"),
@@ -448,7 +448,7 @@ fn handle_reactor_command(
         path,
     }) = command
     {
-        return save_layout_response(reactor, path);
+        return save_layout_response(reactor.save_layout(path, LayoutSaveKind::Portable));
     }
     reactor.handle_ipc_command(command);
     encode_success("Command executed successfully")
