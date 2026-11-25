@@ -6,17 +6,18 @@ use std::process;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use objc2::MainThreadMarker;
 use serde::Serialize;
-use serde::de::DeserializeOwned;
 use serde_json::Value;
-use wm_protocol::{DEFAULT_SERVICE_NAME, EventKind, WmRequest, WmResponse};
+use wm_protocol::{
+    AnimationEasing, ConfigCommand, DEFAULT_SERVICE_NAME, Direction, DisplaySelector, EventKind,
+    LayoutCommand, MetricsCommand, ReactorCommand, ResizeOrientation, RestoreScope, RestoreSource,
+    WindowId, WmCommand, WmRequest, WmResponse, WorkspaceSelector,
+};
 
 use crate::actor::app::WindowId as InternalWindowId;
-use crate::actor::reactor::{self, DisplaySelector};
-use crate::common::config::{Config, WorkspaceSelector, config_file, restore_file};
+use crate::common::config::{Config, config_file, restore_file};
 use crate::ipc::{WmMachClient, WmMachClientError};
-use crate::layout_engine as layout;
+use crate::layout_engine::LayoutEngine;
 use crate::sys::service::{ServiceCommands, handle_service_command};
-use crate::sys::window_server::WindowServerId;
 
 #[derive(Parser)]
 #[command(name = "wm", version = env!("WM_VERSION"), args_conflicts_with_subcommands = true)]
@@ -54,11 +55,6 @@ pub struct Cli {
 
     #[command(subcommand)]
     command: Option<Commands>,
-}
-
-enum CliCommand {
-    Reactor(reactor::Command),
-    Config(crate::common::config::ConfigCommand),
 }
 
 #[derive(Subcommand)]
@@ -286,7 +282,7 @@ enum CliResizeOrientation {
     Smart,
 }
 
-impl From<CliResizeOrientation> for crate::layout_engine::ResizeOrientation {
+impl From<CliResizeOrientation> for ResizeOrientation {
     fn from(value: CliResizeOrientation) -> Self {
         match value {
             CliResizeOrientation::Horizontal => Self::Horizontal,
@@ -571,7 +567,7 @@ impl Cli {
         let request = match command {
             None if self.validate => {
                 let path = restore_file();
-                if let Err(error) = layout::LayoutEngine::validate_file(path.clone()) {
+                if let Err(error) = LayoutEngine::validate_file(path.clone()) {
                     eprintln!("Could not load master file at {}: {error}", path.display());
                     process::exit(1);
                 }
@@ -685,7 +681,7 @@ fn build_query_request(query: QueryCommands) -> Result<WmRequest, String> {
         },
         QueryCommands::Displays => Ok(WmRequest::GetDisplays),
         QueryCommands::Window { window_id } => {
-            let window_id = protocol_window_id(&parse_window_id(&window_id)?)?;
+            let window_id = parse_window_id(&window_id)?;
             Ok(WmRequest::GetWindowInfo { window_id })
         }
         QueryCommands::Applications => Ok(WmRequest::GetApplications),
@@ -730,206 +726,169 @@ fn build_subscribe_request(sub: SubscribeCommands) -> Result<WmRequest, String> 
 }
 
 fn build_execute_request(execute: ExecuteCommands) -> Result<WmRequest, String> {
-    let wm_command = match execute {
-        ExecuteCommands::BindingMode { mode } => CliCommand::Reactor(reactor::Command::Reactor(
-            reactor::ReactorCommand::BindingMode(mode),
-        )),
+    let command = match execute {
+        ExecuteCommands::BindingMode { mode } => {
+            WmCommand::Reactor(ReactorCommand::BindingMode(mode))
+        }
         ExecuteCommands::Window { window_cmd } => map_window_command(window_cmd)?,
-        ExecuteCommands::Workspace { workspace_cmd } => map_workspace_command(workspace_cmd)?,
-        ExecuteCommands::Layout { layout_cmd } => map_layout_command(layout_cmd)?,
-        ExecuteCommands::Config { config_cmd } => map_config_command(config_cmd)?,
+        ExecuteCommands::Workspace { workspace_cmd } => {
+            WmCommand::Layout(map_workspace_command(workspace_cmd))
+        }
+        ExecuteCommands::Layout { layout_cmd } => {
+            WmCommand::Layout(map_layout_command(layout_cmd)?)
+        }
+        ExecuteCommands::Config { config_cmd } => match map_config_command(config_cmd)? {
+            ConfigCommand::GetConfig => return Ok(WmRequest::GetConfig),
+            command => WmCommand::Config(command),
+        },
         ExecuteCommands::MissionControl { mission_cmd } => {
-            map_mission_control_command(mission_cmd)?
+            WmCommand::Reactor(map_mission_control_command(mission_cmd))
         }
-        ExecuteCommands::Display { display_cmd } => map_display_command(display_cmd)?,
-        ExecuteCommands::Space { space_cmd } => map_space_command(space_cmd)?,
-        ExecuteCommands::SaveAndExit => {
-            CliCommand::Reactor(reactor::Command::Reactor(reactor::ReactorCommand::SaveAndExit))
+        ExecuteCommands::Display { display_cmd } => {
+            WmCommand::Reactor(map_display_command(display_cmd)?)
         }
-        ExecuteCommands::SaveLayout { file } => {
-            let path = if file.master {
-                crate::common::config::restore_file()
-            } else {
-                absolute_layout_path(file.path.expect("clap requires either PATH or --master"))?
-            };
-            CliCommand::Reactor(reactor::Command::Reactor(reactor::ReactorCommand::SaveLayout {
-                path,
-            }))
-        }
+        ExecuteCommands::Space { space_cmd } => WmCommand::Reactor(map_space_command(space_cmd)?),
+        ExecuteCommands::SaveAndExit => WmCommand::Reactor(ReactorCommand::SaveAndExit),
+        ExecuteCommands::SaveLayout { file } => WmCommand::Reactor(ReactorCommand::SaveLayout {
+            path: wire_path(file.into_path()?)?,
+        }),
         ExecuteCommands::LoadLayout { file, scope } => {
-            let (path, source) = if file.master {
-                (
-                    crate::common::config::restore_file(),
-                    layout::RestoreSource::CurrentSpace,
-                )
+            let source = if file.master {
+                RestoreSource::CurrentSpace
             } else {
-                (
-                    absolute_layout_path(
-                        file.path.expect("clap requires either PATH or --master"),
-                    )?,
-                    layout::RestoreSource::SavedActiveSpace,
-                )
+                RestoreSource::SavedActiveSpace
             };
-            layout::LayoutEngine::validate_file(path.clone()).map_err(|error| {
+            let path = file.into_path()?;
+            LayoutEngine::validate_file(path.clone()).map_err(|error| {
                 format!("could not load layout file at {}: {error}", path.display())
             })?;
             let scope = match scope {
-                CliRestoreScope::Workspace => layout::RestoreScope::Workspace,
-                CliRestoreScope::Space => layout::RestoreScope::Space,
-                CliRestoreScope::Displays => layout::RestoreScope::Displays,
+                CliRestoreScope::Workspace => RestoreScope::Workspace,
+                CliRestoreScope::Space => RestoreScope::Space,
+                CliRestoreScope::Displays => RestoreScope::Displays,
             };
-            CliCommand::Reactor(reactor::Command::Reactor(
-                reactor::ReactorCommand::RestoreLayout { path, scope, source },
-            ))
+            WmCommand::Reactor(ReactorCommand::RestoreLayout {
+                path: wire_path(path)?,
+                scope,
+                source,
+            })
         }
-        ExecuteCommands::Debug => {
-            CliCommand::Reactor(reactor::Command::Reactor(reactor::ReactorCommand::Debug))
-        }
-        ExecuteCommands::Serialize => {
-            CliCommand::Reactor(reactor::Command::Reactor(reactor::ReactorCommand::Serialize))
-        }
+        ExecuteCommands::Debug => WmCommand::Reactor(ReactorCommand::Debug),
+        ExecuteCommands::Serialize => WmCommand::Reactor(ReactorCommand::Serialize),
         #[allow(deprecated)]
         ExecuteCommands::ToggleSpaceActivated => {
             eprintln!("this command is deprecated, use wm execute space toggle-activated");
-            CliCommand::Reactor(reactor::Command::Reactor(
-                reactor::ReactorCommand::ToggleSpaceActivated,
-            ))
+            WmCommand::Reactor(ReactorCommand::ToggleSpaceActivated)
         }
-        ExecuteCommands::ShowTiming => CliCommand::Reactor(reactor::Command::Metrics(
-            crate::common::log::MetricsCommand::ShowTiming,
-        )),
+        ExecuteCommands::ShowTiming => WmCommand::Metrics(MetricsCommand::ShowTiming),
     };
-
-    if let CliCommand::Config(crate::common::config::ConfigCommand::GetConfig) = &wm_command {
-        return Ok(WmRequest::GetConfig);
-    }
-
-    let command = into_protocol_command(wm_command)?;
     Ok(WmRequest::ExecuteCommand { command })
 }
 
-fn into_protocol_command(command: CliCommand) -> Result<wm_protocol::WmCommand, String> {
-    match command {
-        CliCommand::Config(command) => {
-            Ok(wm_protocol::WmCommand::Config(decode_protocol(command)?))
+impl LayoutFileSelection {
+    fn into_path(self) -> Result<PathBuf, String> {
+        if self.master {
+            return Ok(restore_file());
         }
-        CliCommand::Reactor(reactor::Command::Layout(command)) => {
-            Ok(wm_protocol::WmCommand::Layout(decode_protocol(command)?))
-        }
-        CliCommand::Reactor(reactor::Command::Metrics(command)) => {
-            Ok(wm_protocol::WmCommand::Metrics(decode_protocol(command)?))
-        }
-        CliCommand::Reactor(reactor::Command::Reactor(command)) => {
-            Ok(wm_protocol::WmCommand::Reactor(decode_protocol(command)?))
+        let path = self.path.expect("clap requires either PATH or --master");
+        if path.is_absolute() {
+            Ok(path)
+        } else {
+            std::env::current_dir()
+                .map(|current_dir| current_dir.join(path))
+                .map_err(|error| format!("could not resolve layout path: {error}"))
         }
     }
 }
 
-fn decode_protocol<T, U>(value: T) -> Result<U, String>
-where
-    T: Serialize,
-    U: DeserializeOwned, {
-    serde_json::from_value(serde_json::to_value(value).map_err(|error| error.to_string())?)
-        .map_err(|error| error.to_string())
-}
-
-fn absolute_layout_path(path: PathBuf) -> Result<PathBuf, String> {
-    if path.is_absolute() {
-        Ok(path)
-    } else {
-        std::env::current_dir()
-            .map(|current_dir| current_dir.join(path))
-            .map_err(|error| format!("could not resolve layout path: {error}"))
+fn wire_path(path: PathBuf) -> Result<PathBuf, String> {
+    if path.to_str().is_none() {
+        return Err("path contains invalid UTF-8 characters".into());
     }
+    Ok(path)
 }
 
-fn map_window_command(cmd: WindowCommands) -> Result<CliCommand, String> {
-    use layout::LayoutCommand as LC;
-    match cmd {
-        WindowCommands::Next => Ok(CliCommand::Reactor(reactor::Command::Layout(LC::NextWindow))),
-        WindowCommands::Prev => Ok(CliCommand::Reactor(reactor::Command::Layout(LC::PrevWindow))),
+fn finite_number(value: f64) -> Result<f64, String> {
+    if !value.is_finite() {
+        return Err("invalid type: null, expected f64".into());
+    }
+    Ok(value)
+}
+
+fn map_window_command(cmd: WindowCommands) -> Result<WmCommand, String> {
+    Ok(match cmd {
+        WindowCommands::Next => WmCommand::Layout(LayoutCommand::NextWindow),
+        WindowCommands::Prev => WmCommand::Layout(LayoutCommand::PrevWindow),
         WindowCommands::Focus {
             direction,
             window_id,
             window_server_id,
         } => match (direction, window_id) {
-            (Some(direction), None) => Ok(CliCommand::Reactor(reactor::Command::Layout(
-                LC::MoveFocus(parse_focus_direction(&direction)?),
-            ))),
-            (None, Some(window_id)) => Ok(CliCommand::Reactor(reactor::Command::Reactor(
-                reactor::ReactorCommand::FocusWindow {
-                    window_id: parse_window_id(&window_id)?.into(),
-                    window_server_id: window_server_id
-                        .as_deref()
-                        .map(parse_window_server_id)
-                        .map(|result| result.map(|id| id.as_u32()))
-                        .transpose()?,
-                },
-            ))),
-            (None, None) => Err("window focus requires a direction or --window-id".to_string()),
+            (Some(direction), None) => {
+                WmCommand::Layout(LayoutCommand::MoveFocus(parse_focus_direction(&direction)?))
+            }
+            (None, Some(window_id)) => WmCommand::Reactor(ReactorCommand::FocusWindow {
+                window_id: parse_window_id(&window_id)?,
+                window_server_id: window_server_id
+                    .as_deref()
+                    .map(parse_window_server_id)
+                    .transpose()?,
+            }),
+            (None, None) => {
+                return Err("window focus requires a direction or --window-id".to_string());
+            }
             (Some(_), Some(_)) => {
-                Err("window focus accepts either a direction or --window-id, not both".to_string())
+                return Err(
+                    "window focus accepts either a direction or --window-id, not both".to_string(),
+                );
             }
         },
-        WindowCommands::ToggleFullscreen => Ok(CliCommand::Reactor(reactor::Command::Layout(
-            LC::ToggleFullscreen,
-        ))),
-        WindowCommands::ToggleFullscreenWithinGaps => Ok(CliCommand::Reactor(
-            reactor::Command::Layout(LC::ToggleFullscreenWithinGaps),
-        )),
-        WindowCommands::ResizeGrow { orientation } => Ok(CliCommand::Reactor(
-            reactor::Command::Layout(LC::ResizeWindowGrow(orientation.into())),
-        )),
-        WindowCommands::ResizeShrink { orientation } => Ok(CliCommand::Reactor(
-            reactor::Command::Layout(LC::ResizeWindowShrink(orientation.into())),
-        )),
-        WindowCommands::ResizeBy { amount } => Ok(CliCommand::Reactor(reactor::Command::Layout(
-            LC::ResizeWindowBy { amount },
-        ))),
-        WindowCommands::Close { window_id } => {
-            let window_server_id = window_id.as_deref().map(parse_window_server_id).transpose()?;
-            Ok(CliCommand::Reactor(reactor::Command::Reactor(
-                reactor::ReactorCommand::CloseWindow {
-                    window_server_id: window_server_id.map(|id| id.as_u32()),
-                },
-            )))
+        WindowCommands::ToggleFullscreen => WmCommand::Layout(LayoutCommand::ToggleFullscreen),
+        WindowCommands::ToggleFullscreenWithinGaps => {
+            WmCommand::Layout(LayoutCommand::ToggleFullscreenWithinGaps)
         }
-    }
+        WindowCommands::ResizeGrow { orientation } => {
+            WmCommand::Layout(LayoutCommand::ResizeWindowGrow(orientation.into()))
+        }
+        WindowCommands::ResizeShrink { orientation } => {
+            WmCommand::Layout(LayoutCommand::ResizeWindowShrink(orientation.into()))
+        }
+        WindowCommands::ResizeBy { amount } => {
+            WmCommand::Layout(LayoutCommand::ResizeWindowBy { amount: finite_number(amount)? })
+        }
+        WindowCommands::Close { window_id } => WmCommand::Reactor(ReactorCommand::CloseWindow {
+            window_server_id: window_id.as_deref().map(parse_window_server_id).transpose()?,
+        }),
+    })
 }
 
-fn parse_window_server_id(input: &str) -> Result<WindowServerId, String> {
+fn parse_window_server_id(input: &str) -> Result<u32, String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err("window_server_id cannot be empty".to_string());
     }
 
-    let value = if trimmed.starts_with("0x") {
+    if trimmed.starts_with("0x") {
         u32::from_str_radix(trimmed.trim_start_matches("0x"), 16)
-            .map_err(|_| format!("Invalid hexadecimal window server id: {}", trimmed))?
+            .map_err(|_| format!("Invalid hexadecimal window server id: {}", trimmed))
     } else {
-        trimmed.parse().map_err(|_| format!("Invalid window server id: {}", trimmed))?
-    };
-    Ok(WindowServerId::new(value))
+        trimmed.parse().map_err(|_| format!("Invalid window server id: {}", trimmed))
+    }
 }
 
-fn parse_window_id(input: &str) -> Result<InternalWindowId, String> {
+fn parse_window_id(input: &str) -> Result<WindowId, String> {
     let input = input.trim();
-    if let Ok(window_id) = serde_json::from_str(input) {
-        return Ok(window_id);
+    if let Ok(window_id) = serde_json::from_str::<InternalWindowId>(input) {
+        return Ok(window_id.into());
     }
     if let Some(window_id) = InternalWindowId::from_debug_string(input) {
-        return Ok(window_id);
+        return Ok(window_id.into());
     }
 
     Err(format!(
         "Invalid window id '{}'; expected `{{\"pid\":123,\"idx\":456}}` or `WindowId {{ pid: 123, idx: 456 }}`",
         input
     ))
-}
-
-fn protocol_window_id(window_id: &InternalWindowId) -> Result<wm_protocol::WindowId, String> {
-    wm_protocol::WindowId::new(window_id.pid, window_id.idx.get())
-        .ok_or_else(|| "window id index must be non-zero".to_string())
 }
 
 fn parse_event_kind(input: &str) -> Result<EventKind, String> {
@@ -951,82 +910,54 @@ fn parse_event_kind(input: &str) -> Result<EventKind, String> {
     }
 }
 
-fn map_workspace_command(cmd: WorkspaceCommands) -> Result<CliCommand, String> {
-    use layout::LayoutCommand as LC;
+fn map_workspace_command(cmd: WorkspaceCommands) -> LayoutCommand {
     match cmd {
-        WorkspaceCommands::Next { skip_empty } => Ok(CliCommand::Reactor(
-            reactor::Command::Layout(LC::NextWorkspace(skip_empty)),
-        )),
-        WorkspaceCommands::Prev { skip_empty } => Ok(CliCommand::Reactor(
-            reactor::Command::Layout(LC::PrevWorkspace(skip_empty)),
-        )),
-        WorkspaceCommands::Switch { workspace_id } => Ok(CliCommand::Reactor(
-            reactor::Command::Layout(LC::SwitchToWorkspace(workspace_id)),
-        )),
+        WorkspaceCommands::Next { skip_empty } => LayoutCommand::NextWorkspace(skip_empty),
+        WorkspaceCommands::Prev { skip_empty } => LayoutCommand::PrevWorkspace(skip_empty),
+        WorkspaceCommands::Switch { workspace_id } => {
+            LayoutCommand::SwitchToWorkspace(workspace_id)
+        }
         WorkspaceCommands::MoveWindow {
             workspace_id,
             follow,
             window_id,
-        } => Ok(CliCommand::Reactor(reactor::Command::Layout(
-            LC::MoveWindowToWorkspace {
-                workspace: WorkspaceSelector::Index(workspace_id),
-                follow,
-                window_id,
-            },
-        ))),
-        WorkspaceCommands::Create => Ok(CliCommand::Reactor(reactor::Command::Layout(
-            LC::CreateWorkspace,
-        ))),
-        WorkspaceCommands::Last => Ok(CliCommand::Reactor(reactor::Command::Layout(
-            LC::SwitchToLastWorkspace,
-        ))),
+        } => LayoutCommand::MoveWindowToWorkspace {
+            workspace: WorkspaceSelector::Index(workspace_id),
+            follow,
+            window_id,
+        },
+        WorkspaceCommands::Create => LayoutCommand::CreateWorkspace,
+        WorkspaceCommands::Last => LayoutCommand::SwitchToLastWorkspace,
     }
 }
 
-fn map_layout_command(cmd: LayoutCommands) -> Result<CliCommand, String> {
-    use layout::LayoutCommand as LC;
-    match cmd {
-        LayoutCommands::Ascend => Ok(CliCommand::Reactor(reactor::Command::Layout(LC::Ascend))),
-        LayoutCommands::Descend => Ok(CliCommand::Reactor(reactor::Command::Layout(LC::Descend))),
-        LayoutCommands::MoveNode { direction } => Ok(CliCommand::Reactor(
-            reactor::Command::Layout(LC::MoveNode(direction.into())),
-        )),
-        LayoutCommands::JoinWindow { direction } => Ok(CliCommand::Reactor(
-            reactor::Command::Layout(LC::JoinWindow(direction.into())),
-        )),
-        LayoutCommands::ConsumeOrExpelWindow { direction } => Ok(CliCommand::Reactor(
-            reactor::Command::Layout(LC::ConsumeOrExpelWindow(direction.into())),
-        )),
-        LayoutCommands::ToggleStack => {
-            Ok(CliCommand::Reactor(reactor::Command::Layout(LC::ToggleStack)))
+fn map_layout_command(cmd: LayoutCommands) -> Result<LayoutCommand, String> {
+    Ok(match cmd {
+        LayoutCommands::Ascend => LayoutCommand::Ascend,
+        LayoutCommands::Descend => LayoutCommand::Descend,
+        LayoutCommands::MoveNode { direction } => LayoutCommand::MoveNode(direction.into()),
+        LayoutCommands::JoinWindow { direction } => LayoutCommand::JoinWindow(direction.into()),
+        LayoutCommands::ConsumeOrExpelWindow { direction } => {
+            LayoutCommand::ConsumeOrExpelWindow(direction.into())
         }
-        LayoutCommands::Unjoin => {
-            Ok(CliCommand::Reactor(reactor::Command::Layout(LC::UnjoinWindows)))
+        LayoutCommands::ToggleStack => LayoutCommand::ToggleStack,
+        LayoutCommands::Unjoin => LayoutCommand::UnjoinWindows,
+        LayoutCommands::SwapWindows { a, b } => {
+            LayoutCommand::SwapWindows(parse_window_id(&a)?, parse_window_id(&b)?)
         }
-        LayoutCommands::SwapWindows { a, b } => Ok(CliCommand::Reactor(reactor::Command::Layout(
-            LC::SwapWindows(parse_window_id(&a)?.into(), parse_window_id(&b)?.into()),
-        ))),
         LayoutCommands::ScrollStrip { delta } => {
-            Ok(CliCommand::Reactor(reactor::Command::Layout(LC::ScrollStrip {
-                delta,
-            })))
+            LayoutCommand::ScrollStrip { delta: finite_number(delta)? }
         }
-        LayoutCommands::SnapStrip => {
-            Ok(CliCommand::Reactor(reactor::Command::Layout(LC::SnapStrip)))
+        LayoutCommands::SnapStrip => LayoutCommand::SnapStrip,
+        LayoutCommands::SwitchPresetColumnWidth { backwards } => {
+            LayoutCommand::SwitchPresetColumnWidth { backwards }
         }
-        LayoutCommands::SwitchPresetColumnWidth { backwards } => Ok(CliCommand::Reactor(
-            reactor::Command::Layout(LC::SwitchPresetColumnWidth { backwards }),
-        )),
-        LayoutCommands::CenterSelection => Ok(CliCommand::Reactor(reactor::Command::Layout(
-            LC::CenterSelection,
-        ))),
-    }
+        LayoutCommands::CenterSelection => LayoutCommand::CenterSelection,
+    })
 }
 
-fn map_config_command(cmd: ConfigCommands) -> Result<CliCommand, String> {
-    use crate::common::config::{AnimationEasing, ConfigCommand};
-
-    let cfg_cmd = match cmd {
+fn map_config_command(cmd: ConfigCommands) -> Result<ConfigCommand, String> {
+    Ok(match cmd {
         ConfigCommands::SetAnimate { value } => {
             let bool_value = match value.to_lowercase().as_str() {
                 "true" | "on" => true,
@@ -1036,9 +967,11 @@ fn map_config_command(cmd: ConfigCommands) -> Result<CliCommand, String> {
             ConfigCommand::SetAnimate(bool_value)
         }
         ConfigCommands::SetAnimationDuration { value } => {
-            ConfigCommand::SetAnimationDuration(value)
+            ConfigCommand::SetAnimationDuration(finite_number(value)?)
         }
-        ConfigCommands::SetAnimationFps { value } => ConfigCommand::SetAnimationFps(value),
+        ConfigCommands::SetAnimationFps { value } => {
+            ConfigCommand::SetAnimationFps(finite_number(value)?)
+        }
         ConfigCommands::SetAnimationEasing { value } => {
             let easing = serde_json::from_value::<AnimationEasing>(Value::String(value))
                 .map_err(|error| format!("Invalid animation easing: {error}"))?;
@@ -1053,97 +986,77 @@ fn map_config_command(cmd: ConfigCommands) -> Result<CliCommand, String> {
         ConfigCommands::SetFocusFollowsMouse { value } => {
             ConfigCommand::SetFocusFollowsMouse(value)
         }
-        ConfigCommands::SetOuterGaps { top, left, bottom, right } => {
-            ConfigCommand::SetOuterGaps { top, left, bottom, right }
-        }
-        ConfigCommands::SetInnerGaps { horizontal, vertical } => {
-            ConfigCommand::SetInnerGaps { horizontal, vertical }
-        }
+        ConfigCommands::SetOuterGaps { top, left, bottom, right } => ConfigCommand::SetOuterGaps {
+            top: finite_number(top)?,
+            left: finite_number(left)?,
+            bottom: finite_number(bottom)?,
+            right: finite_number(right)?,
+        },
+        ConfigCommands::SetInnerGaps { horizontal, vertical } => ConfigCommand::SetInnerGaps {
+            horizontal: finite_number(horizontal)?,
+            vertical: finite_number(vertical)?,
+        },
         ConfigCommands::SetWorkspaceNames { names } => ConfigCommand::SetWorkspaceNames(names),
         ConfigCommands::Set { key, value } => {
-            let parsed_value: Value = match serde_json::from_str(&value) {
-                Ok(v) => v,
-                Err(_) => Value::String(value.clone()),
-            };
-            ConfigCommand::Set { key, value: parsed_value }
+            let value = serde_json::from_str(&value).unwrap_or_else(|_| Value::String(value));
+            ConfigCommand::Set { key, value }
         }
         ConfigCommands::Get => ConfigCommand::GetConfig,
         ConfigCommands::Save => ConfigCommand::SaveConfig,
         ConfigCommands::Reload => ConfigCommand::ReloadConfig,
-    };
-
-    Ok(CliCommand::Config(cfg_cmd))
+    })
 }
 
-fn map_mission_control_command(cmd: MissionControlCommands) -> Result<CliCommand, String> {
+fn map_mission_control_command(cmd: MissionControlCommands) -> ReactorCommand {
     match cmd {
-        MissionControlCommands::ShowAll => Ok(CliCommand::Reactor(reactor::Command::Reactor(
-            reactor::ReactorCommand::ShowMissionControlAll,
-        ))),
-        MissionControlCommands::ShowCurrent => Ok(CliCommand::Reactor(reactor::Command::Reactor(
-            reactor::ReactorCommand::ShowMissionControlCurrent,
-        ))),
-        MissionControlCommands::Dismiss => Ok(CliCommand::Reactor(reactor::Command::Reactor(
-            reactor::ReactorCommand::DismissMissionControl,
-        ))),
+        MissionControlCommands::ShowAll => ReactorCommand::ShowMissionControlAll,
+        MissionControlCommands::ShowCurrent => ReactorCommand::ShowMissionControlCurrent,
+        MissionControlCommands::Dismiss => ReactorCommand::DismissMissionControl,
     }
 }
 
-fn map_space_command(cmd: SpaceCommands) -> Result<CliCommand, String> {
-    let command = match cmd {
-        SpaceCommands::ToggleActivated => reactor::ReactorCommand::ToggleSpaceActivated,
+fn map_space_command(cmd: SpaceCommands) -> Result<ReactorCommand, String> {
+    Ok(match cmd {
+        SpaceCommands::ToggleActivated => ReactorCommand::ToggleSpaceActivated,
         SpaceCommands::Switch { direction } => {
-            reactor::ReactorCommand::SwitchSpace(parse_focus_direction(&direction)?)
+            ReactorCommand::SwitchSpace(parse_focus_direction(&direction)?)
         }
-    };
-
-    Ok(CliCommand::Reactor(reactor::Command::Reactor(command)))
+    })
 }
 
-fn map_display_command(cmd: DisplayCommands) -> Result<CliCommand, String> {
-    match cmd {
+fn map_display_command(cmd: DisplayCommands) -> Result<ReactorCommand, String> {
+    Ok(match cmd {
         DisplayCommands::Focus { display } => {
-            let selector = display.into_selector()?;
-            Ok(CliCommand::Reactor(reactor::Command::Reactor(
-                reactor::ReactorCommand::FocusDisplay(selector),
-            )))
+            ReactorCommand::FocusDisplay(display.into_selector()?)
         }
         DisplayCommands::MoveMouse { display } => {
-            Ok(CliCommand::Reactor(reactor::Command::Reactor(
-                reactor::ReactorCommand::MoveMouseToDisplay(display.into_selector()?),
-            )))
+            ReactorCommand::MoveMouseToDisplay(display.into_selector()?)
         }
         DisplayCommands::MoveMouseToIndex { index } => {
-            Ok(CliCommand::Reactor(reactor::Command::Reactor(
-                reactor::ReactorCommand::MoveMouseToDisplay(DisplaySelector::Index(index)),
-            )))
+            ReactorCommand::MoveMouseToDisplay(DisplaySelector::Index(index))
         }
         DisplayCommands::MoveMouseToUuid { uuid } => {
-            Ok(CliCommand::Reactor(reactor::Command::Reactor(
-                reactor::ReactorCommand::MoveMouseToDisplay(DisplaySelector::Uuid(uuid)),
-            )))
+            ReactorCommand::MoveMouseToDisplay(DisplaySelector::Uuid(uuid))
         }
-        DisplayCommands::MoveWindow { display, window_id } => Ok(CliCommand::Reactor(
-            reactor::Command::Reactor(reactor::ReactorCommand::MoveWindowToDisplay {
-                selector: display.into_selector()?,
-                window_id,
-            }),
-        )),
-        DisplayCommands::MoveWorkspace { display, wrap_around } => Ok(CliCommand::Reactor(
-            reactor::Command::Reactor(reactor::ReactorCommand::MoveWorkspaceToDisplay {
+        DisplayCommands::MoveWindow { display, window_id } => ReactorCommand::MoveWindowToDisplay {
+            selector: display.into_selector()?,
+            window_id,
+        },
+        DisplayCommands::MoveWorkspace { display, wrap_around } => {
+            ReactorCommand::MoveWorkspaceToDisplay {
                 selector: display.into_selector()?,
                 wrap_around,
-            }),
-        )),
-    }
+            }
+        }
+    })
 }
 
-fn parse_focus_direction(value: &str) -> Result<layout::Direction, String> {
+fn parse_focus_direction(value: &str) -> Result<Direction, String> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "left" => Ok(layout::Direction::Left),
-        "right" => Ok(layout::Direction::Right),
-        "up" => Ok(layout::Direction::Up),
-        "down" => Ok(layout::Direction::Down),
+        "left" => Ok(Direction::Left),
+        "right" => Ok(Direction::Right),
+        "up" => Ok(Direction::Up),
+        "down" => Ok(Direction::Down),
         other => Err(format!(
             "Invalid focus direction '{}'; must be left, right, up, or down",
             other
@@ -1309,6 +1222,15 @@ mod tests {
                 "execute_command": { "command": { "layout": "next_window" } }
             })
         );
+    }
+
+    #[test]
+    fn execute_config_get_sends_a_query() {
+        let request = build_execute_request(ExecuteCommands::Config {
+            config_cmd: ConfigCommands::Get,
+        })
+        .unwrap();
+        assert_eq!(request, WmRequest::GetConfig);
     }
 
     #[test]

@@ -73,6 +73,29 @@ def check_config_command_help(binary, environment):
     print("PASS: config help shows usable syntax and easing errors list accepted values")
 
 
+def check_execute_wire_errors(binary, environment):
+    for arguments in [
+        ["window", "resize-by", "--amount=NaN"],
+        ["layout", "scroll-strip", "inf"],
+        ["config", "set-animation-duration", "inf"],
+        ["config", "set-animation-fps", "1e999"],
+        ["config", "set-inner-gaps", "0", "NaN"],
+        ["config", "set-outer-gaps", "0", "0", "NaN", "0"],
+    ]:
+        result = run(binary, ["execute", *arguments], environment)
+        assert result.returncode == 1, result
+        assert result.stderr.strip() == "Error: invalid type: null, expected f64", result
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = os.fsencode(directory) + b"/layout-\xff.ron"
+        save = run(binary, ["execute", "save-layout", path], environment)
+        assert save.returncode == 1, save
+        assert save.stderr.strip() == "Error: path contains invalid UTF-8 characters", save
+        load = run(binary, ["execute", "load-layout", path], environment)
+        assert load.returncode == 1 and "could not load layout file" in load.stderr, load
+    print("PASS: execute reports invalid numbers and layout paths before contacting the daemon")
+
+
 def check_client_help(binary, baseline, environment):
     pending = [(name,) for name in ("query", "execute", "subscribe")]
     checked = 0
@@ -128,6 +151,7 @@ def main():
     assert "rift" not in help_text.lower(), help_text
     check_config_file(binary, environment)
     check_config_command_help(binary, environment)
+    check_execute_wire_errors(binary, environment)
     for command in ["query", "execute", "subscribe", "service", "close-window", "config"]:
         assert re.search(r"^  " + command + r"\s", help_text, re.M), help_text
         command_help(binary, [command], environment)
