@@ -934,6 +934,33 @@ mod tests {
     }
 
     #[test]
+    fn subscription_keeps_events_received_before_acknowledgement_in_order() {
+        let (_service, server) = serve(1, |id, reply, request| {
+            assert!(matches!(request, WmRequest::Subscribe {
+                event: EventKind::ConfigChanged
+            }));
+            let event = |revision| {
+                let payload = format!("{{\"type\":\"config_changed\",\"revision\":{revision}}}\0");
+                deliver(reply, 0, payload.as_bytes());
+            };
+            event(1);
+            event(2);
+            deliver(reply, id, OK);
+            // Keep receives bounded even if the client drops both early events.
+            for revision in 3..=5 {
+                event(revision);
+            }
+        });
+        let subscription = WmMachClient.subscribe(EventKind::ConfigChanged).unwrap();
+        server.join().unwrap();
+        for revision in 1..=3 {
+            assert_eq!(subscription.recv_event().unwrap(), WmEvent::ConfigChanged {
+                revision
+            });
+        }
+    }
+
+    #[test]
     fn session_request_ids_never_collide_with_notification_ids() {
         let mut session = WmMachClient.window_management_session().unwrap();
         for sequence in [
