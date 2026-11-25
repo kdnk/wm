@@ -3,6 +3,8 @@ use std::collections::VecDeque;
 
 use super::*;
 
+fn fixture_agent() -> LaunchAgent { LaunchAgent::new("fixture.plist".into(), "gui/501".into()) }
+
 struct FixtureControl {
     pid: Option<u32>,
     checkpoint_busy: usize,
@@ -32,7 +34,8 @@ impl Default for FixtureControl {
 }
 
 impl ServiceControl for FixtureControl {
-    fn running_pid(&mut self) -> io::Result<Option<u32>> {
+    fn running_pid(&mut self, target: &str) -> io::Result<Option<u32>> {
+        assert_eq!(target, "gui/501/git.kdnk.wm");
         self.calls.push("state".into());
         if self.state_error {
             Err(io::Error::other("state query failed"))
@@ -86,14 +89,14 @@ fn start_waits_for_registration_before_kickstart() {
         launchctl_exits: [missing, 0, 0, missing, 0, 0].into(),
         ..Default::default()
     };
-    start_service(&mut control, "fixture", "domain", "fixture.plist", false).unwrap();
+    fixture_agent().start(&mut control, false).unwrap();
     assert_eq!(control.calls, [
-        "print fixture",
-        "enable fixture",
-        "bootstrap domain fixture.plist",
-        "print fixture",
-        "print fixture",
-        "kickstart fixture"
+        "print gui/501/git.kdnk.wm",
+        "enable gui/501/git.kdnk.wm",
+        "bootstrap gui/501 fixture.plist",
+        "print gui/501/git.kdnk.wm",
+        "print gui/501/git.kdnk.wm",
+        "kickstart gui/501/git.kdnk.wm"
     ]);
 }
 
@@ -103,13 +106,12 @@ fn start_reports_bootstrap_failure_without_attempting_kickstart() {
         launchctl_exits: [LAUNCHCTL_SERVICE_NOT_FOUND, 0, 5].into(),
         ..Default::default()
     };
-    let error =
-        start_service(&mut control, "fixture", "domain", "fixture.plist", false).unwrap_err();
+    let error = fixture_agent().start(&mut control, false).unwrap_err();
     assert!(error.to_string().contains("bootstrap failed (exit 5)"));
     assert_eq!(control.calls, [
-        "print fixture",
-        "enable fixture",
-        "bootstrap domain fixture.plist"
+        "print gui/501/git.kdnk.wm",
+        "enable gui/501/git.kdnk.wm",
+        "bootstrap gui/501 fixture.plist"
     ]);
 }
 
@@ -120,19 +122,19 @@ fn start_waits_for_old_job_to_disappear_before_replacing_it() {
         launchctl_exits: [0, 5, 0, 0, missing, 0, missing, 0, 0].into(),
         ..Default::default()
     };
-    start_service(&mut control, "fixture", "domain", "fixture.plist", true).unwrap();
+    fixture_agent().start(&mut control, true).unwrap();
     assert_eq!(control.calls, [
-        "print fixture",
-        "kickstart fixture",
+        "print gui/501/git.kdnk.wm",
+        "kickstart gui/501/git.kdnk.wm",
         "state",
         "checkpoint",
-        "bootout domain fixture.plist",
-        "print fixture",
-        "print fixture",
-        "bootstrap domain fixture.plist",
-        "print fixture",
-        "print fixture",
-        "kickstart fixture"
+        "bootout gui/501 fixture.plist",
+        "print gui/501/git.kdnk.wm",
+        "print gui/501/git.kdnk.wm",
+        "bootstrap gui/501 fixture.plist",
+        "print gui/501/git.kdnk.wm",
+        "print gui/501/git.kdnk.wm",
+        "kickstart gui/501/git.kdnk.wm"
     ]);
 }
 
@@ -143,15 +145,14 @@ fn start_keeps_old_job_registered_if_checkpoint_fails() {
         launchctl_exits: [0, 5].into(),
         ..Default::default()
     };
-    let error =
-        start_service(&mut control, "fixture", "domain", "fixture.plist", true).unwrap_err();
+    let error = fixture_agent().start(&mut control, true).unwrap_err();
     assert_eq!(
         error.to_string(),
         "could not save layout; wm is still running: snapshot failed"
     );
     assert_eq!(control.calls, [
-        "print fixture",
-        "kickstart fixture",
+        "print gui/501/git.kdnk.wm",
+        "kickstart gui/501/git.kdnk.wm",
         "state",
         "checkpoint"
     ]);
@@ -221,8 +222,12 @@ fn checkpoint_failures_preserve_the_message_and_only_retry_explicit_temporary_er
 #[test]
 fn restart_saves_before_terminating_the_running_service() {
     let mut control = FixtureControl::default();
-    restart_service(&mut control, "fixture").unwrap();
-    assert_eq!(control.calls, ["state", "checkpoint", "kickstart -k fixture"]);
+    fixture_agent().restart(&mut control).unwrap();
+    assert_eq!(control.calls, [
+        "state",
+        "checkpoint",
+        "kickstart -k gui/501/git.kdnk.wm"
+    ]);
 }
 
 #[test]
@@ -232,13 +237,13 @@ fn restart_retries_a_temporary_checkpoint_failure_before_terminating() {
         pid_after_busy: Some(43),
         ..Default::default()
     };
-    restart_service(&mut control, "fixture").unwrap();
+    fixture_agent().restart(&mut control).unwrap();
     assert_eq!(control.calls, [
         "state",
         "checkpoint",
         "state",
         "checkpoint",
-        "kickstart -k fixture"
+        "kickstart -k gui/501/git.kdnk.wm"
     ]);
 }
 
@@ -248,7 +253,9 @@ fn checkpoint_deadline_expires_if_the_layout_stays_unready() {
         checkpoint_busy: usize::MAX,
         ..Default::default()
     };
-    let error = checkpoint_running_service(&mut control, Duration::from_millis(10)).unwrap_err();
+    let error =
+        checkpoint_running_service(&mut control, "gui/501/git.kdnk.wm", Duration::from_millis(10))
+            .unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     assert!(error.to_string().contains("layout is still waiting for displays"));
     assert!(error.to_string().contains("wm is still running"));
@@ -260,20 +267,20 @@ fn stopped_service_can_restart_without_a_live_daemon() {
         pid: None,
         ..Default::default()
     };
-    restart_service(&mut control, "fixture").unwrap();
+    fixture_agent().restart(&mut control).unwrap();
     assert_eq!(control.calls, ["state", "start"]);
 }
 
 #[test]
 fn stop_saves_before_bootout_and_disable() {
     let mut control = FixtureControl::default();
-    stop_service(&mut control, "fixture", "domain", Path::new("fixture.plist")).unwrap();
+    fixture_agent().stop(&mut control).unwrap();
     assert_eq!(control.calls, [
         "state",
         "checkpoint",
-        "print fixture",
-        "bootout domain fixture.plist",
-        "disable fixture",
+        "print gui/501/git.kdnk.wm",
+        "bootout gui/501 fixture.plist",
+        "disable gui/501/git.kdnk.wm",
     ]);
 }
 
@@ -283,12 +290,12 @@ fn stop_saves_before_signaling_an_unloaded_running_service() {
         bootstrapped: false,
         ..Default::default()
     };
-    stop_service(&mut control, "fixture", "domain", Path::new("fixture.plist")).unwrap();
+    fixture_agent().stop(&mut control).unwrap();
     assert_eq!(control.calls, [
         "state",
         "checkpoint",
-        "print fixture",
-        "kill SIGTERM fixture"
+        "print gui/501/git.kdnk.wm",
+        "kill SIGTERM gui/501/git.kdnk.wm"
     ]);
 }
 
@@ -298,15 +305,14 @@ fn stop_disables_the_job_even_if_bootout_exits_unsuccessfully() {
         launchctl_exits: [0, 5, 6].into(),
         ..Default::default()
     };
-    let error =
-        stop_service(&mut control, "fixture", "domain", Path::new("fixture.plist")).unwrap_err();
+    let error = fixture_agent().stop(&mut control).unwrap_err();
     assert_eq!(error.to_string(), "bootout exit 5, disable exit 6");
     assert_eq!(control.calls, [
         "state",
         "checkpoint",
-        "print fixture",
-        "bootout domain fixture.plist",
-        "disable fixture",
+        "print gui/501/git.kdnk.wm",
+        "bootout gui/501 fixture.plist",
+        "disable gui/501/git.kdnk.wm",
     ]);
 }
 
@@ -320,9 +326,9 @@ fn save_or_state_failure_never_stops_or_restarts_the_daemon() {
                 ..Default::default()
             };
             let result = if restart {
-                restart_service(&mut control, "fixture")
+                fixture_agent().restart(&mut control)
             } else {
-                stop_service(&mut control, "fixture", "domain", Path::new("fixture.plist"))
+                fixture_agent().stop(&mut control)
             };
             assert!(result.is_err());
             let expected: &[&str] = if state_error {
@@ -343,9 +349,9 @@ fn legacy_command_success_never_stops_or_restarts_the_daemon() {
             ..Default::default()
         };
         let result = if restart {
-            restart_service(&mut control, "fixture")
+            fixture_agent().restart(&mut control)
         } else {
-            stop_service(&mut control, "fixture", "domain", Path::new("fixture.plist"))
+            fixture_agent().stop(&mut control)
         };
         assert!(result.is_err());
         assert_eq!(control.calls, ["state", "checkpoint"]);

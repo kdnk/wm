@@ -1,13 +1,11 @@
 // Modified by kdnk for wm on 2026-11-14. Original attribution is preserved in LICENSE.
 // ported from https://github.com/koekeishiya/yabai/blob/master/src/misc/service.h
 
-use std::env;
-use std::fs::{self, File};
-use std::io::{self, Write};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+use std::{env, fs, io};
 
 use clap::Subcommand;
 use nix::unistd::getuid;
@@ -22,7 +20,7 @@ const CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(10);
 const CHECKPOINT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 
 trait ServiceControl {
-    fn running_pid(&mut self) -> io::Result<Option<u32>>;
+    fn running_pid(&mut self, target: &str) -> io::Result<Option<u32>>;
     fn checkpoint(&mut self, pid: u32, timeout: Duration) -> io::Result<()>;
     fn start(&mut self) -> io::Result<()>;
     fn launchctl(&mut self, args: &[&str], suppress_output: bool) -> io::Result<i32>;
@@ -38,7 +36,7 @@ enum ListedService {
 }
 
 impl ServiceControl for NativeServiceControl {
-    fn running_pid(&mut self) -> io::Result<Option<u32>> {
+    fn running_pid(&mut self, target: &str) -> io::Result<Option<u32>> {
         let output = Command::new(LAUNCHCTL_PATH).arg("list").output()?;
         if !output.status.success() {
             return Err(io::Error::other("could not query the running wm service"));
@@ -49,8 +47,7 @@ impl ServiceControl for NativeServiceControl {
             ListedService::Running(pid) => Ok(Some(pid)),
             ListedService::Stopped => Ok(None),
             ListedService::Missing => {
-                let target = format!("gui/{}/{}", getuid(), WM_PLIST);
-                if run_launchctl(&["print", &target], true)? == 0 {
+                if run_launchctl(&["print", target], true)? == 0 {
                     Err(io::Error::other(
                         "cannot determine whether the loaded wm service is running",
                     ))
@@ -129,18 +126,25 @@ fn listed_service(jobs: &str) -> io::Result<ListedService> {
     Ok(ListedService::Missing)
 }
 
+#[derive(Debug)]
+enum CheckpointOutcome {
+    NotRunning,
+    Saved,
+}
+
 fn checkpoint_running_service(
     control: &mut impl ServiceControl,
+    target: &str,
     timeout: Duration,
-) -> io::Result<bool> {
-    let Some(mut pid) = control.running_pid()? else {
-        return Ok(false);
+) -> io::Result<CheckpointOutcome> {
+    let Some(mut pid) = control.running_pid(target)? else {
+        return Ok(CheckpointOutcome::NotRunning);
     };
     let deadline = Instant::now() + timeout;
     let mut remaining = timeout;
     loop {
         let error = match control.checkpoint(pid, remaining) {
-            Ok(()) => return Ok(true),
+            Ok(()) => return Ok(CheckpointOutcome::Saved),
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => error,
             Err(error) => {
                 return Err(io::Error::other(format!(
@@ -151,8 +155,8 @@ fn checkpoint_running_service(
         let delay =
             CHECKPOINT_RETRY_INTERVAL.min(deadline.saturating_duration_since(Instant::now()));
         std::thread::sleep(delay);
-        let Some(current_pid) = control.running_pid()? else {
-            return Ok(false);
+        let Some(current_pid) = control.running_pid(target)? else {
+            return Ok(CheckpointOutcome::NotRunning);
         };
         remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -277,24 +281,12 @@ fn plist_contents() -> io::Result<String> {
 
     Ok(plist)
 }
-/*<key>MachServices</key>
-<dict>
-    <key>{name}</key>
-    <true/>
-</dict> */
 
-fn ensure_parent_dir(path: &Path) -> io::Result<()> {
+fn write_plist(path: &Path, contents: &str) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    Ok(())
-}
-
-fn write_file_atomic(path: &Path, contents: &str) -> io::Result<()> {
-    ensure_parent_dir(path)?;
-    let mut f = File::create(path)?;
-    f.write_all(contents.as_bytes())?;
-    Ok(())
+    fs::write(path, contents)
 }
 
 fn run_launchctl(args: &[&str], suppress_output: bool) -> io::Result<i32> {
@@ -316,35 +308,19 @@ fn run_launchctl(args: &[&str], suppress_output: bool) -> io::Result<i32> {
     }
 }
 
-fn service_is_running() -> io::Result<bool> {
-    let uid = getuid();
-    let service_target = format!("gui/{}/{}", uid, WM_PLIST);
-    match run_launchctl(&["print", &service_target], true) {
-        Ok(code) => Ok(code == 0),
-        Err(_) => Ok(false),
-    }
-}
-
 pub fn service_install_internal(plist_path: &Path) -> io::Result<()> {
-    let plist = plist_contents()?;
-    write_file_atomic(plist_path, &plist)?;
-    Ok(())
+    write_plist(plist_path, &plist_contents()?)
 }
 
 fn ensure_plist_up_to_date(plist_path: &Path) -> io::Result<bool> {
     let desired = plist_contents()?;
     match fs::read_to_string(plist_path) {
-        Ok(existing) if existing == desired => Ok(false),
-        Ok(_) => {
-            write_file_atomic(plist_path, &desired)?;
-            Ok(true)
-        }
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            write_file_atomic(plist_path, &desired)?;
-            Ok(true)
-        }
-        Err(err) => Err(err),
+        Ok(existing) if existing == desired => return Ok(false),
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
     }
+    write_plist(plist_path, &desired)?;
+    Ok(true)
 }
 
 pub fn service_install() -> io::Result<()> {
@@ -359,27 +335,22 @@ pub fn service_install() -> io::Result<()> {
 }
 
 pub fn service_uninstall() -> io::Result<()> {
-    let plist_path = plist_path()?;
-    if !plist_path.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("service file '{}' is not installed", plist_path.display()),
-        ));
-    }
-    if service_is_running()? {
+    let agent = LaunchAgent::current()?;
+    agent.require_installed()?;
+    if run_launchctl(&["print", &agent.target], true).is_ok_and(|code| code == 0) {
         return Err(io::Error::new(
             io::ErrorKind::Other,
             "service is still running; stop it first with `wm service stop` before uninstalling",
         ));
     }
-    fs::remove_file(plist_path)?;
-    Ok(())
+    fs::remove_file(agent.plist_path)
 }
 
 pub fn service_start() -> io::Result<()> {
-    let plist_path = plist_path()?;
+    let agent = LaunchAgent::current()?;
+    let plist_path = &agent.plist_path;
     if !plist_path.is_file() {
-        service_install_internal(&plist_path).map_err(|e| {
+        service_install_internal(plist_path).map_err(|e| {
             io::Error::new(
                 e.kind(),
                 format!(
@@ -391,56 +362,155 @@ pub fn service_start() -> io::Result<()> {
         })?;
     }
 
-    let uid = getuid();
-    let service_target = format!("gui/{}/{}", uid, WM_PLIST);
-    let domain_target = format!("gui/{}", uid);
-
     let plist_changed = if env::var_os("USER").is_some() && env::var_os("PATH").is_some() {
-        ensure_plist_up_to_date(&plist_path)?
+        ensure_plist_up_to_date(plist_path)?
     } else {
         false
     };
 
-    let plist_path = plist_path.to_str().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "non-UTF8 service plist path")
-    })?;
-    start_service(
-        &mut NativeServiceControl,
-        &service_target,
-        &domain_target,
-        plist_path,
-        plist_changed,
-    )
+    agent.start(&mut NativeServiceControl, plist_changed)
 }
 
-fn start_service(
-    control: &mut impl ServiceControl,
-    service_target: &str,
-    domain_target: &str,
-    plist_path: &str,
-    plist_changed: bool,
-) -> io::Result<()> {
-    let kickstart = ["kickstart", service_target];
-    if registration(control, service_target)? == Registration::Present {
-        let code = control.launchctl(&kickstart, false)?;
-        if code == 0 || !plist_changed {
-            return check_exit("kickstart", code);
-        }
-        checkpoint_running_service(control, CHECKPOINT_TIMEOUT)?;
-        check_exit(
-            "bootout",
-            control.launchctl(&["bootout", domain_target, plist_path], false)?,
-        )?;
-        wait_for_registration(control, service_target, Registration::Absent)?;
-    } else {
-        check_exit("enable", control.launchctl(&["enable", service_target], false)?)?;
+pub fn service_restart() -> io::Result<()> {
+    let agent = LaunchAgent::current()?;
+    agent.require_installed()?;
+    agent.restart(&mut NativeServiceControl)
+}
+
+pub fn service_stop() -> io::Result<()> {
+    let agent = LaunchAgent::current()?;
+    agent.require_installed()?;
+    agent.stop(&mut NativeServiceControl)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Registration {
+    Present,
+    Absent,
+}
+
+struct LaunchAgent {
+    domain: String,
+    target: String,
+    plist_path: PathBuf,
+}
+
+impl LaunchAgent {
+    fn current() -> io::Result<Self> { Ok(Self::new(plist_path()?, format!("gui/{}", getuid()))) }
+
+    fn new(plist_path: PathBuf, domain: String) -> Self {
+        let target = format!("{domain}/{WM_PLIST}");
+        Self { domain, target, plist_path }
     }
-    check_exit(
-        "bootstrap",
-        control.launchctl(&["bootstrap", domain_target, plist_path], false)?,
-    )?;
-    wait_for_registration(control, service_target, Registration::Present)?;
-    check_exit("kickstart", control.launchctl(&kickstart, false)?)
+
+    fn require_installed(&self) -> io::Result<()> {
+        if self.plist_path.is_file() {
+            return Ok(());
+        }
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("service file '{}' is not installed", self.plist_path.display()),
+        ))
+    }
+
+    fn start(&self, control: &mut impl ServiceControl, plist_changed: bool) -> io::Result<()> {
+        let plist_path = self.plist_path.to_str().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "non-UTF8 service plist path")
+        })?;
+        let kickstart = ["kickstart", &self.target];
+        if self.registration(control)? == Registration::Present {
+            let code = control.launchctl(&kickstart, false)?;
+            if code == 0 || !plist_changed {
+                return check_exit("kickstart", code);
+            }
+            checkpoint_running_service(control, &self.target, CHECKPOINT_TIMEOUT)?;
+            check_exit(
+                "bootout",
+                control.launchctl(&["bootout", &self.domain, plist_path], false)?,
+            )?;
+            self.wait_for_registration(control, Registration::Absent)?;
+        } else {
+            check_exit("enable", control.launchctl(&["enable", &self.target], false)?)?;
+        }
+        check_exit(
+            "bootstrap",
+            control.launchctl(&["bootstrap", &self.domain, plist_path], false)?,
+        )?;
+        self.wait_for_registration(control, Registration::Present)?;
+        check_exit("kickstart", control.launchctl(&kickstart, false)?)
+    }
+
+    fn restart(&self, control: &mut impl ServiceControl) -> io::Result<()> {
+        if let CheckpointOutcome::NotRunning =
+            checkpoint_running_service(control, &self.target, CHECKPOINT_TIMEOUT)?
+        {
+            return control.start();
+        }
+        let code = control.launchctl(&["kickstart", "-k", &self.target], false)?;
+        if code == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!("kickstart -k failed (exit {code})")))
+        }
+    }
+
+    fn stop(&self, control: &mut impl ServiceControl) -> io::Result<()> {
+        checkpoint_running_service(control, &self.target, CHECKPOINT_TIMEOUT)?;
+
+        if control.launchctl(&["print", &self.target], true)? != 0 {
+            let code = control.launchctl(&["kill", "SIGTERM", &self.target], false)?;
+            return if code == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::other(format!("kill SIGTERM failed (exit {code})")))
+            };
+        }
+
+        let plist_path = self.plist_path.to_str().unwrap();
+        let bootout = control.launchctl(&["bootout", &self.domain, plist_path], false)?;
+        let disable = control.launchctl(&["disable", &self.target], false)?;
+
+        if bootout == 0 && disable == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!(
+                "bootout exit {bootout}, disable exit {disable}"
+            )))
+        }
+    }
+
+    fn registration(&self, control: &mut impl ServiceControl) -> io::Result<Registration> {
+        match control.launchctl(&["print", &self.target], true)? {
+            0 => Ok(Registration::Present),
+            LAUNCHCTL_SERVICE_NOT_FOUND => Ok(Registration::Absent),
+            code => Err(io::Error::other(format!(
+                "launchctl print {} failed (exit {code})",
+                self.target
+            ))),
+        }
+    }
+
+    fn wait_for_registration(
+        &self,
+        control: &mut impl ServiceControl,
+        expected: Registration,
+    ) -> io::Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while self.registration(control)? != expected {
+            if Instant::now() >= deadline {
+                let operation = match expected {
+                    Registration::Present => "register",
+                    Registration::Absent => "remove",
+                };
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("timed out waiting for launchd to {operation} {}", self.target),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Ok(())
+    }
 }
 
 fn check_exit(command: &str, code: i32) -> io::Result<()> {
@@ -450,130 +520,6 @@ fn check_exit(command: &str, code: i32) -> io::Result<()> {
         Err(io::Error::other(format!(
             "launchctl {command} failed (exit {code})"
         )))
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Registration {
-    Present,
-    Absent,
-}
-
-fn registration(control: &mut impl ServiceControl, target: &str) -> io::Result<Registration> {
-    match control.launchctl(&["print", target], true)? {
-        0 => Ok(Registration::Present),
-        LAUNCHCTL_SERVICE_NOT_FOUND => Ok(Registration::Absent),
-        code => Err(io::Error::other(format!(
-            "launchctl print {target} failed (exit {code})"
-        ))),
-    }
-}
-
-fn wait_for_registration(
-    control: &mut impl ServiceControl,
-    target: &str,
-    expected: Registration,
-) -> io::Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while registration(control, target)? != expected {
-        if Instant::now() >= deadline {
-            let operation = match expected {
-                Registration::Present => "register",
-                Registration::Absent => "remove",
-            };
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!("timed out waiting for launchd to {operation} {target}"),
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    Ok(())
-}
-
-pub fn service_restart() -> io::Result<()> {
-    let plist_path = plist_path()?;
-    if !plist_path.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("service file '{}' is not installed", plist_path.display()),
-        ));
-    }
-
-    let uid = getuid();
-    let service_target = format!("gui/{}/{}", uid, WM_PLIST);
-    restart_service(&mut NativeServiceControl, &service_target)
-}
-
-fn restart_service(control: &mut impl ServiceControl, service_target: &str) -> io::Result<()> {
-    if !checkpoint_running_service(control, CHECKPOINT_TIMEOUT)? {
-        return control.start();
-    }
-    let code = control.launchctl(&["kickstart", "-k", service_target], false)?;
-    if code == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("kickstart -k failed (exit {})", code),
-        ))
-    }
-}
-
-pub fn service_stop() -> io::Result<()> {
-    let plist_path = plist_path()?;
-    if !plist_path.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("service file '{}' is not installed", plist_path.display()),
-        ));
-    }
-
-    let uid = getuid();
-    let service_target = format!("gui/{}/{}", uid, WM_PLIST);
-    let domain_target = format!("gui/{}", uid);
-
-    stop_service(
-        &mut NativeServiceControl,
-        &service_target,
-        &domain_target,
-        &plist_path,
-    )
-}
-
-fn stop_service(
-    control: &mut impl ServiceControl,
-    service_target: &str,
-    domain_target: &str,
-    plist_path: &Path,
-) -> io::Result<()> {
-    checkpoint_running_service(control, CHECKPOINT_TIMEOUT)?;
-
-    let is_bootstrapped = control.launchctl(&["print", service_target], true)?;
-
-    if is_bootstrapped != 0 {
-        let code = control.launchctl(&["kill", "SIGTERM", service_target], false)?;
-        if code == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("kill SIGTERM failed (exit {})", code),
-            ))
-        }
-    } else {
-        let code1 =
-            control.launchctl(&["bootout", domain_target, plist_path.to_str().unwrap()], false)?;
-        let code2 = control.launchctl(&["disable", service_target], false)?;
-
-        if code1 == 0 && code2 == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("bootout exit {}, disable exit {}", code1, code2),
-            ))
-        }
     }
 }
 
