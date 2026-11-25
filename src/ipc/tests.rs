@@ -13,7 +13,100 @@ use crate::actor::reactor::testing::{
 use crate::actor::reactor::{Event, Reactor};
 use crate::common::config::WorkspaceSelector;
 use crate::layout_engine::{LayoutCommand, LayoutEngine};
+use crate::sys::mach::{
+    MACH_RCV_MSG, mach_allocate_reply_port, mach_deallocate_reply_port, mach_msg,
+};
 use crate::sys::screen::SpaceId;
+
+#[test]
+fn config_ipc_queries_and_commands_complete_while_the_reactor_is_busy() {
+    struct ReplyPort(u32);
+    impl Drop for ReplyPort {
+        fn drop(&mut self) { unsafe { mach_deallocate_reply_port(self.0) } }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let (reactor_tx, _reactor_events) = crate::actor::channel();
+    let (events, _broadcasts) = crate::actor::channel();
+    let mut config = crate::common::config::Config::default();
+    config.settings.animate = true;
+    let config_tx = config_actor::ConfigActor::spawn_with_path(
+        config,
+        reactor_tx.clone(),
+        events,
+        directory.path().join("config.toml"),
+    );
+    let config_handler = ConfigRequestHandler { config_tx };
+    let (config_jobs, jobs) = bounded::<ConfigJob>(CONFIG_QUEUE_CAPACITY);
+    let worker = std::thread::spawn(move || {
+        while let Ok(mut job) = jobs.recv() {
+            let response = config_handler.handle_request(job.request);
+            send_encoded_response(job.destination.header_mut(), &response);
+        }
+    });
+    let handler = IpcRequestHandler {
+        reactor: Rc::new(RefCell::new(test_reactor())),
+        reactor_tx,
+        server_state: std::sync::Arc::new(subscriptions::ServerState::new()),
+        config_jobs,
+    };
+    let busy = handler.reactor.borrow_mut();
+    let port = ReplyPort(unsafe { mach_allocate_reply_port() }.unwrap());
+    let request = |json: &str| -> Value {
+        let mut header = mach_msg_header_t {
+            msgh_bits: 0,
+            msgh_size: 0,
+            msgh_remote_port: port.0,
+            msgh_local_port: 0,
+            msgh_voucher_port: 0,
+            msgh_id: 0,
+        };
+        handler.handle_message(json.as_bytes(), port.0, &mut header);
+        const MACH_RCV_TIMEOUT: u32 = 0x100;
+        let mut buffer = [0u64; 4096];
+        let received = buffer.as_mut_ptr().cast::<mach_msg_header_t>();
+        let status = unsafe {
+            mach_msg(
+                received,
+                MACH_RCV_MSG | MACH_RCV_TIMEOUT,
+                0,
+                size_of_val(&buffer) as u32,
+                port.0,
+                7000,
+                0,
+            )
+        };
+        assert_eq!(status, 0, "No Mach reply for {json}");
+        let payload = unsafe {
+            let length = (*received).msgh_size as usize - size_of::<mach_msg_header_t>();
+            std::slice::from_raw_parts(received.add(1).cast::<u8>(), length)
+        };
+        serde_json::from_slice(std::ffi::CStr::from_bytes_until_nul(payload).unwrap().to_bytes())
+            .unwrap()
+    };
+    let query = || request(r#""get_config""#);
+    assert_eq!(query()["data"]["settings"]["animate"], true);
+    assert_eq!(
+        request(r#"{"execute_command":{"command":{"config":{"set_animate":false}}}}"#),
+        json!({"data": "Config applied successfully"})
+    );
+    assert_eq!(query()["data"]["settings"]["animate"], false);
+    assert_eq!(
+        request(r#"{"execute_command":{"command":"{\"Config\":\"get_config\"}"}}"#),
+        json!({"data": "Config applied successfully"})
+    );
+    assert_eq!(
+        request(r#"{"execute_command":{"command":{"config":{"set_animation_fps":241}}}}"#),
+        json!({"error": {"message": "Invalid animation_fps value: 241. Must be between 0 and 240"}})
+    );
+    assert_eq!(
+        request(r#""get_binding_mode""#),
+        json!({"error": {"message": "Reactor is busy"}})
+    );
+    drop(busy);
+    drop(handler);
+    worker.join().unwrap();
+}
 
 fn save(reactor: &mut Reactor, path: &Path) -> WmResponse {
     let response = encode_reactor_response(reactor, WmRequest::ExecuteCommand {
