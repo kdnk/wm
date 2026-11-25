@@ -10,11 +10,8 @@
 compile_error!("wm-client only supports macOS");
 
 use std::collections::VecDeque;
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
-use std::mem::{MaybeUninit, size_of};
-use std::ptr::{addr_of_mut, copy_nonoverlapping};
+use std::ffi::CStr;
 use std::sync::Mutex;
-use std::thread;
 use std::time::{Duration, Instant};
 
 use serde::de::DeserializeOwned;
@@ -22,32 +19,13 @@ use serde_json::Value;
 use thiserror::Error;
 pub use wm_protocol::*;
 
-const MAX_MESSAGE_SIZE: usize = 262_144;
+mod mach;
 
-type KernReturn = c_int;
-type MachPort = u32;
-type MachMessageSize = u32;
-type MachMessageOption = u32;
+use mach::{MAX_MESSAGE_SIZE, REQUEST_TIMEOUT_MS, ReplyPort};
 
-const KERN_SUCCESS: KernReturn = 0;
-const MACH_SEND_MSG: MachMessageOption = 0x0000_0001;
-const MACH_RCV_MSG: MachMessageOption = 0x0000_0002;
-const MACH_SEND_TIMEOUT: MachMessageOption = 0x0000_0010;
-const MACH_RCV_TIMEOUT: MachMessageOption = 0x0000_0100;
-const MACH_SEND_TIMED_OUT: KernReturn = 0x1000_0004;
-const MACH_RCV_TIMED_OUT: KernReturn = 0x1000_4003;
-// The config worker can wait five seconds for disk I/O; leave time for its error reply.
-const REQUEST_TIMEOUT_MS: u32 = if cfg!(test) { 500 } else { 10_000 };
 /// Session request ids carry this bit so that, even after the sequence wraps, they stay
 /// clear of the small ids Mach reserves for kernel notifications (64-77) and MIG.
 const SESSION_REQUEST_ID_TAG: u32 = 0x4000_0000;
-const MACH_MSG_TYPE_COPY_SEND: u32 = 19;
-const MACH_MSG_TYPE_MAKE_SEND: u32 = 20;
-const MACH_PORT_RIGHT_RECEIVE: c_int = 1;
-const MACH_PORT_LIMITS_INFO: c_int = 1;
-const MACH_PORT_LIMITS_INFO_COUNT: u32 = 1;
-const MACH_PORT_QLIMIT_LARGE: u32 = 1024;
-const TASK_BOOTSTRAP_PORT: c_int = 4;
 
 #[derive(Debug, Error)]
 pub enum ClientError {
@@ -58,10 +36,7 @@ pub enum ClientError {
     #[error("invalid Mach service name")]
     InvalidServiceName,
     #[error("Mach operation {operation} failed with code {code}")]
-    Mach {
-        operation: &'static str,
-        code: KernReturn,
-    },
+    Mach { operation: &'static str, code: i32 },
     #[error("IPC payload exceeds the {MAX_MESSAGE_SIZE}-byte limit")]
     MessageTooLarge,
     #[error("Wm returned an empty response")]
@@ -96,13 +71,7 @@ impl WmMachClient {
     pub fn connect() -> Result<Self, ClientError> { Ok(Self) }
 
     /// Returns whether Wm's bootstrap service is currently registered.
-    pub fn is_available(&self) -> bool {
-        let service_port = service_name()
-            .ok()
-            .and_then(|name| unsafe { lookup_service(&name).ok() })
-            .map(ServicePort::new);
-        service_port.is_some()
-    }
+    pub fn is_available(&self) -> bool { mach::is_service_available() }
 
     /// Sends one request with a ten-second limit on each send and reply wait.
     pub fn send_request(&self, request: &WmRequest) -> Result<JsonWmResponse, ClientError> {
@@ -116,7 +85,7 @@ impl WmMachClient {
         request: &WmRequest,
     ) -> Result<WmResponse<T>, ClientError> {
         let request_json = serde_json::to_vec(request).map_err(ClientError::Encode)?;
-        let response = unsafe { send_request(&request_json, None)? };
+        let response = mach::request(&request_json, None)?;
         parse_json_payload(&response, "response")
     }
 
@@ -128,7 +97,7 @@ impl WmMachClient {
     ) -> Result<WmResponse<T>, ClientError> {
         let request_json = serde_json::to_vec(request).map_err(ClientError::Encode)?;
         let deadline = Instant::now() + timeout.min(Duration::from_millis(u32::MAX.into()));
-        let response = unsafe { send_request_until(&request_json, None, Some(deadline))? }.1;
+        let response = mach::request(&request_json, Some(deadline))?;
         parse_json_payload(&response, "response")
     }
 
@@ -250,18 +219,11 @@ impl WmMachClient {
 
     /// Subscribes to an event and returns a handle that blocks for future events.
     pub fn subscribe(&self, event: EventKind) -> Result<WmMachSubscription, ClientError> {
-        self.start_subscription::<Value>(WmRequest::Subscribe { event })
-            .map(|(_, subscription)| subscription)
-    }
-
-    fn start_subscription<T: DeserializeOwned>(
-        &self,
-        request: WmRequest,
-    ) -> Result<(T, WmMachSubscription), ClientError> {
-        let reply_port = ReplyPort::allocate(MACH_PORT_QLIMIT_LARGE)?;
-        let request_json = serde_json::to_vec(&request).map_err(ClientError::Encode)?;
-        let deadline = std::time::Instant::now() + Duration::from_millis(REQUEST_TIMEOUT_MS.into());
-        let mut payload = unsafe { send_request(&request_json, Some(reply_port.name))? };
+        let reply_port = ReplyPort::persistent()?;
+        let request_json =
+            serde_json::to_vec(&WmRequest::Subscribe { event }).map_err(ClientError::Encode)?;
+        let deadline = Instant::now() + Duration::from_millis(REQUEST_TIMEOUT_MS.into());
+        let mut payload = reply_port.send_subscription_request(&request_json)?;
         let mut pending = VecDeque::new();
         loop {
             let value: Value = parse_json_payload(&payload, "response")?;
@@ -269,21 +231,17 @@ impl WmMachClient {
             // can win the race with the config worker, including for ordinary subscribe.
             if value.get("type").is_some() {
                 pending.push_back(payload);
-                if std::time::Instant::now() >= deadline {
+                if Instant::now() >= deadline {
                     return Err(ClientError::RequestTimedOut);
                 }
-                let timeout = deadline
-                    .saturating_duration_since(std::time::Instant::now())
-                    .as_millis()
-                    .min(u32::MAX.into()) as u32;
-                payload = unsafe { receive_message(reply_port.name, Some(timeout))?.1 };
+                payload = reply_port.receive_payload(Some(deadline))?;
                 continue;
             }
-            return match parse_json_payload::<WmResponse<T>>(&payload, "response")? {
-                WmResponse::Success { data } => Ok((data, WmMachSubscription {
+            return match parse_json_payload::<JsonWmResponse>(&payload, "response")? {
+                WmResponse::Success { .. } => Ok(WmMachSubscription {
                     reply_port,
                     pending: Mutex::new(pending),
-                })),
+                }),
                 WmResponse::Error { error } => Err(ClientError::SubscriptionRejected(error)),
                 _ => Err(ClientError::UnknownResponse),
             };
@@ -294,7 +252,7 @@ impl WmMachClient {
     /// released or when the session is dropped (including process exit).
     pub fn window_management_session(&self) -> Result<WindowManagementSession, ClientError> {
         Ok(WindowManagementSession {
-            reply_port: ReplyPort::allocate(MACH_PORT_QLIMIT_LARGE)?,
+            reply_port: ReplyPort::persistent()?,
             sequence: 0,
         })
     }
@@ -342,11 +300,7 @@ impl WindowManagementSession {
     fn request(&mut self, request: WmRequest) -> Result<(), ClientError> {
         let id = self.next_request_id();
         let payload = serde_json::to_vec(&request).map_err(ClientError::Encode)?;
-        let port = self.reply_port.name;
-        let response = unsafe {
-            let first = send_request_with_id(&payload, Some((port, id)))?;
-            receive_reply(port, id, first)?
-        };
+        let response = self.reply_port.request(&payload, id)?;
         match parse_json_payload::<WmResponse>(&response, "response")? {
             WmResponse::Success { .. } => Ok(()),
             WmResponse::Error { error } => Err(ClientError::Server(error)),
@@ -383,7 +337,7 @@ impl WmMachSubscription {
         let pending = self.pending.lock().expect("subscription pending events").pop_front();
         let payload = match pending {
             Some(payload) => payload,
-            None => unsafe { receive_message(self.reply_port.name, None)?.1 },
+            None => self.reply_port.receive_payload(None)?,
         };
         parse_json_payload(&payload, "event")
     }
@@ -402,482 +356,9 @@ fn parse_json_payload<T: DeserializeOwned>(
     serde_json::from_slice(bytes).map_err(|source| ClientError::Decode { kind, source })
 }
 
-fn service_name() -> Result<CString, ClientError> {
-    let name = std::env::var("WM_BS_NAME").unwrap_or_else(|_| DEFAULT_SERVICE_NAME.to_owned());
-    CString::new(name).map_err(|_| ClientError::InvalidServiceName)
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-struct MachMessageHeader {
-    bits: u32,
-    size: MachMessageSize,
-    remote_port: MachPort,
-    local_port: MachPort,
-    voucher_port: MachPort,
-    id: i32,
-}
-
-#[repr(C)]
-struct InlineMessage {
-    header: MachMessageHeader,
-    data: [u8; MAX_MESSAGE_SIZE],
-}
-
-#[repr(C)]
-struct ReceiveBuffer {
-    message: InlineMessage,
-    trailer: [u8; 512],
-}
-
-/// Initializes only the inline message bytes declared in the Mach header.
-/// Keeping the maximum-sized storage uninitialized avoids clearing 256 KiB
-/// for every usually-small client request without introducing an allocation.
-unsafe fn prepare_inline_send(
-    storage: &mut MaybeUninit<InlineMessage>,
-    mut header: MachMessageHeader,
-    payload: &[u8],
-) -> *mut MachMessageHeader {
-    debug_assert!(payload.len() <= MAX_MESSAGE_SIZE);
-
-    let aligned_len = (payload.len() + 3) & !3;
-    header.size = (size_of::<MachMessageHeader>() + aligned_len) as u32;
-
-    let message = storage.as_mut_ptr();
-    let header_ptr = unsafe { addr_of_mut!((*message).header) };
-    unsafe { header_ptr.write(header) };
-
-    let data = unsafe { addr_of_mut!((*message).data) }.cast::<u8>();
-    unsafe { copy_nonoverlapping(payload.as_ptr(), data, payload.len()) };
-    if aligned_len > payload.len() {
-        unsafe {
-            std::ptr::write_bytes(
-                data.add(payload.len()),
-                0,
-                aligned_len.saturating_sub(payload.len()),
-            )
-        };
-    }
-
-    header_ptr
-}
-
-#[repr(C)]
-struct MachPortLimits {
-    queue_limit: u32,
-}
-
-#[link(name = "System", kind = "framework")]
-unsafe extern "C" {
-    fn mach_task_self() -> MachPort;
-    fn task_get_special_port(task: MachPort, which: c_int, port: *mut MachPort) -> KernReturn;
-    fn mach_port_allocate(task: MachPort, right: c_int, name: *mut MachPort) -> KernReturn;
-    fn mach_port_insert_right(
-        task: MachPort,
-        name: MachPort,
-        poly: MachPort,
-        disposition: c_int,
-    ) -> KernReturn;
-    fn mach_port_mod_refs(task: MachPort, name: MachPort, right: c_int, delta: c_int)
-    -> KernReturn;
-    fn mach_port_deallocate(task: MachPort, name: MachPort) -> KernReturn;
-    fn mach_port_set_attributes(
-        task: MachPort,
-        name: MachPort,
-        flavor: c_int,
-        info: *const c_void,
-        count: u32,
-    ) -> KernReturn;
-    fn mach_msg(
-        message: *mut MachMessageHeader,
-        option: MachMessageOption,
-        send_size: MachMessageSize,
-        receive_size: MachMessageSize,
-        receive_name: MachPort,
-        timeout: u32,
-        notify: MachPort,
-    ) -> KernReturn;
-    fn mach_msg_destroy(message: *mut MachMessageHeader) -> KernReturn;
-    fn bootstrap_look_up(
-        bootstrap_port: MachPort,
-        service_name: *const c_char,
-        service_port: *mut MachPort,
-    ) -> KernReturn;
-}
-
-#[derive(Debug)]
-struct ReplyPort {
-    name: MachPort,
-}
-
-struct ServicePort {
-    name: MachPort,
-}
-
-impl ServicePort {
-    fn new(name: MachPort) -> Self { Self { name } }
-}
-
-impl Drop for ServicePort {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = mach_port_deallocate(mach_task_self(), self.name);
-        }
-    }
-}
-
-impl ReplyPort {
-    fn allocate(queue_limit: u32) -> Result<Self, ClientError> {
-        unsafe {
-            let task = mach_task_self();
-            let mut name = 0;
-            let result = mach_port_allocate(task, MACH_PORT_RIGHT_RECEIVE, &mut name);
-            if result != KERN_SUCCESS {
-                return Err(ClientError::Mach {
-                    operation: "mach_port_allocate",
-                    code: result,
-                });
-            }
-
-            let limits = MachPortLimits { queue_limit };
-            let _ = mach_port_set_attributes(
-                task,
-                name,
-                MACH_PORT_LIMITS_INFO,
-                &limits as *const _ as *const c_void,
-                MACH_PORT_LIMITS_INFO_COUNT,
-            );
-
-            let result = mach_port_insert_right(task, name, name, MACH_MSG_TYPE_MAKE_SEND as c_int);
-            if result != KERN_SUCCESS {
-                let _ = mach_port_mod_refs(task, name, MACH_PORT_RIGHT_RECEIVE, -1);
-                let _ = mach_port_deallocate(task, name);
-                return Err(ClientError::Mach {
-                    operation: "mach_port_insert_right",
-                    code: result,
-                });
-            }
-            Ok(Self { name })
-        }
-    }
-}
-
-impl Drop for ReplyPort {
-    fn drop(&mut self) {
-        unsafe {
-            let task = mach_task_self();
-            let _ = mach_port_mod_refs(task, self.name, MACH_PORT_RIGHT_RECEIVE, -1);
-            let _ = mach_port_deallocate(task, self.name);
-        }
-    }
-}
-
-unsafe fn lookup_service(name: &CStr) -> Result<MachPort, ClientError> {
-    let mut bootstrap_port = 0;
-    let result = unsafe {
-        task_get_special_port(mach_task_self(), TASK_BOOTSTRAP_PORT, &mut bootstrap_port)
-    };
-    if result != KERN_SUCCESS {
-        return Err(ClientError::Mach {
-            operation: "task_get_special_port",
-            code: result,
-        });
-    }
-
-    let mut service_port = 0;
-    let result = unsafe { bootstrap_look_up(bootstrap_port, name.as_ptr(), &mut service_port) };
-    let _ = unsafe { mach_port_deallocate(mach_task_self(), bootstrap_port) };
-    if result != KERN_SUCCESS {
-        return Err(ClientError::ServiceUnavailable);
-    }
-    Ok(service_port)
-}
-
-unsafe fn find_service_once() -> Result<ServicePort, ClientError> {
-    #[cfg(test)]
-    if let port @ 1.. = tests::SERVICE.get() {
-        unsafe { mach_port_mod_refs(mach_task_self(), port, tests::MACH_PORT_RIGHT_SEND, 1) };
-        return Ok(ServicePort::new(port));
-    }
-    unsafe { lookup_service(&service_name()?).map(ServicePort::new) }
-}
-
-unsafe fn find_service_with_retry() -> Result<ServicePort, ClientError> {
-    for attempt in 0..5 {
-        match unsafe { find_service_once() } {
-            Ok(port) => return Ok(port),
-            Err(ClientError::InvalidServiceName) => return Err(ClientError::InvalidServiceName),
-            Err(_) => {}
-        }
-        thread::sleep(Duration::from_millis(50 * (1 << attempt)));
-    }
-    Err(ClientError::ServiceUnavailable)
-}
-
-unsafe fn send_request(
-    payload: &[u8],
-    subscription_port: Option<MachPort>,
-) -> Result<Vec<u8>, ClientError> {
-    let reply = subscription_port.map(|port| (port, port as i32));
-    Ok(unsafe { send_request_with_id(payload, reply)? }.1)
-}
-
-/// Sends on a persistent `(port, id)` reply destination, or a one-shot port.
-unsafe fn send_request_with_id(
-    payload: &[u8],
-    persistent: Option<(MachPort, i32)>,
-) -> Result<(i32, Vec<u8>), ClientError> {
-    unsafe { send_request_until(payload, persistent, None) }
-}
-
-fn request_timeout(deadline: Option<Instant>) -> Result<u32, ClientError> {
-    let Some(deadline) = deadline else {
-        return Ok(REQUEST_TIMEOUT_MS);
-    };
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    if remaining.is_zero() {
-        return Err(ClientError::RequestTimedOut);
-    }
-    Ok(remaining.as_millis().saturating_add(1).min(u32::MAX.into()) as u32)
-}
-
-unsafe fn send_request_until(
-    payload: &[u8],
-    persistent: Option<(MachPort, i32)>,
-    deadline: Option<Instant>,
-) -> Result<(i32, Vec<u8>), ClientError> {
-    if payload.len() > MAX_MESSAGE_SIZE {
-        return Err(ClientError::MessageTooLarge);
-    }
-
-    let service_port = if deadline.is_some() {
-        unsafe { find_service_once()? }
-    } else {
-        unsafe { find_service_with_retry()? }
-    };
-    let owned_reply_port;
-    let (reply_port, id) = match persistent {
-        Some(reply) => reply,
-        None => {
-            owned_reply_port = ReplyPort::allocate(1)?;
-            (owned_reply_port.name, owned_reply_port.name as i32)
-        }
-    };
-
-    let header = MachMessageHeader {
-        bits: message_bits(
-            MACH_MSG_TYPE_COPY_SEND,
-            if persistent.is_some() {
-                MACH_MSG_TYPE_COPY_SEND
-            } else {
-                MACH_MSG_TYPE_MAKE_SEND
-            },
-        ),
-        size: 0,
-        remote_port: service_port.name,
-        local_port: reply_port,
-        voucher_port: 0,
-        id,
-    };
-    let mut storage = MaybeUninit::<InlineMessage>::uninit();
-    let header_ptr = unsafe { prepare_inline_send(&mut storage, header, payload) };
-    let send_size = unsafe { (*header_ptr).size };
-
-    let result = unsafe {
-        mach_msg(
-            header_ptr,
-            MACH_SEND_MSG | MACH_SEND_TIMEOUT,
-            send_size,
-            0,
-            0,
-            request_timeout(deadline)?,
-            0,
-        )
-    };
-    if result == MACH_SEND_TIMED_OUT {
-        // The kernel returns an unsent message's rights: mach_msg_destroy releases the
-        // destination (remote) right but not the reply (local) right.
-        unsafe {
-            let _ = mach_port_deallocate(mach_task_self(), (*header_ptr).local_port);
-            mach_msg_destroy(header_ptr);
-        }
-        return Err(ClientError::RequestTimedOut);
-    }
-    if result != KERN_SUCCESS {
-        return Err(ClientError::Mach {
-            operation: "mach_msg(send)",
-            code: result,
-        });
-    }
-
-    unsafe { receive_message(reply_port, Some(request_timeout(deadline)?)) }
-}
-
-/// Returns the message id (echoed from the request by replies) and payload.
-unsafe fn receive_message(
-    reply_port: MachPort,
-    timeout: Option<u32>,
-) -> Result<(i32, Vec<u8>), ClientError> {
-    // The kernel initializes the received header, payload, and trailer. Leave
-    // the maximum-sized backing storage untouched until then.
-    let mut buffer = MaybeUninit::<ReceiveBuffer>::uninit();
-    let buffer_ptr = buffer.as_mut_ptr();
-    let header_ptr = unsafe { addr_of_mut!((*buffer_ptr).message.header) };
-    let result = unsafe {
-        mach_msg(
-            header_ptr,
-            MACH_RCV_MSG
-                | if timeout.is_some() {
-                    MACH_RCV_TIMEOUT
-                } else {
-                    0
-                },
-            0,
-            size_of::<ReceiveBuffer>() as u32,
-            reply_port,
-            timeout.unwrap_or(0),
-            0,
-        )
-    };
-    if result == MACH_RCV_TIMED_OUT {
-        return Err(ClientError::RequestTimedOut);
-    }
-    if result != KERN_SUCCESS {
-        return Err(ClientError::Mach {
-            operation: "mach_msg(receive)",
-            code: result,
-        });
-    }
-
-    let payload_len = unsafe { (*header_ptr).size }
-        .saturating_sub(size_of::<MachMessageHeader>() as u32) as usize;
-    if payload_len > MAX_MESSAGE_SIZE {
-        unsafe { mach_msg_destroy(header_ptr) };
-        return Err(ClientError::MessageTooLarge);
-    }
-    let data = unsafe { addr_of_mut!((*buffer_ptr).message.data) }.cast::<u8>();
-    let payload = unsafe { std::slice::from_raw_parts(data, payload_len) }.to_vec();
-    let id = unsafe { (*header_ptr).id };
-    unsafe { mach_msg_destroy(header_ptr) };
-    Ok((id, payload))
-}
-
-/// Receives until the reply to request `id`, discarding replies to abandoned requests.
-unsafe fn receive_reply(
-    port: MachPort,
-    id: i32,
-    (mut reply_id, mut payload): (i32, Vec<u8>),
-) -> Result<Vec<u8>, ClientError> {
-    let deadline = std::time::Instant::now() + Duration::from_millis(REQUEST_TIMEOUT_MS.into());
-    while reply_id != id {
-        let timeout = deadline
-            .saturating_duration_since(std::time::Instant::now())
-            .as_millis()
-            .min(u32::MAX.into()) as u32;
-        (reply_id, payload) = unsafe { receive_message(port, Some(timeout))? };
-    }
-    Ok(payload)
-}
-
-const fn message_bits(remote: u32, local: u32) -> u32 { remote | (local << 8) }
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn bootstrap_service_name_uses_the_wm_namespace() {
-        let expected = std::env::var("WM_BS_NAME").unwrap_or_else(|_| "git.kdnk.wm".to_owned());
-        assert_eq!(service_name().unwrap().to_str().unwrap(), expected);
-    }
-
-    #[test]
-    fn inline_send_initializes_header_payload_and_padding() {
-        let payload = b"hello";
-        let header = MachMessageHeader {
-            bits: 7,
-            size: 0,
-            remote_port: 11,
-            local_port: 13,
-            voucher_port: 0,
-            id: 17,
-        };
-        let mut storage = MaybeUninit::<InlineMessage>::uninit();
-        let header_ptr = unsafe { prepare_inline_send(&mut storage, header, payload) };
-
-        unsafe {
-            assert_eq!((*header_ptr).bits, 7);
-            assert_eq!((*header_ptr).remote_port, 11);
-            assert_eq!((*header_ptr).local_port, 13);
-            assert_eq!((*header_ptr).id, 17);
-            assert_eq!((*header_ptr).size as usize, size_of::<MachMessageHeader>() + 8);
-
-            let data = addr_of_mut!((*storage.as_mut_ptr()).data).cast::<u8>();
-            assert_eq!(std::slice::from_raw_parts(data, 8), b"hello\0\0\0");
-        }
-    }
-
-    pub(super) const MACH_PORT_RIGHT_SEND: c_int = 0;
-    const OK: &[u8] = b"{\"data\":null}\0";
-
-    thread_local! {
-        /// Requests from this thread go to this port instead of Wm's bootstrap service.
-        pub(super) static SERVICE: std::cell::Cell<MachPort> = const { std::cell::Cell::new(0) };
-    }
-
-    /// Sends a message to `port` as a Wm reply would.
-    fn deliver(port: MachPort, id: i32, payload: &[u8]) {
-        let header = MachMessageHeader {
-            bits: message_bits(MACH_MSG_TYPE_COPY_SEND, 0),
-            size: 0,
-            remote_port: port,
-            local_port: 0,
-            voucher_port: 0,
-            id,
-        };
-        let mut storage = MaybeUninit::<InlineMessage>::uninit();
-        unsafe {
-            let message = prepare_inline_send(&mut storage, header, payload);
-            assert_eq!(
-                mach_msg(message, MACH_SEND_MSG, (*message).size, 0, 0, 0, 0),
-                KERN_SUCCESS
-            );
-        }
-    }
-
-    /// Serves `count` requests on a fake Wm service port for this thread's clients.
-    fn serve(
-        count: usize,
-        mut respond: impl FnMut(i32, MachPort, WmRequest) + Send + 'static,
-    ) -> (ReplyPort, thread::JoinHandle<()>) {
-        let service = ReplyPort::allocate(MACH_PORT_QLIMIT_LARGE).unwrap();
-        let port = service.name;
-        SERVICE.set(port);
-        let server = thread::spawn(move || {
-            for _ in 0..count {
-                let mut buffer = [0u64; 512];
-                let header = buffer.as_mut_ptr().cast::<MachMessageHeader>();
-                let options = MACH_RCV_MSG | MACH_RCV_TIMEOUT;
-                let size = size_of_val(&buffer) as u32;
-                assert_eq!(
-                    unsafe { mach_msg(header, options, 0, size, port, 2_000, 0) },
-                    KERN_SUCCESS
-                );
-                let (id, reply, len) =
-                    unsafe { ((*header).id, (*header).remote_port, (*header).size) };
-                let body = unsafe {
-                    std::slice::from_raw_parts(
-                        header.add(1).cast::<u8>(),
-                        len as usize - size_of::<MachMessageHeader>(),
-                    )
-                };
-                let json = body.split(|&byte| byte == 0).next().unwrap();
-                respond(id, reply, serde_json::from_slice(json).unwrap());
-                unsafe { mach_msg_destroy(header) };
-            }
-        });
-        (service, server)
-    }
 
     #[test]
     fn window_claim_api_matches_pr_519() {
@@ -898,183 +379,6 @@ mod tests {
             ClientError::RequestTimedOut
         ));
         let _ = |window: WindowData| window.externally_managed;
-    }
-
-    #[test]
-    fn bounded_request_times_out_without_poisoning_the_next_reply() {
-        let mut first = true;
-        let (_service, server) = serve(2, move |id, reply, request| {
-            assert!(matches!(request, WmRequest::GetWorkspaces { space_id: None }));
-            if first {
-                first = false;
-            } else {
-                deliver(reply, id, b"{\"data\":true}\0");
-            }
-        });
-        let request = WmRequest::GetWorkspaces { space_id: None };
-        let timed_out: Result<WmResponse<bool>, _> =
-            WmMachClient.send_typed_request_with_timeout(&request, Duration::from_millis(5));
-        assert!(matches!(timed_out, Err(ClientError::RequestTimedOut)));
-        let result: WmResponse<bool> = WmMachClient
-            .send_typed_request_with_timeout(&request, Duration::from_secs(1))
-            .unwrap();
-        assert_eq!(result.into_result(), Ok(true));
-        server.join().unwrap();
-    }
-
-    #[test]
-    fn exhausted_deadline_does_not_send_a_request() {
-        let (_service, server) = serve(1, |id, reply, _| deliver(reply, id, OK));
-        let request = WmRequest::GetWorkspaces { space_id: None };
-        let timed_out: Result<WmResponse, _> =
-            WmMachClient.send_typed_request_with_timeout(&request, Duration::ZERO);
-        assert!(matches!(timed_out, Err(ClientError::RequestTimedOut)));
-        WmMachClient.send_request(&request).unwrap();
-        server.join().unwrap();
-    }
-
-    #[test]
-    fn subscription_keeps_events_received_before_acknowledgement_in_order() {
-        let (_service, server) = serve(1, |id, reply, request| {
-            assert!(matches!(request, WmRequest::Subscribe {
-                event: EventKind::ConfigChanged
-            }));
-            let event = |revision| {
-                let payload = format!("{{\"type\":\"config_changed\",\"revision\":{revision}}}\0");
-                deliver(reply, 0, payload.as_bytes());
-            };
-            event(1);
-            event(2);
-            deliver(reply, id, OK);
-            // Keep receives bounded even if the client drops both early events.
-            for revision in 3..=5 {
-                event(revision);
-            }
-        });
-        let subscription = WmMachClient.subscribe(EventKind::ConfigChanged).unwrap();
-        server.join().unwrap();
-        for revision in 1..=3 {
-            assert_eq!(subscription.recv_event().unwrap(), WmEvent::ConfigChanged {
-                revision
-            });
-        }
-    }
-
-    #[test]
-    fn session_request_ids_never_collide_with_notification_ids() {
-        let mut session = WmMachClient.window_management_session().unwrap();
-        for sequence in [
-            0,
-            63,
-            71,
-            72,
-            77,
-            0x3FFF_FFBF,
-            0x7FFF_FFFF,
-            0xBFFF_FFFF,
-            u32::MAX - 1,
-        ] {
-            session.sequence = sequence;
-            let id = session.next_request_id() as u32;
-            assert!(id >= SESSION_REQUEST_ID_TAG, "sequence {sequence} -> id {id:#x}");
-        }
-        // Wrapping continues with distinct ids.
-        session.sequence = u32::MAX - 1;
-        let ids = [(); 3].map(|_| session.next_request_id());
-        assert_eq!(ids, [
-            -1,
-            SESSION_REQUEST_ID_TAG as i32,
-            SESSION_REQUEST_ID_TAG as i32 + 1
-        ]);
-    }
-
-    #[test]
-    fn one_session_serves_hundreds_of_requests_across_wraparound() {
-        const REQUESTS: usize = 300;
-        let (_service, server) = serve(REQUESTS, |id, reply, request| {
-            // A server that recognized notifications by id alone would drop this request.
-            assert!(
-                !(64..=77).contains(&id),
-                "request id {id} is a Mach notification id"
-            );
-            assert!(matches!(
-                request,
-                WmRequest::ClaimWindow { .. } | WmRequest::ReleaseWindow { .. }
-            ));
-            deliver(reply, id, OK);
-        });
-        let mut session = WmMachClient.window_management_session().unwrap();
-        session.sequence = u32::MAX - (REQUESTS / 2) as u32;
-        let window = WindowId { pid: 1, idx: 1 };
-        for _ in 0..REQUESTS / 2 {
-            session.claim_window(window).unwrap();
-            session.release_window(window).unwrap();
-        }
-        server.join().unwrap();
-    }
-
-    #[test]
-    fn late_reply_after_timeout_is_not_taken_for_the_next_request() {
-        let mut abandoned = None;
-        let (_service, server) = serve(2, move |id, reply, _| {
-            // Answer the first request only after the client has given up on it.
-            if let Some(late) = abandoned.replace(id) {
-                deliver(reply, late, b"{\"error\":{\"message\":\"stale\"}}\0");
-                deliver(reply, id, OK);
-            }
-        });
-        let mut session = WmMachClient.window_management_session().unwrap();
-        let window = WindowId { pid: 1, idx: 1 };
-        assert!(matches!(
-            session.claim_window(window),
-            Err(ClientError::RequestTimedOut)
-        ));
-        session.claim_window(window).unwrap();
-        server.join().unwrap();
-    }
-
-    #[test]
-    fn full_service_queue_times_out_without_leaking_rights() {
-        unsafe extern "C" {
-            fn mach_port_get_refs(
-                task: MachPort,
-                name: MachPort,
-                right: c_int,
-                refs: *mut u32,
-            ) -> KernReturn;
-        }
-        let refs = |name| {
-            let mut refs = 0;
-            unsafe { mach_port_get_refs(mach_task_self(), name, MACH_PORT_RIGHT_SEND, &mut refs) };
-            refs
-        };
-        let service = ReplyPort::allocate(1).unwrap();
-        SERVICE.set(service.name);
-        deliver(service.name, 0, OK);
-        let mut session = WmMachClient.window_management_session().unwrap();
-        let before = (refs(service.name), refs(session.reply_port.name));
-        assert!(matches!(
-            session.claim_window(WindowId { pid: 1, idx: 1 }),
-            Err(ClientError::RequestTimedOut)
-        ));
-        assert_eq!((refs(service.name), refs(session.reply_port.name)), before);
-    }
-
-    #[test]
-    fn session_replies_are_matched_to_their_request() {
-        let session = WmMachClient.window_management_session().unwrap();
-        let port = session.reply_port.name;
-        // A reply to a timed-out request arrives before the current one.
-        deliver(port, 1, b"late\0");
-        deliver(port, 2, b"current\0");
-        deliver(port, 1, b"later\0");
-        unsafe {
-            let first = receive_message(port, Some(0)).unwrap();
-            assert_eq!(receive_reply(port, 2, first).unwrap(), b"current\0");
-            let first = receive_message(port, Some(0)).unwrap();
-            deliver(port, 3, b"next\0");
-            assert_eq!(receive_reply(port, 3, first).unwrap(), b"next\0\0\0\0");
-        }
     }
 
     #[test]
