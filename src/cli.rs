@@ -5,7 +5,8 @@ use std::process;
 
 use clap::{Parser, Subcommand};
 use objc2::MainThreadMarker;
-use serde::Serialize;
+use serde::de::value::{Error as DeserializeError, StrDeserializer};
+use serde::{Deserialize, Serialize};
 use wm_protocol::{DEFAULT_SERVICE_NAME, EventKind, WindowId, WmRequest, WmResponse};
 
 use self::execute::ExecuteArgs;
@@ -268,22 +269,12 @@ fn parse_window_id(input: &str) -> Result<WindowId, String> {
 }
 
 fn parse_event_kind(input: &str) -> Result<EventKind, String> {
-    match input.trim().to_ascii_lowercase().as_str() {
-        "workspace_changed" => Ok(EventKind::WorkspaceChanged),
-        "windows_changed" => Ok(EventKind::WindowsChanged),
-        "window_title_changed" => Ok(EventKind::WindowTitleChanged),
-        "focused_window_changed" => Ok(EventKind::FocusedWindowChanged),
-        "stacks_changed" => Ok(EventKind::StacksChanged),
-        "layout_changed" => Ok(EventKind::LayoutChanged),
-        "binding_mode_changed" => Ok(EventKind::BindingModeChanged),
-        "config_changed" => Ok(EventKind::ConfigChanged),
-        "selection_changed" => Ok(EventKind::SelectionChanged),
-        "*" => Ok(EventKind::All),
-        other => Err(format!(
-            "Invalid event '{}'; expected workspace_changed, windows_changed, window_title_changed, focused_window_changed, stacks_changed, layout_changed, selection_changed, binding_mode_changed, config_changed, or *",
-            other
-        )),
-    }
+    let event = input.trim().to_ascii_lowercase();
+    EventKind::deserialize(StrDeserializer::<DeserializeError>::new(&event)).map_err(|_| {
+        format!(
+            "Invalid event '{event}'; expected workspace_changed, windows_changed, window_title_changed, focused_window_changed, stacks_changed, layout_changed, selection_changed, binding_mode_changed, config_changed, or *"
+        )
+    })
 }
 
 fn write_json<T: Serialize>(value: &T, pretty: bool) -> io::Result<()> {
@@ -387,7 +378,7 @@ mod tests {
         };
         assert_eq!(query.into_request().unwrap(), WmRequest::GetBindingMode);
         assert_eq!(
-            parse_event_kind("binding_mode_changed").unwrap(),
+            parse_event_kind(" BINDING_MODE_CHANGED ").unwrap(),
             EventKind::BindingModeChanged
         );
     }
