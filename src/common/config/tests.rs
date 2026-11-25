@@ -1090,6 +1090,54 @@ fn ordered_display_preferences_round_trip_and_validate() {
 }
 
 #[test]
+fn editing_duplicate_workspace_rules_preserves_the_surviving_rows_comments() {
+    let original = "\
+[settings]
+[keys]
+[virtual_workspaces]
+mode = 'global'
+workspace_rules = [
+  # Layout override
+  { workspace = 0, layout = 'scrolling' },
+    # Display preference
+    { workspace = 0, display = 'right', layout = 'scrolling' },
+  # End of rules
+]
+";
+    let mut document = ConfigDocument::parse(original).unwrap();
+    document
+        .update(|source| {
+            source.virtual_workspaces.workspace_rules[1].display = Some(vec!["left".into()]);
+        })
+        .unwrap();
+    let with_display_edit = original.replace("display = 'right'", "display = \"left\"");
+    assert_eq!(document.to_string(), with_display_edit);
+
+    document
+        .update(|source| {
+            source.virtual_workspaces.workspace_rules.retain_mut(|rule| {
+                rule.layout = None;
+                rule.display.is_some()
+            });
+        })
+        .unwrap();
+    let expected = with_display_edit
+        .replace(
+            "  # Layout override\n  { workspace = 0, layout = 'scrolling' },\n",
+            "",
+        )
+        .replace(", layout = 'scrolling' }", "}");
+    assert_eq!(document.to_string(), expected);
+    assert_eq!(document.runtime().unwrap().virtual_workspaces.workspace_rules, [
+        WorkspaceLayoutRule {
+            workspace: WorkspaceSelector::Index(0),
+            layout: None,
+            display: Some(vec!["left".into()]),
+        }
+    ]);
+}
+
+#[test]
 fn workspace_names_reject_explicit_and_generated_collisions() {
     for names in [vec!["Main", "Dev", "Main"], vec!["Workspace 3"], vec![
         "",
