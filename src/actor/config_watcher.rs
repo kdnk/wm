@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
@@ -18,7 +18,8 @@ pub struct ConfigWatcher {
     file: PathBuf,
     real_file: Option<PathBuf>,
     real_file_id: Option<(u64, u64)>,
-    parents: HashSet<PathBuf>,
+    watcher: RecommendedWatcher,
+    registered_parents: HashSet<PathBuf>,
     last_text: Option<String>,
     config_tx: config_actor::Sender,
 }
@@ -38,7 +39,7 @@ impl ConfigWatcher {
     fn watch(
         config_tx: config_actor::Sender,
         file: PathBuf,
-    ) -> notify::Result<(Self, RecommendedWatcher, Receiver<Event>)> {
+    ) -> notify::Result<(Self, Receiver<Event>)> {
         // FSEvents reports absolute paths; preserve the final symlink itself.
         let file = std::path::absolute(file)?;
         let file = file
@@ -50,29 +51,30 @@ impl ConfigWatcher {
                     .map(|parent_path| parent_path.join(file.strip_prefix(parent).unwrap()))
             })
             .unwrap_or(file);
-        let mut actor = Self {
-            file,
-            real_file: None,
-            real_file_id: None,
-            parents: HashSet::new(),
-            last_text: None,
-            config_tx,
-        };
         let (tx, rx) = channel();
-        let mut watcher = notify::recommended_watcher(move |event| match event {
+        let watcher = notify::recommended_watcher(move |event| match event {
             Ok(event) => {
                 let _ = tx.send(event);
             }
             Err(error) => warn!("config-watcher: notification error: {error}"),
         })?;
-        actor.refresh_watches(&mut watcher)?;
-        Ok((actor, watcher, rx))
+        let mut actor = Self {
+            file,
+            real_file: None,
+            real_file_id: None,
+            watcher,
+            registered_parents: HashSet::new(),
+            last_text: None,
+            config_tx,
+        };
+        actor.refresh_watches()?;
+        Ok((actor, rx))
     }
 
     fn run(config_tx: config_actor::Sender, file: PathBuf) -> notify::Result<()> {
-        let (mut actor, mut watcher, rx) = Self::watch(config_tx, file)?;
-        while let Ok(event) = rx.recv() {
-            actor.handle_event(&mut watcher, &rx, event);
+        let (mut actor, events) = Self::watch(config_tx, file)?;
+        while let Ok(event) = events.recv() {
+            actor.handle_event(&events, event);
             if actor.config_tx.is_closed() {
                 break;
             }
@@ -80,25 +82,23 @@ impl ConfigWatcher {
         Ok(())
     }
 
-    fn handle_event(&mut self, watcher: &mut dyn Watcher, rx: &Receiver<Event>, event: Event) {
+    fn handle_event(&mut self, events: &Receiver<Event>, event: Event) {
         if !self.is_relevant(&event) {
             return;
         }
-        self.settle(rx);
-        // Watch parents rather than files: atomic saves replace the inode, and a
-        // deleted file must remain discoverable. Retargeted symlinks need new parents.
-        if let Err(error) = self.refresh_watches(watcher) {
+        self.settle(events);
+        if let Err(error) = self.refresh_watches() {
             warn!("config-watcher: failed to refresh watches: {error}");
         }
         self.reload_if_changed();
     }
 
-    fn settle(&self, rx: &Receiver<Event>) {
-        let mut deadline = std::time::Instant::now() + DEBOUNCE;
-        while std::time::Instant::now() < deadline {
-            match rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+    fn settle(&self, events: &Receiver<Event>) {
+        let mut deadline = Instant::now() + DEBOUNCE;
+        while Instant::now() < deadline {
+            match events.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
                 Ok(event) if self.is_relevant(&event) => {
-                    deadline = std::time::Instant::now() + DEBOUNCE;
+                    deadline = Instant::now() + DEBOUNCE;
                 }
                 Ok(_) => {}
                 Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
@@ -106,9 +106,10 @@ impl ConfigWatcher {
         }
     }
 
-    fn refresh_watches(&mut self, watcher: &mut dyn Watcher) -> notify::Result<()> {
+    fn refresh_watches(&mut self) -> notify::Result<()> {
         // Keep the last target when it disappears so recreation is still observed.
         let real_file = fs::canonicalize(&self.file).ok().or_else(|| self.real_file.clone());
+        // Watch directories so atomic replacements, deletions, and symlink retargeting stay visible.
         let parents: HashSet<_> = self
             .file
             .parent()
@@ -117,14 +118,14 @@ impl ConfigWatcher {
             .filter_map(|parent| parent.ancestors().find(|ancestor| ancestor.is_dir()))
             .map(PathBuf::from)
             .collect();
-        for dir in parents.difference(&self.parents).cloned().collect::<Vec<_>>() {
-            watcher.watch(&dir, RecursiveMode::NonRecursive)?;
+        for dir in parents.difference(&self.registered_parents).cloned().collect::<Vec<_>>() {
+            self.watcher.watch(&dir, RecursiveMode::NonRecursive)?;
             info!("watching {:?}", dir);
-            self.parents.insert(dir);
+            self.registered_parents.insert(dir);
         }
-        for dir in self.parents.difference(&parents).cloned().collect::<Vec<_>>() {
-            watcher.unwatch(&dir)?;
-            self.parents.remove(&dir);
+        for dir in self.registered_parents.difference(&parents).cloned().collect::<Vec<_>>() {
+            self.watcher.unwatch(&dir)?;
+            self.registered_parents.remove(&dir);
         }
         self.real_file_id = real_file
             .as_ref()
@@ -138,7 +139,7 @@ impl ConfigWatcher {
         event.paths.iter().any(|path| {
             self.file.starts_with(path)
                 || self.real_file.as_ref().is_some_and(|file| file.starts_with(path))
-                || self.parents.contains(path)
+                || self.registered_parents.contains(path)
                 || self
                     .real_file_id
                     .is_some_and(|id| fs::metadata(path).is_ok_and(|m| (m.dev(), m.ino()) == id))
@@ -201,14 +202,12 @@ impl ConfigWatcher {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
-    use std::time::Instant;
 
     use super::*;
     use crate::actor::{self, reactor};
 
     struct WatchingConfig {
         actor: ConfigWatcher,
-        watcher: RecommendedWatcher,
         events: Receiver<Event>,
         updates: actor::Receiver<reactor::Event>,
     }
@@ -222,15 +221,9 @@ mod tests {
                 actor::channel().0,
                 path.to_path_buf(),
             );
-            let (actor, watcher, events) =
-                ConfigWatcher::watch(config_tx, path.to_path_buf()).unwrap();
+            let (actor, events) = ConfigWatcher::watch(config_tx, path.to_path_buf()).unwrap();
             actor.query_config().unwrap();
-            Self {
-                actor,
-                watcher,
-                events,
-                updates,
-            }
+            Self { actor, events, updates }
         }
 
         fn await_animate(&mut self, expected: bool) {
@@ -246,7 +239,7 @@ mod tests {
                     .events
                     .recv_timeout(deadline.saturating_duration_since(Instant::now()))
                     .expect("filesystem changes must publish ConfigUpdated");
-                self.actor.handle_event(&mut self.watcher, &self.events, event);
+                self.actor.handle_event(&self.events, event);
             }
         }
     }
