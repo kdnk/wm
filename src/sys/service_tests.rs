@@ -137,6 +137,27 @@ fn start_waits_for_old_job_to_disappear_before_replacing_it() {
 }
 
 #[test]
+fn start_keeps_old_job_registered_if_checkpoint_fails() {
+    let mut control = FixtureControl {
+        checkpoint_error: true,
+        launchctl_exits: [0, 5].into(),
+        ..Default::default()
+    };
+    let error =
+        start_service(&mut control, "fixture", "domain", "fixture.plist", true).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "could not save layout; wm is still running: snapshot failed"
+    );
+    assert_eq!(control.calls, [
+        "print fixture",
+        "kickstart fixture",
+        "state",
+        "checkpoint"
+    ]);
+}
+
+#[test]
 fn service_list_distinguishes_live_and_idle_jobs() {
     assert_eq!(
         listed_service("PID\tStatus\tLabel\n123\t0\tgit.kdnk.wm\n").unwrap(),
@@ -268,6 +289,24 @@ fn stop_saves_before_signaling_an_unloaded_running_service() {
         "checkpoint",
         "print fixture",
         "kill SIGTERM fixture"
+    ]);
+}
+
+#[test]
+fn stop_disables_the_job_even_if_bootout_exits_unsuccessfully() {
+    let mut control = FixtureControl {
+        launchctl_exits: [0, 5, 6].into(),
+        ..Default::default()
+    };
+    let error =
+        stop_service(&mut control, "fixture", "domain", Path::new("fixture.plist")).unwrap_err();
+    assert_eq!(error.to_string(), "bootout exit 5, disable exit 6");
+    assert_eq!(control.calls, [
+        "state",
+        "checkpoint",
+        "print fixture",
+        "bootout domain fixture.plist",
+        "disable fixture",
     ]);
 }
 
