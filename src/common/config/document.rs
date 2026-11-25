@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::Path;
 
 use serde::Serialize;
-use toml_edit::{DocumentMut, Item, Table, TableLike};
+use toml_edit::{Array, DocumentMut, Item, Table, TableLike};
 
 use super::parse::parse_config_file;
 use super::{Config, ConfigSource};
@@ -89,7 +89,7 @@ impl ConfigDocument {
         edit(&mut source)?;
         let after = toml::Value::try_from(&source)?;
         let mut document = self.clone();
-        patch(
+        patch_table(
             document.document.as_table_mut(),
             before.as_table().unwrap(),
             after.as_table().unwrap(),
@@ -111,10 +111,7 @@ impl ConfigDocument {
                 if value.is_null() {
                     remove_value(table, part);
                 } else {
-                    let mut new = value.serialize(toml_edit::ser::ValueSerializer::new())?;
-                    if let Some(old) = table.get(part).and_then(Item::as_value) {
-                        *new.decor_mut() = old.decor().clone();
-                    }
+                    let new = value.serialize(toml_edit::ser::ValueSerializer::new())?;
                     insert_value(table, part, new);
                 }
                 break;
@@ -150,15 +147,17 @@ impl ConfigDocument {
     }
 }
 
-fn patch(
+fn patch_table(
     table: &mut dyn TableLike,
-    before: &toml::map::Map<String, toml::Value>,
-    after: &toml::map::Map<String, toml::Value>,
+    before: &toml::Table,
+    after: &toml::Table,
     path: &str,
     position: Option<isize>,
 ) -> anyhow::Result<()> {
     for key in before.keys().chain(after.keys().filter(|key| !before.contains_key(*key))) {
-        if before.get(key) == after.get(key) {
+        let old = before.get(key);
+        let new = after.get(key);
+        if old == new {
             continue;
         }
         // Supported legacy spelling must not leave two competing values behind.
@@ -167,7 +166,7 @@ fn patch(
         } else {
             key
         };
-        let Some(new) = after.get(key) else {
+        let Some(new) = new else {
             remove_value(table, actual);
             continue;
         };
@@ -201,10 +200,9 @@ fn patch(
                 .and_then(Table::position)
                 .or(position);
             if let Some(child) = table.get_mut(actual).and_then(Item::as_table_like_mut) {
-                let empty = toml::map::Map::new();
-                patch(
+                patch_table(
                     child,
-                    before.get(key).and_then(toml::Value::as_table).unwrap_or(&empty),
+                    old.and_then(toml::Value::as_table).unwrap_or(&toml::Table::new()),
                     new_table,
                     &if path.is_empty() {
                         key.clone()
@@ -218,137 +216,156 @@ fn patch(
         }
         let mut value = new.serialize(toml_edit::ser::ValueSerializer::new())?;
         if let Some(array) = value.as_array_mut() {
-            let old_array = table.get(actual).and_then(Item::as_array);
-            let old_values = before.get(key).and_then(toml::Value::as_array);
-            let new_values = new.as_array().unwrap();
-            let mut matched = Vec::new();
-            if key == "workspace_rules"
-                && let Some(values) = old_values
-            {
-                matched.resize(new_values.len(), None);
-                let mut used = vec![false; values.len()];
-                // Equal selector occurrence counts mean property edits, not row
-                // deletion. Pair them in source order. When clearing deletes empty
-                // rows, also match the surviving row with just that property removed.
-                for (index, new) in new_values.iter().enumerate() {
-                    let selector = new.get("workspace");
-                    let same_count = values
-                        .iter()
-                        .filter(|old| old.get("workspace") == selector)
-                        .count()
-                        == new_values.iter().filter(|new| new.get("workspace") == selector).count();
-                    if let Some(old) = values.iter().enumerate().position(|(i, old)| {
-                        !used[i]
-                            && if same_count {
-                                old.get("workspace") == selector
-                            } else {
-                                old == new
-                                    || ["layout", "display"].iter().any(|property| {
-                                        new.get(property).is_none()
-                                            && old.get(property).is_some()
-                                            && old
-                                                .as_table()
-                                                .unwrap()
-                                                .iter()
-                                                .filter(|(key, _)| key.as_str() != *property)
-                                                .eq(new.as_table().unwrap().iter())
-                                    })
-                            }
-                    }) {
-                        matched[index] = Some(old);
-                        used[old] = true;
-                    }
-                }
-                // Reserve unchanged occurrences before pairing edited selectors.
-                for (index, new) in new_values.iter().enumerate() {
-                    if matched[index].is_none()
-                        && let Some(old) = values.iter().enumerate().position(|(i, old)| {
-                            !used[i] && old.get("workspace") == new.get("workspace")
-                        })
-                    {
-                        matched[index] = Some(old);
-                        used[old] = true;
-                    }
-                }
-            }
-            for (index, element) in array.iter_mut().enumerate() {
-                let source = if key == "workspace_rules" {
-                    matched.get(index).copied().flatten()
-                } else {
-                    old_values
-                        .and_then(|values| values.iter().position(|old| old == &new_values[index]))
-                };
-                if let Some(old_index) =
-                    source.filter(|&old| old_values.unwrap()[old] == new_values[index])
-                    && let Some(old) = old_array.and_then(|array| array.get(old_index))
-                {
-                    *element = old.clone();
-                } else if key == "workspace_rules"
-                    && let Some(old_index) = source
-                    && let Some(old) = old_array.and_then(|array| array.get(old_index))
-                    && let Some(old_table) = old.as_inline_table()
-                {
-                    // Edit the same rule in place: retain its indentation, comments,
-                    // selector spelling and field order instead of reserializing it.
-                    let mut updated = old_table.clone();
-                    patch(
-                        &mut updated,
-                        old_values.unwrap()[old_index].as_table().unwrap(),
-                        new_values[index].as_table().unwrap(),
-                        "workspace_rules",
-                        None,
-                    )?;
-                    *element = toml_edit::Value::InlineTable(updated);
-                } else if matches!(
-                    key.as_str(),
-                    "workspace_names" | "app_rules" | "workspace_rules"
-                ) {
-                    element.decor_mut().set_prefix("\n\t");
-                }
-            }
-            if matches!(key.as_str(), "workspace_names" | "app_rules" | "workspace_rules")
-                && !array.is_empty()
-            {
-                if let Some(old) =
-                    old_array.filter(|old| key == "workspace_rules" && !old.is_empty())
-                {
-                    array.set_trailing(old.trailing().clone());
-                    array.set_trailing_comma(old.trailing_comma());
-                } else {
-                    array.set_trailing("\n");
-                }
-                // Without a trailing comma the newline before `]` is stored as the last
-                // element's suffix. Once that element is cloned into a non-final slot,
-                // the separator would land on its own line, and if it stays final it
-                // would duplicate the array's own trailing newline.
-                let last = array.len() - 1;
-                let trailing_newline = array.trailing().as_str().is_some_and(|t| t.contains('\n'));
-                for (index, element) in array.iter_mut().enumerate() {
-                    let blank_line_suffix =
-                        element.decor().suffix().and_then(|suffix| suffix.as_str()).is_some_and(
-                            |suffix| {
-                                suffix.contains('\n') && suffix.chars().all(char::is_whitespace)
-                            },
-                        );
-                    if blank_line_suffix && (index < last || trailing_newline) {
-                        element.decor_mut().set_suffix("");
-                    }
-                }
-            }
+            patch_array(
+                key,
+                array,
+                table.get(actual).and_then(Item::as_array),
+                old.and_then(toml::Value::as_array).map(Vec::as_slice).unwrap_or_default(),
+                new.as_array().unwrap(),
+            )?;
         }
-        if let Some(old) = table.get(actual).and_then(Item::as_value) {
-            *value.decor_mut() = old.decor().clone();
-        } else {
-            value.decor_mut().set_prefix(" ");
-        }
+        value.decor_mut().set_prefix(" ");
         insert_value(table, actual, value);
     }
     Ok(())
 }
 
+#[derive(PartialEq)]
+enum ArrayKind {
+    Inline,
+    Multiline,
+    WorkspaceRules,
+}
+
+fn patch_array(
+    key: &str,
+    array: &mut Array,
+    old_array: Option<&Array>,
+    before: &[toml::Value],
+    after: &[toml::Value],
+) -> anyhow::Result<()> {
+    let kind = match key {
+        "workspace_rules" => ArrayKind::WorkspaceRules,
+        "workspace_names" | "app_rules" => ArrayKind::Multiline,
+        _ => ArrayKind::Inline,
+    };
+    let workspace_sources = (kind == ArrayKind::WorkspaceRules && old_array.is_some())
+        .then(|| workspace_rule_sources(before, after));
+
+    for (index, element) in array.iter_mut().enumerate() {
+        let new = &after[index];
+        let source = old_array.and_then(|old_array| {
+            let index = match &workspace_sources {
+                Some(sources) => sources[index],
+                None => before.iter().position(|old| old == new),
+            }?;
+            old_array.get(index).map(|element| (&before[index], element))
+        });
+
+        if let Some((old, raw)) = source {
+            if old == new {
+                *element = raw.clone();
+                continue;
+            }
+            if kind == ArrayKind::WorkspaceRules
+                && let Some(old_table) = raw.as_inline_table()
+            {
+                let mut updated = old_table.clone();
+                patch_table(
+                    &mut updated,
+                    old.as_table().unwrap(),
+                    new.as_table().unwrap(),
+                    "workspace_rules",
+                    None,
+                )?;
+                *element = toml_edit::Value::InlineTable(updated);
+                continue;
+            }
+        }
+        if kind != ArrayKind::Inline {
+            element.decor_mut().set_prefix("\n\t");
+        }
+    }
+
+    if kind == ArrayKind::Inline || array.is_empty() {
+        return Ok(());
+    }
+    if let Some(old) = old_array.filter(|old| kind == ArrayKind::WorkspaceRules && !old.is_empty())
+    {
+        array.set_trailing(old.trailing().clone());
+        array.set_trailing_comma(old.trailing_comma());
+    } else {
+        array.set_trailing("\n");
+    }
+    // Without a trailing comma, the newline before `]` can belong to the last element.
+    // Drop it if a comma or the array's own trailing newline would now follow it.
+    let last = array.len() - 1;
+    let trailing_newline = array.trailing().as_str().is_some_and(|text| text.contains('\n'));
+    for (index, element) in array.iter_mut().enumerate() {
+        let blank_line_suffix = element
+            .decor()
+            .suffix()
+            .and_then(|suffix| suffix.as_str())
+            .is_some_and(|suffix| suffix.contains('\n') && suffix.chars().all(char::is_whitespace));
+        if blank_line_suffix && (index < last || trailing_newline) {
+            element.decor_mut().set_suffix("");
+        }
+    }
+    Ok(())
+}
+
+fn workspace_rule_sources(before: &[toml::Value], after: &[toml::Value]) -> Vec<Option<usize>> {
+    let mut matched = vec![None; after.len()];
+    let mut used = vec![false; before.len()];
+
+    for (index, new) in after.iter().enumerate() {
+        let selector = new.get("workspace");
+        let same_selector_count =
+            before.iter().filter(|old| old.get("workspace") == selector).count()
+                == after.iter().filter(|new| new.get("workspace") == selector).count();
+        if let Some(old) = before.iter().enumerate().position(|(i, old)| {
+            !used[i]
+                && if same_selector_count {
+                    old.get("workspace") == selector
+                } else {
+                    old == new
+                        || ["layout", "display"].into_iter().any(|property| {
+                            new.get(property).is_none()
+                                && old.get(property).is_some()
+                                && old
+                                    .as_table()
+                                    .unwrap()
+                                    .iter()
+                                    .filter(|(key, _)| key.as_str() != property)
+                                    .eq(new.as_table().unwrap().iter())
+                        })
+                }
+        }) {
+            matched[index] = Some(old);
+            used[old] = true;
+        }
+    }
+
+    for (matched, new) in matched.iter_mut().zip(after) {
+        if matched.is_none()
+            && let Some(old) = before
+                .iter()
+                .enumerate()
+                .position(|(i, old)| !used[i] && old.get("workspace") == new.get("workspace"))
+        {
+            *matched = Some(old);
+            used[old] = true;
+        }
+    }
+    matched
+}
+
 // Commented examples provide insertion anchors, never semantic values.
-fn insert_value(table: &mut dyn TableLike, key: &str, value: toml_edit::Value) {
+fn insert_value(table: &mut dyn TableLike, key: &str, mut value: toml_edit::Value) {
     if let Some(existing) = table.get_mut(key) {
+        if let Some(old) = existing.as_value() {
+            *value.decor_mut() = old.decor().clone();
+        }
         *existing = Item::Value(value);
         return;
     }
