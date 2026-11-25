@@ -36,21 +36,13 @@ fn config_ipc_queries_and_commands_complete_while_the_reactor_is_busy() {
         events,
         directory.path().join("config.toml"),
     );
-    let config_handler = ConfigRequestHandler { config_tx };
-    let (config_jobs, jobs) = bounded::<ConfigJob>(CONFIG_QUEUE_CAPACITY);
-    let worker = std::thread::spawn(move || {
-        while let Ok(mut job) = jobs.recv() {
-            let response = config_handler.handle_request(job.request);
-            send_encoded_response(job.destination.header_mut(), &response);
-        }
-    });
     let handler = IpcRequestHandler {
         reactor: Rc::new(RefCell::new(test_reactor())),
         reactor_tx,
         server_state: std::sync::Arc::new(subscriptions::ServerState::new()),
-        config_jobs,
+        config_worker: ConfigWorker::spawn(config_tx).unwrap(),
     };
-    let busy = handler.reactor.borrow_mut();
+    let _busy = handler.reactor.borrow_mut();
     let port = ReplyPort(unsafe { mach_allocate_reply_port() }.unwrap());
     let request = |json: &str| -> Value {
         let mut header = mach_msg_header_t {
@@ -77,10 +69,12 @@ fn config_ipc_queries_and_commands_complete_while_the_reactor_is_busy() {
             )
         };
         assert_eq!(status, 0, "No Mach reply for {json}");
-        let payload = unsafe {
-            let length = (*received).msgh_size as usize - size_of::<mach_msg_header_t>();
-            std::slice::from_raw_parts(received.add(1).cast::<u8>(), length)
+        let bytes = unsafe {
+            std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), size_of_val(&buffer))
         };
+        let size_offset = std::mem::offset_of!(mach_msg_header_t, msgh_size);
+        let (size, _) = bytes[size_offset..].split_first_chunk().unwrap();
+        let payload = &bytes[size_of::<mach_msg_header_t>()..u32::from_ne_bytes(*size) as usize];
         serde_json::from_slice(std::ffi::CStr::from_bytes_until_nul(payload).unwrap().to_bytes())
             .unwrap()
     };
@@ -103,9 +97,6 @@ fn config_ipc_queries_and_commands_complete_while_the_reactor_is_busy() {
         request(r#""get_binding_mode""#),
         json!({"error": {"message": "Reactor is busy"}})
     );
-    drop(busy);
-    drop(handler);
-    worker.join().unwrap();
 }
 
 fn save(reactor: &mut Reactor, path: &Path) -> WmResponse {

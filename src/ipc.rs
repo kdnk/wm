@@ -2,14 +2,13 @@
 use std::cell::RefCell;
 use std::ffi::c_char;
 use std::rc::Rc;
-use std::sync::mpsc::{RecvTimeoutError, SyncSender, sync_channel};
-use std::time::Duration;
+use std::sync::mpsc::sync_channel;
 
-use crossbeam_channel::{Sender as ConfigJobSender, TrySendError, bounded};
 use serde::Serialize;
 use tracing::{error, info, trace};
 
 pub mod cli_exec;
+mod config;
 pub mod protocol;
 pub mod subscriptions;
 
@@ -19,23 +18,17 @@ mod tests;
 pub use protocol::{WmCommand, WmRequest, WmResponse};
 pub use wm_client::{ClientError as WmMachClientError, WmMachClient, WmMachSubscription};
 
+use self::config::{ConfigRequest, ConfigWorker};
 use crate::actor::config as config_actor;
 use crate::actor::reactor::{self, Event, LayoutSaveKind};
 use crate::ipc::subscriptions::{PortLease, SharedServerState};
 use crate::model::window_store::ClaimOwner;
 use crate::sys::mach::{
-    OwnedMachReply, is_mach_server_registered, mach_msg_header_t, mach_server_install,
-    send_mach_reply,
+    is_mach_server_registered, mach_msg_header_t, mach_server_install, send_mach_reply,
 };
 
 type ClientPort = u32;
 
-struct ConfigJob {
-    request: WmRequest,
-    destination: OwnedMachReply,
-}
-
-const CONFIG_QUEUE_CAPACITY: usize = 8;
 const MAX_RESPONSE_SIZE: usize = 262_144;
 
 pub struct InstallRequest {
@@ -105,25 +98,14 @@ pub(crate) fn install_mach_server(reactor: Rc<RefCell<reactor::Reactor>>, reques
 
         let server_state: SharedServerState =
             std::sync::Arc::new(crate::ipc::subscriptions::ServerState::new());
-        let config_handler = ConfigRequestHandler { config_tx };
-        let (config_jobs, jobs) = bounded::<ConfigJob>(CONFIG_QUEUE_CAPACITY);
-        // Config has a different state owner and can wait for disk I/O. Keep
-        // that exceptional path bounded and off the reactor run loop.
-        std::thread::Builder::new()
-            .name("ipc-config".into())
-            .spawn(move || {
-                while let Ok(mut job) = jobs.recv() {
-                    let response = config_handler.handle_request(job.request);
-                    send_encoded_response(job.destination.header_mut(), &response);
-                }
-            })
+        let config_worker = ConfigWorker::spawn(config_tx)
             .map_err(|error| format!("Failed to spawn IPC config worker: {error}"))?;
 
         let handler = Box::new(IpcRequestHandler {
             reactor,
             reactor_tx,
             server_state: server_state.clone(),
-            config_jobs,
+            config_worker,
         });
         let context = Box::into_raw(handler);
         if !unsafe {
@@ -148,7 +130,7 @@ struct IpcRequestHandler {
     reactor: Rc<RefCell<reactor::Reactor>>,
     reactor_tx: reactor::Sender,
     server_state: SharedServerState,
-    config_jobs: ConfigJobSender<ConfigJob>,
+    config_worker: ConfigWorker,
 }
 
 impl IpcRequestHandler {
@@ -198,12 +180,13 @@ impl IpcRequestHandler {
         trace!(?request, client_port, "Handling IPC request");
 
         let response = match request {
-            request @ (WmRequest::GetConfig
-            | WmRequest::ExecuteCommand {
-                command: wm_protocol::WmCommand::Config(_),
-            }) => {
-                self.dispatch_config_request(request, header);
-                return;
+            WmRequest::GetConfig => {
+                return self.config_worker.dispatch(ConfigRequest::Query, header);
+            }
+            WmRequest::ExecuteCommand {
+                command: WmCommand::Config(command),
+            } => {
+                return self.config_worker.dispatch(ConfigRequest::Apply(command), header);
             }
             WmRequest::Subscribe { event } => {
                 if self.server_state.subscribe_client(client_port, event.to_string()) {
@@ -259,25 +242,6 @@ impl IpcRequestHandler {
             },
         };
         send_encoded_response(header, &response);
-    }
-
-    fn dispatch_config_request(&self, request: WmRequest, header: &mut mach_msg_header_t) {
-        let Some(destination) = (unsafe { OwnedMachReply::retain(header) }) else {
-            send_error_response(header, "Failed to retain IPC reply port");
-            return;
-        };
-        let job = ConfigJob { request, destination };
-        match self.config_jobs.try_send(job) {
-            Ok(()) => {}
-            Err(TrySendError::Full(mut job)) => send_error_response(
-                job.destination.header_mut(),
-                "Too many config requests in flight; try again",
-            ),
-            Err(TrySendError::Disconnected(mut job)) => send_error_response(
-                job.destination.header_mut(),
-                "Config request service is unavailable",
-            ),
-        }
     }
 }
 
@@ -464,57 +428,6 @@ fn handle_reactor_command(
     }
     reactor.handle_ipc_command(command);
     encode_success("Command executed successfully")
-}
-
-#[derive(Clone)]
-struct ConfigRequestHandler {
-    config_tx: config_actor::Sender,
-}
-
-impl ConfigRequestHandler {
-    fn perform<T>(
-        &self,
-        make_event: impl FnOnce(SyncSender<T>) -> config_actor::Event,
-    ) -> Result<T, String>
-    where
-        T: Send + 'static,
-    {
-        // Buffer one reply so the actor never waits for this worker to receive it.
-        let (response, result) = sync_channel(1);
-        self.config_tx
-            .try_send(make_event(response))
-            .map_err(|error| format!("Failed to send config query: {error}"))?;
-        result.recv_timeout(Duration::from_secs(5)).map_err(|error| match error {
-            RecvTimeoutError::Timeout => "Failed to get response: config actor timed out".into(),
-            RecvTimeoutError::Disconnected => {
-                "Failed to get response: config actor disconnected before replying".into()
-            }
-        })
-    }
-
-    fn handle_request(&self, request: WmRequest) -> Vec<u8> {
-        match request {
-            WmRequest::GetConfig => match self.perform(config_actor::Event::QueryConfig) {
-                Ok(config) => encode_success(config),
-                Err(error) => encode_error(serde_json::json!({
-                    "message": "Failed to get config response",
-                    "details": error,
-                })),
-            },
-            WmRequest::ExecuteCommand {
-                command: wm_protocol::WmCommand::Config(command),
-            } => match self
-                .perform(|response| config_actor::Event::ApplyConfig { cmd: command, response })
-            {
-                Ok(Ok(())) => encode_success("Config applied successfully"),
-                Ok(Err(message)) => encode_error(serde_json::json!({ "message": message })),
-                Err(error) => encode_error(serde_json::json!({
-                    "message": format!("Failed to apply config: {error}"),
-                })),
-            },
-            _ => unreachable!("only config requests are queued to config workers"),
-        }
-    }
 }
 
 unsafe extern "C" fn handle_mach_request_c(
