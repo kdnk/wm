@@ -56,7 +56,7 @@ fn live_state(window: WindowId) -> WindowState {
         is_manageable: true,
         manage_override: None,
         unmanaged: Default::default(),
-        has_following_dialog: false,
+        following_dialog: Default::default(),
     }
 }
 

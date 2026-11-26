@@ -1,5 +1,6 @@
 // Modified by kdnk for wm on 2026-11-19. Original attribution is preserved in LICENSE.
 use super::*;
+use crate::model::reactor::FollowingDialog;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct DialogParent {
@@ -33,7 +34,7 @@ impl Reactor {
             })
     }
 
-    pub(super) fn refresh_dialog_parents(&mut self) {
+    pub(super) fn refresh_dialog_parents(&mut self, refreshed_windows: &[WindowId]) {
         self.last_focused_editor
             .retain(|_, wid| self.state.windows.contains_window(*wid));
         self.dialog_parents.retain(|dialog, _| {
@@ -103,13 +104,25 @@ impl Reactor {
             .windows
             .iter_windows()
             .filter_map(|(wid, state)| {
-                let active = active_owners.contains(&wid);
-                (active != state.has_following_dialog).then_some((wid, active))
+                let previous = state.following_dialog;
+                let next = match previous {
+                    _ if active_owners.contains(&wid) => FollowingDialog::Active,
+                    FollowingDialog::Active => FollowingDialog::AwaitingOwnerRefresh,
+                    FollowingDialog::AwaitingOwnerRefresh if refreshed_windows.contains(&wid) => {
+                        FollowingDialog::None
+                    }
+                    _ => previous,
+                };
+                (next != previous).then_some((wid, next))
             })
             .collect();
-        for (wid, active) in changes {
+        let mut refresh_apps = HashSet::default();
+        for (wid, next) in changes {
             let was_admitted = self.state.windows.is_admitted(wid);
-            self.state.windows.window_mut(wid).unwrap().has_following_dialog = active;
+            self.state.windows.window_mut(wid).unwrap().following_dialog = next;
+            if next == FollowingDialog::AwaitingOwnerRefresh {
+                refresh_apps.insert(wid.pid);
+            }
             let admitted = self.state.windows.is_admitted(wid);
             if admitted != was_admitted
                 && let Some(space) = self.assigned_space_for_window_id(wid)
@@ -117,11 +130,15 @@ impl Reactor {
                 let event = if admitted {
                     LayoutEvent::WindowAdded(space, wid)
                 } else {
-                    self.request_window_inventory(wid.pid);
                     LayoutEvent::WindowSuspended(wid)
                 };
                 self.send_layout_event(event);
             }
+        }
+        for pid in refresh_apps {
+            // An inventory started before dismissal can still describe the modal owner and child.
+            self.window_inventory_manager.in_flight.remove(&pid);
+            self.request_window_inventory(pid);
         }
     }
 }
@@ -137,9 +154,7 @@ mod tests {
     };
     use crate::common::config::{AppWorkspaceRule, VirtualWorkspaceSettings};
 
-    fn projects() -> (Reactor, SpaceId, Apps) {
-        projects_with_windows(make_windows(2))
-    }
+    fn projects() -> (Reactor, SpaceId, Apps) { projects_with_windows(make_windows(2)) }
 
     fn projects_with_windows(windows: Vec<WindowInfo>) -> (Reactor, SpaceId, Apps) {
         let mut reactor = test_reactor_with_workspace_settings(&VirtualWorkspaceSettings {
@@ -238,11 +253,9 @@ mod tests {
             modal.is_standard = false;
             let picker_info = reactor.state.windows.window(picker).unwrap().info.clone();
             if modal_role_already_reported {
-                reactor.discover_test_windows(
-                    1,
-                    vec![(editor, modal.clone())],
-                    vec![editor, peer, picker],
-                );
+                reactor.discover_test_windows(1, vec![(editor, modal.clone())], vec![
+                    editor, peer, picker,
+                ]);
             }
 
             reactor.request_window_inventory(1);
@@ -491,7 +504,7 @@ mod tests {
             let neighbor = if native_parent { second } else { first };
             assert_eq!(reactor.dialog_parents[&dialog].window, owner);
             reactor.handle_event(Event::WindowServerFocusChanged(neighbor, space));
-            reactor.refresh_dialog_parents();
+            reactor.refresh_dialog_parents(&[]);
             let offset = reactor.dialog_parents[&dialog].offset_x;
             for (step, dx) in [120., -220., 100.].into_iter().enumerate() {
                 let mut target = reactor.state.windows.window(owner).unwrap().frame_monotonic;
@@ -521,7 +534,10 @@ mod tests {
                 assert!(reactor.state.windows.workspace_for_window(dialog).is_none());
             }
             reactor.handle_event(Event::WindowMinimized(dialog));
-            assert!(!reactor.state.windows.window(owner).unwrap().has_following_dialog);
+            assert_eq!(
+                reactor.state.windows.window(owner).unwrap().following_dialog,
+                FollowingDialog::AwaitingOwnerRefresh
+            );
             reactor.handle_event(Event::WindowDeminiaturized(dialog));
             reactor.handle_event(Event::WindowDestroyed(owner));
             assert_eq!(reactor.dialog_parents[&dialog].window, owner);

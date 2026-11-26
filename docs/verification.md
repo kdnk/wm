@@ -43,6 +43,8 @@ Run fixture commands from the repository root. Replace `NEW_DIRECTORY`, `REPORT.
 | Dialog following | `python3 tests/hover-focus-live-test.py --follow-parent --output NEW_DIRECTORY`, then check both IntelliJ search dialogs manually | Compare the native editor and dialog frames during and after scrolling. IntelliJ can report its tiled editor as an `AXDialog` while a picker is open. |
 | Width-command anchoring | `python3 tests/pointer-width-live-test.py --run --output NEW_DIRECTORY --video --trace-file TRACE` | Check both pointer-selected edges and arbitrary widths. Use the matching daemon's stderr log with info-level tracing. |
 
+For picker dismissal, use three half-width columns. Focus IntelliJ in the middle column with the editor on the right half of the display and the next column offscreen. Open Fuzzy Finder and press Escape. Repeat with Live Grep. Check that the editor regains focus and all three columns keep their original positions.
+
 For picker drags, measure the dialog's offset from its editor after mouse-up. IntelliJ can move the dialog a shorter distance than the pointer. Scroll away and back to check that wm restores the measured offset, including after a drag at a display edge. Check parking against the actual display edge because IntelliJ can clamp a fully offscreen AX position to a visible strip.
 
 For synthetic drags, identify fixture windows by PID and title. Confirm the intended fixture with WindowServer hit testing at the click point before posting mouse-down. A border can overlap the fixture in the window list while ignoring mouse input. Verify that the drag commits a layout change and that the test restores runtime settings, workspace, and cursor position even on failure.

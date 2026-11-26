@@ -81,6 +81,14 @@ pub(crate) struct UnmanagedWindowOptions {
     pub(crate) follow_parent: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum FollowingDialog {
+    #[default]
+    None,
+    Active,
+    AwaitingOwnerRefresh,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct WindowState {
     pub(crate) info: WindowInfo,
@@ -96,7 +104,7 @@ pub(crate) struct WindowState {
     pub(crate) manage_override: Option<bool>,
     pub(crate) unmanaged: UnmanagedWindowOptions,
     /// Some apps temporarily give a tiled editor AXDialog while its child is open.
-    pub(crate) has_following_dialog: bool,
+    pub(crate) following_dialog: FollowingDialog,
 }
 
 impl From<WindowInfo> for WindowState {
@@ -108,7 +116,7 @@ impl From<WindowInfo> for WindowState {
             native_transient: false,
             manage_override: None,
             unmanaged: UnmanagedWindowOptions::default(),
-            has_following_dialog: false,
+            following_dialog: FollowingDialog::None,
         }
     }
 }
@@ -138,7 +146,8 @@ impl WindowState {
         }
         let is_ax_dialog = self.info.ax_role.as_deref() == Some("AXWindow")
             && self.info.ax_subrole.as_deref() == Some("AXDialog");
-        if self.has_following_dialog && is_ax_dialog && !self.native_transient {
+        if self.following_dialog != FollowingDialog::None && is_ax_dialog && !self.native_transient
+        {
             return true;
         }
         let explicitly_managed_dialog = manage_override == Some(true)
@@ -201,7 +210,7 @@ mod tests {
         info.ax_subrole = Some("AXDialog".into());
         let mut editor = WindowState::from(info);
         assert!(!editor.is_admitted());
-        editor.has_following_dialog = true;
+        editor.following_dialog = FollowingDialog::Active;
         assert!(editor.is_admitted());
         assert!(!editor.is_admitted_with_override(Some(false)));
         editor.info.is_minimized = true;

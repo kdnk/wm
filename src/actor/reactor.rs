@@ -1466,9 +1466,7 @@ impl Reactor {
     fn handle_event(&mut self, event: Event) {
         let refresh_dialog_parents = matches!(
             event,
-            Event::ApplicationLaunched { .. }
-                | Event::WindowCreated(..)
-                | Event::WindowsDiscovered { .. }
+            Event::WindowCreated(..)
                 | Event::WindowTitleChanged(..)
                 | Event::WindowDestroyed(..)
                 | Event::WindowClosed(..)
@@ -1507,7 +1505,7 @@ impl Reactor {
             self.handle_event_traced(event);
         }
         if refresh_dialog_parents {
-            self.refresh_dialog_parents();
+            self.refresh_dialog_parents(&[]);
         }
         if let Some((native, space)) = pending_focus {
             let id = WindowServerId::new(native.idx.get());
@@ -5062,6 +5060,7 @@ impl Reactor {
                 self.transient_focus.ax(id, wid.pid, info, space);
             }
         }
+        let refreshed_windows: Vec<_> = new.iter().map(|(wid, _)| *wid).collect();
         let observed_windows = new
             .into_iter()
             .map(|(wid, info)| window_discovery::ObservedWindow { wid, info })
@@ -5148,6 +5147,7 @@ impl Reactor {
             },
         ));
         self.apply_event_outcome(outcome);
+        self.refresh_dialog_parents(&refreshed_windows);
     }
 
     fn best_space_for_window(
