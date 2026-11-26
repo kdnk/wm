@@ -138,6 +138,10 @@ mod tests {
     use crate::common::config::{AppWorkspaceRule, VirtualWorkspaceSettings};
 
     fn projects() -> (Reactor, SpaceId, Apps) {
+        projects_with_windows(make_windows(2))
+    }
+
+    fn projects_with_windows(windows: Vec<WindowInfo>) -> (Reactor, SpaceId, Apps) {
         let mut reactor = test_reactor_with_workspace_settings(&VirtualWorkspaceSettings {
             default_workspace_count: 2,
             app_rules: vec![AppWorkspaceRule {
@@ -152,7 +156,7 @@ mod tests {
         let space = SpaceId::new(1);
         let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1200., 800.));
         let mut apps = Apps::new();
-        apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(2));
+        apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, windows);
         (reactor, space, apps)
     }
 
@@ -179,6 +183,85 @@ mod tests {
         let mut target = frame(reactor, window);
         target.origin.x += dx;
         AnimationManager::instant_layout(reactor, space, &[(window, target)], None);
+    }
+
+    #[test]
+    fn closing_picker_keeps_the_editor_on_the_right() {
+        let mut windows = make_windows(3);
+        for info in &mut windows {
+            info.frame.size.width = 600.;
+        }
+        let (mut reactor, space, mut apps) = projects_with_windows(windows);
+        let left = WindowId::new(1, 1);
+        let editor = WindowId::new(1, 3);
+        let right = WindowId::new(1, 2);
+        for window in [left, editor] {
+            reactor.handle_event(Event::WindowServerFocusChanged(window, space));
+            apps.simulate_until_quiet(&mut reactor);
+        }
+        let frames = |r: &Reactor| [left, editor, right].map(|wid| frame(r, wid));
+        let before = frames(&reactor);
+        assert_eq!(before[1].origin.x, 600.);
+        let owner = reactor.test_window_server_id(editor);
+        let picker = open_picker(&mut reactor, 4, "Fuzzy Finder", Some(owner));
+        reactor.handle_event(Event::WindowServerFocusChanged(picker, space));
+        let mut standard = reactor.state.windows.window(editor).unwrap().info.clone();
+        standard.frame = before[1];
+        standard.ax_role = Some("AXWindow".into());
+        standard.ax_subrole = Some("AXStandardWindow".into());
+        let mut modal = standard.clone();
+        modal.ax_subrole = Some("AXDialog".into());
+        modal.is_standard = false;
+        reactor.discover_test_windows(1, vec![(editor, modal)], vec![left, right, picker]);
+        assert_eq!(frames(&reactor), before, "opening the picker");
+
+        reactor.handle_event(Event::WindowDestroyed(picker));
+        let after_close = frames(&reactor);
+        reactor.discover_test_windows(1, vec![(editor, standard)], vec![left, right]);
+        reactor.handle_event(Event::WindowServerFocusChanged(editor, space));
+        window_server::set_window_parent_override(WindowServerId::new(4), None);
+        assert_eq!(frames(&reactor), before, "returning focus to the editor");
+        assert_eq!(after_close, before, "dismissing the picker");
+    }
+
+    #[test]
+    fn only_post_dismissal_inventory_can_reclassify_the_editor() {
+        for modal_role_already_reported in [false, true] {
+            let (mut reactor, _space, _apps) = projects();
+            let editor = WindowId::new(1, 1);
+            let peer = WindowId::new(1, 2);
+            let owner = reactor.test_window_server_id(editor);
+            let picker = open_picker(&mut reactor, 3, "Live Grep", Some(owner));
+            let mut modal = reactor.state.windows.window(editor).unwrap().info.clone();
+            modal.ax_role = Some("AXWindow".into());
+            modal.ax_subrole = Some("AXDialog".into());
+            modal.is_standard = false;
+            let picker_info = reactor.state.windows.window(picker).unwrap().info.clone();
+            if modal_role_already_reported {
+                reactor.discover_test_windows(
+                    1,
+                    vec![(editor, modal.clone())],
+                    vec![editor, peer, picker],
+                );
+            }
+
+            reactor.request_window_inventory(1);
+            let before_close = reactor.window_inventory_manager.in_flight[&1];
+            reactor.handle_event(Event::WindowClosed(reactor.test_window_server_id(picker)));
+            reactor.handle_event(Event::WindowsDiscovered {
+                pid: 1,
+                token: before_close,
+                successful: true,
+                new: vec![(editor, modal.clone()), (picker, picker_info)],
+                known_visible: vec![editor, peer, picker],
+            });
+            assert!(!reactor.state.windows.contains_window(picker));
+            assert!(reactor.state.windows.is_admitted(editor));
+
+            reactor.discover_test_windows(1, vec![(editor, modal)], vec![editor, peer]);
+            window_server::set_window_parent_override(WindowServerId::new(3), None);
+            assert!(!reactor.state.windows.is_admitted(editor));
+        }
     }
 
     #[test]
